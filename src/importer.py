@@ -1,20 +1,26 @@
 import argparse
-from .base_command import BaseCommand
-from rich.console import Console
+import sqlite3
+
 import pandas as pd
+from rich.console import Console
+
+from src.db_create import DbCreate
+
+from .base_command import BaseCommand
+from .config import Config
 
 console = Console()
 
 
 class ImporterCommand(BaseCommand):
-    _NAME = "import"
-    _DESCRIPTION = "Imports stock tickers from an Excel file."
+    _NAME = 'import'
+    _DESCRIPTION = 'Imports stock tickers from an Excel file.'
 
     def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("--excel", help="import ticker symbols from an Excel file")
+        parser.add_argument('--excel', help='import ticker symbols from an Excel file')
 
     def handle(self, args: argparse.Namespace) -> None:
         excel_filename = args.excel
@@ -25,9 +31,14 @@ class ImporterCommand(BaseCommand):
         excel_file = filename
         df = pd.read_excel(excel_file)
 
-        # Convert to JSON
-        json_data = df.to_json(orient="records", indent=4)
+        # Ensure DataFrame has the required columns
+        required_columns = ['sector', 'subsector', 'tickers']
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError(f'Excel file must contain columns: {required_columns}')
 
-        # Save to a .json file
-        with open("output.json", "w") as f:
-            f.write(json_data)
+        # Save to SQLite database
+        table_name = 'sector'
+        with sqlite3.connect(Config.get_db_name()) as conn:
+            df[required_columns].to_sql(table_name, conn, if_exists='replace', index=False)
+
+        console.print(f'Imported {len(df)} records into {Config.get_db_name()}:{table_name}')

@@ -1,11 +1,12 @@
 import argparse
+
 from rich.console import Console
 
 console = Console()
 
 
 class CLI_Interface:
-    def add_command(self, name: str, handler: "BaseCommand", help_text: str) -> None:
+    def add_command(self, name: str, handler: 'BaseCommand', help_text: str) -> None:
         pass
 
 
@@ -31,4 +32,4 @@ class BaseCommand:
 
     def handle(self, args: argparse.Namespace) -> None:
         """The logic for handling the command."""
-        raise NotImplementedError("Subclasses must implement the handle() method.")
+        raise NotImplementedError('Subclasses must implement the handle() method.')

@@ -1,23 +1,23 @@
 import argparse
 
-from src.market_value import MarketValueCommand
-from src.rule_runner import RuleRunnerCommand
-from src.importer import ImporterCommand
 from src.base_command import BaseCommand, CLI_Interface
+from src.db_create import DbCreate
+from src.importer import ImporterCommand
+from src.market_value import MarketValueCommand
+from src.analyzer import AnalyzerCommand
+from src.ticker_fetcher import TickerFetcherCommand
 
 
 class CommandLineInterface(CLI_Interface):
-    """A command line interface to manage OpenTA running in Kubernetes"""
-
     def __init__(self) -> None:
         self.parser = argparse.ArgumentParser(
-            description="A command line interface to run the stock picker rules",
+            description='A command line interface to the stocks analyzer',
         )
-        self.subparsers = self.parser.add_subparsers(dest="command", help="Available commands")
+        self.subparsers = self.parser.add_subparsers(dest='command', help='Available commands')
 
         self.commands = {}
 
-    def add_command(self, name: str, handler: "BaseCommand", help_text: str) -> None:
+    def add_command(self, name: str, handler: 'BaseCommand', help_text: str) -> None:
         """Registers a new command to the CLI."""
         self.commands[name] = handler
         subparser = self.subparsers.add_parser(name, help=help_text)
@@ -34,12 +34,14 @@ class CommandLineInterface(CLI_Interface):
 
 def main() -> None:
     cli = CommandLineInterface()
-    RuleRunnerCommand().add_to_cli(cli)
+    DbCreate().add_to_cli(cli)
     ImporterCommand().add_to_cli(cli)
+    TickerFetcherCommand().add_to_cli(cli)
+    AnalyzerCommand().add_to_cli(cli)
     MarketValueCommand().add_to_cli(cli)
     cli.execute()
 
 
 # Main entry point
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
