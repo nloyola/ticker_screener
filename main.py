@@ -1,11 +1,12 @@
 import argparse
 
-from src.base_command import BaseCommand, CLI_Interface
-from src.db_create import DbCreate
-from src.importer import ImporterCommand
-from src.market_value import MarketValueCommand
-from src.analyzer import AnalyzerCommand
-from src.ticker_fetcher import TickerFetcherCommand
+from app.commands.analyzer import AnalyzerCommand
+from app.commands.base_command import BaseCommand, CLI_Interface
+from app.commands.db_init import DbInit
+from app.commands.importer import ImporterCommand
+from app.commands.market_value import MarketValueCommand
+from app.commands.ticker_fetcher import TickerFetcherCommand
+from app.wiring import build_container
 
 
 class CommandLineInterface(CLI_Interface):
@@ -33,11 +34,13 @@ class CommandLineInterface(CLI_Interface):
 
 
 def main() -> None:
+    container = build_container()
+
     cli = CommandLineInterface()
-    DbCreate().add_to_cli(cli)
-    ImporterCommand().add_to_cli(cli)
-    TickerFetcherCommand().add_to_cli(cli)
-    AnalyzerCommand().add_to_cli(cli)
+    DbInit().add_to_cli(cli)
+    ImporterCommand(container).add_to_cli(cli)
+    TickerFetcherCommand(container).add_to_cli(cli)
+    AnalyzerCommand(container).add_to_cli(cli)
     MarketValueCommand().add_to_cli(cli)
     cli.execute()
 

@@ -12,3 +12,4 @@ wheels/
 /*.json
 /*.xlsx
 /public/*.html
+/.mypy_cache/
