@@ -14,42 +14,29 @@ class SectorRepo:
         con.row_factory = sqlite3.Row
         return con
 
-    @staticmethod
-    def _tickers_to_str(tickers: list[str] | None) -> str | None:
-        return ','.join(tickers) if tickers else None
-
-    @staticmethod
-    def _tickers_from_str(s: str | None) -> list[str] | None:
-        return s.split(',') if s else None
-
-    def insert(self, sector: Sector) -> None:
+    def insert(self, sector: Sector) -> int | None:
         with self._connect() as con:
-            con.execute(
+            cur = con.execute(
                 """
-                INSERT INTO sector (sector, subsector, tickers)
-                VALUES (?, ?, ?)
+                INSERT INTO sector (sector)
+                VALUES (?)
                 """,
-                (
-                    sector.sector,
-                    sector.subsector,
-                    self._tickers_to_str(sector.tickers),
-                ),
+                (sector.sector,),
             )
+            return cur.lastrowid
 
     def all(self) -> Iterable[Sector]:
         with self._connect() as con:
             rows = con.execute(
                 """
-                SELECT sector, subsector, tickers, created_at
+                SELECT id, sector, created_at
                 FROM sector
-                ORDER BY sector, subsector
+                ORDER BY sector
                 """
             ).fetchall()
             for r in rows:
                 yield Sector(
                     sector=r['sector'],
-                    subsector=r['subsector'],
-                    tickers=self._tickers_from_str(r['tickers']),
                     created_at=r['created_at']
                     if isinstance(r['created_at'], datetime)
                     else datetime.fromisoformat(r['created_at']),
@@ -59,7 +46,7 @@ class SectorRepo:
         with self._connect() as con:
             rows = con.execute(
                 """
-                SELECT sector, subsector, tickers, created_at
+                SELECT id, sector, created_at
                 FROM sector
                 WHERE sector = ?
                 """,
@@ -67,9 +54,8 @@ class SectorRepo:
             ).fetchall()
             return [
                 Sector(
+                    id=r['id'],
                     sector=r['sector'],
-                    subsector=r['subsector'],
-                    tickers=self._tickers_from_str(r['tickers']),
                     created_at=r['created_at']
                     if isinstance(r['created_at'], datetime)
                     else datetime.fromisoformat(r['created_at']),

@@ -4,7 +4,14 @@ from datetime import date, datetime
 
 @dataclass(frozen=True)
 class Sector:
+    id: int
     sector: str
+    created_at: datetime = datetime.now()
+
+
+@dataclass(frozen=True)
+class Subsector:
+    sector_id: int
     subsector: str
     tickers: str
     created_at: datetime = datetime.now()

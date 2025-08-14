@@ -3,9 +3,21 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS sector (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        sector TEXT,
+       created_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+       UNIQUE(sector)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sector_secto ON sector(sector);
+
+CREATE TABLE IF NOT EXISTS subsector (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       sector_id INTEGER,
        subsector TEXT,
        tickers TEXT,
-       created_at TIMESTAMP NOT NULL DEFAULT (datetime('now'))
+       created_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+       FOREIGN KEY (sector_id) REFERENCES sector(id)
+           ON UPDATE CASCADE
+           ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS price_data (
