@@ -40,7 +40,7 @@ class PriceDataRepo:
         with self._connect() as con:
             row = con.execute(
                 """
-                SELECT ticker, date, close, volume
+                SELECT id, ticker, date, close, volume
                 FROM price_data
                 WHERE ticker = ? AND date = ?
                 """,
@@ -51,7 +51,7 @@ class PriceDataRepo:
     def all(self) -> Iterable[PriceData]:
         with self._connect() as con:
             rows = con.execute("""
-                SELECT ticker, date, close, volume
+                SELECT id, ticker, date, close, volume
                 FROM price_data
                 ORDER BY ticker, date
             """).fetchall()
@@ -62,7 +62,7 @@ class PriceDataRepo:
         with self._connect() as con:
             rows = con.execute(
                 """
-                SELECT ticker, date, close, volume
+                SELECT id, ticker, date, close, volume
                 FROM price_data
                 WHERE ticker = ?
                 ORDER BY date
@@ -76,7 +76,7 @@ class PriceDataRepo:
         with self._connect() as con:
             row = con.execute(
                 """
-                SELECT ticker, date, close, volume
+                SELECT id, ticker, date, close, volume
                 FROM price_data
                 WHERE ticker = ?
                 ORDER BY date DESC

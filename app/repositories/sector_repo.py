@@ -36,6 +36,7 @@ class SectorRepo:
             ).fetchall()
             for r in rows:
                 yield Sector(
+                    id=r['id'],
                     sector=r['sector'],
                     created_at=r['created_at']
                     if isinstance(r['created_at'], datetime)

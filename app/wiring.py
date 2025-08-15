@@ -6,6 +6,7 @@ from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.sector_repo import SectorRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.repositories.subsector_repo import SubsectorRepo
+from app.services.sector_service import SectorService
 
 # from app.price_data_repo import PriceDataRepo  # if you have one
 
@@ -24,4 +25,5 @@ def build_container() -> Container:
     c.register('price_data_repo', Singleton(lambda: PriceDataRepo(c.db_path)))
     c.register('stock_criteria_repo', Singleton(lambda: StockCriteriaRepo(c.db_path)))
 
+    c.register('sector_service', Singleton(lambda: SectorService(c)))
     return c

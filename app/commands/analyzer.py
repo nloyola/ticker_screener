@@ -117,6 +117,7 @@ class AnalyzerCommand(BaseCommand):
         )
 
         return StockCriteria(
+            id=0,
             ticker=ticker,
             price=round(price, 2),
             core_criteria_met=core_conditions_met,

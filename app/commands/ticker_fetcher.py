@@ -33,7 +33,7 @@ class TickerFetcherCommand(BaseCommand):
 
     def __init__(self, container: Container) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.sector_repo = container.sector_repo
+        self.sector_service = container.sector_service
         self.price_data_repo = container.price_data_repo
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
@@ -42,11 +42,7 @@ class TickerFetcherCommand(BaseCommand):
     def handle(self, args: argparse.Namespace) -> None:
         # print(f"args: {args}")
 
-        sectors = self.sector_repo.all()
-        # sectors = [
-        #     Sector(sector='Technology', subsector='1', tickers=['XOM', 'CVX', 'SU', 'CVE']),
-        #     Sector(sector='Healthcare', subsector='2', tickers=['JNJ', 'PFE', 'MRK']),
-        # ]
+        sectors = self.sector_service.get_all()
         sector_filter = args.sector.lower() if args.sector else None
 
         if sector_filter:
@@ -56,7 +52,8 @@ class TickerFetcherCommand(BaseCommand):
                 return
 
         for sector in sectors:
-            self.fetch_ticker_data(sector.tickers)
+            for subsector in sector.subsectors:
+                self.fetch_ticker_data(subsector.tickers)
 
     from datetime import datetime, timedelta
 
@@ -110,6 +107,7 @@ class TickerFetcherCommand(BaseCommand):
                     for dt, row in df.iterrows():
                         new_rows.append(
                             PriceData(
+                                id=0,
                                 ticker=ticker,
                                 date=dt.date(),  # datetime.date
                                 close=float(row['close']),
