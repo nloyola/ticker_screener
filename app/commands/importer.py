@@ -78,7 +78,7 @@ class ImporterCommand(BaseCommand):
         Inserts a subsector row. If your repo supports upsert or uniqueness
         constraints on (sector_id, subsector), you can switch to upsert here.
         """
-        model = Subsector(sector_id=sector_id, subsector=name, tickers=tickers_csv)
+        model = Subsector(id=0, sector_id=sector_id, subsector=name, tickers=tickers_csv)
         self.subsector_repo.insert(model)
 
     def excel_import(self, filename: str) -> None:
