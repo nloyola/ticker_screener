@@ -41,9 +41,9 @@ class TickerFetcher:
 
         for sector in sectors:
             for subsector in sector.subsectors:
-                self._fetch_ticker_data(subsector.tickers)
+                self._fetch_ticker_data(subsector.id, subsector.tickers)
 
-    def _fetch_ticker_data(self, tickers: list[str]) -> dict[str, DataFrame]:
+    def _fetch_ticker_data(self, subsector_id, tickers: list[str]) -> dict[str, DataFrame]:
         data: dict[str, DataFrame] = {}
         fresh_tickers: list[str] = []
 
@@ -52,13 +52,8 @@ class TickerFetcher:
             rows = list(self.price_data_repo.all_for_ticker(ticker))
             if rows:
                 df = (
-                    DataFrame(
-                        [
-                            {"date": r.date, "close": r.close, "volume": r.volume}
-                            for r in rows
-                        ]
-                    )
-                    .set_index("date")
+                    DataFrame([{'date': r.date, 'close': r.close, 'volume': r.volume} for r in rows])
+                    .set_index('date')
                     .sort_index()
                 )
                 data[ticker] = df
@@ -69,11 +64,11 @@ class TickerFetcher:
         if fresh_tickers:
             print(f'⬇️ Downloading data for tickers: {", ".join(fresh_tickers)}')
 
-            config = {"session": True, "api_key": Config.get_tiingo_api_key()}
+            config = {'session': True, 'api_key': Config.get_tiingo_api_key()}
             client = TiingoClient(config)
 
-            start = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
-            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+            end = datetime.now().strftime('%Y-%m-%d')
 
             new_rows: list[PriceData] = []
 
@@ -81,20 +76,20 @@ class TickerFetcher:
                 try:
                     df = client.get_dataframe(
                         ticker,
-                        frequency="daily",
+                        frequency='daily',
                         startDate=start,
                         endDate=end,
-                        columns="date,adjClose,adjVolume",
+                        columns='date,adjClose,adjVolume',
                     )
                     # Normalize column names to match schema
                     df.rename(
-                        columns={"adjClose": "close", "adjVolume": "volume"},
+                        columns={'adjClose': 'close', 'adjVolume': 'volume'},
                         inplace=True,
                     )
                     df.index = pd.to_datetime(df.index)  # ensure datetime index
 
                     # Keep only what we store
-                    df = df[["close", "volume"]].copy()
+                    df = df[['close', 'volume']].copy()
                     data[ticker] = df
 
                     # Prepare rows for bulk insert
@@ -102,15 +97,16 @@ class TickerFetcher:
                         new_rows.append(
                             PriceData(
                                 id=0,
+                                subsector_id=subsector_id,
                                 ticker=ticker,
                                 date=dt.date(),  # datetime.date
-                                close=float(row["close"]),
-                                volume=int(row["volume"]),
+                                close=float(row['close']),
+                                volume=int(row['volume']),
                             )
                         )
 
                 except Exception as e:
-                    print(f"⚠️ Error loading data for {ticker} from Tiingo: {e}")
+                    print(f'⚠️ Error loading data for {ticker} from Tiingo: {e}')
 
             # 3) Save all downloaded rows at once
             if new_rows:

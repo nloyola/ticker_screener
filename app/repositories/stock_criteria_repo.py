@@ -4,6 +4,7 @@ from collections.abc import Iterable, Iterator
 from app.models import StockCriteria
 
 COLUMNS = (
+    'subsector_id',
     'ticker',
     'price',
     'core_criteria_met',
@@ -50,6 +51,7 @@ def _as_float(v) -> float | None:
 def _row_values(sc: StockCriteria) -> tuple:
     # Convert to plain Python ints/floats; booleans -> 0/1
     return (
+        _as_int(sc.subsector_id),  # INTEGER
         sc.ticker,
         _as_float(sc.price),
         _as_int(sc.core_criteria_met),  # INTEGER

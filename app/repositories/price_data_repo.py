@@ -20,27 +20,27 @@ class PriceDataRepo:
         with self._connect() as con:
             con.execute(
                 """
-                INSERT OR REPLACE INTO price_data (ticker, date, close, volume)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (price_data.ticker, price_data.date, price_data.close, price_data.volume),
+                (price_data.subsector_id, price_data.ticker, price_data.date, price_data.close, price_data.volume),
             )
 
     def bulk_insert(self, items: Iterable[PriceData]) -> None:
         with self._connect() as con:
             con.executemany(
                 """
-                INSERT OR REPLACE INTO price_data (ticker, date, close, volume)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume)
+                VALUES (?, ?, ?, ?, ?)
             """,
-                [(p.ticker, p.date, p.close, p.volume) for p in items],
+                [(p.subsector_id, p.ticker, p.date, p.close, p.volume) for p in items],
             )
 
     def get(self, ticker: str, d: date) -> PriceData | None:
         with self._connect() as con:
             row = con.execute(
                 """
-                SELECT id, ticker, date, close, volume
+                SELECT id, subsector_id, ticker, date, close, volume
                 FROM price_data
                 WHERE ticker = ? AND date = ?
                 """,
@@ -51,7 +51,7 @@ class PriceDataRepo:
     def all(self) -> Iterable[PriceData]:
         with self._connect() as con:
             rows = con.execute("""
-                SELECT id, ticker, date, close, volume
+                SELECT id, subsector_id, ticker, date, close, volume
                 FROM price_data
                 ORDER BY ticker, date
             """).fetchall()
@@ -62,7 +62,7 @@ class PriceDataRepo:
         with self._connect() as con:
             rows = con.execute(
                 """
-                SELECT id, ticker, date, close, volume
+                SELECT id, subsector_id, ticker, date, close, volume
                 FROM price_data
                 WHERE ticker = ?
                 ORDER BY date
@@ -76,7 +76,7 @@ class PriceDataRepo:
         with self._connect() as con:
             row = con.execute(
                 """
-                SELECT id, ticker, date, close, volume
+                SELECT id, subsector_id, ticker, date, close, volume
                 FROM price_data
                 WHERE ticker = ?
                 ORDER BY date DESC

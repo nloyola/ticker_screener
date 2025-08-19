@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS subsector (
 
 CREATE TABLE IF NOT EXISTS price_data (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
+       subsector_id INTEGER,
        ticker TEXT,
        date TEXT,
        close REAL,
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS price_data (
 
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
+       subsector_id INTEGER,
        ticker TEXT NOT NULL,
        price REAL,
        core_criteria_met BOOLEAN,

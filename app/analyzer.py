@@ -37,6 +37,7 @@ class Analyzer:
         df = pd.DataFrame(
             [
                 {
+                    'subsector_id': r.subsector_id,
                     'ticker': r.ticker,
                     'date': r.date,
                     'close': r.close,
@@ -49,11 +50,12 @@ class Analyzer:
         df.sort_index(inplace=True)
 
         # Ensure dtypes
+        df['subsector_id'] = pd.to_numeric(df['subsector_id'], errors='coerce')
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce').astype('Int64')
 
         # Keep only what you need
-        return df[['close', 'volume']]
+        return df[['subsector_id', 'close', 'volume']]
 
     def analyze_ticker(self, ticker: str, df: pd.DataFrame) -> StockCriteria | None:
         if df.empty or len(df) < 60:
@@ -120,6 +122,7 @@ class Analyzer:
 
         return StockCriteria(
             id=0,
+            subsector_id=df['subsector_id'].iloc[-1].item(),
             ticker=ticker,
             price=round(price, 2),
             core_criteria_met=core_conditions_met,

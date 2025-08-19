@@ -21,6 +21,7 @@ class Subsector:
 @dataclass(frozen=True)
 class PriceData:
     id: int
+    subsector_id: int
     ticker: str
     date: date
     close: float
@@ -30,6 +31,7 @@ class PriceData:
 @dataclass(frozen=True)
 class StockCriteria:
     id: int
+    subsector_id: int
     ticker: str
     price: float | None = None
     core_criteria_met: bool | None = None
