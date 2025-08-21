@@ -5,7 +5,6 @@ from pandas import DataFrame
 from rich.console import Console
 from tiingo import TiingoClient
 
-from app.config import Config
 from app.container import Container
 from app.models import PriceData
 
@@ -27,6 +26,7 @@ class TickerFetcher:
     """
 
     def __init__(self, container: Container) -> None:
+        self.tiingo_api_key = container.tiingo_api_key
         self.sector_service = container.sector_service
         self.price_data_repo = container.price_data_repo
 
@@ -64,7 +64,7 @@ class TickerFetcher:
         if fresh_tickers:
             print(f'⬇️ Downloading data for tickers: {", ".join(fresh_tickers)}')
 
-            config = {'session': True, 'api_key': Config.get_tiingo_api_key()}
+            config = {'sessqion': True, 'api_key': self.tiingo_api_key}
             client = TiingoClient(config)
 
             start = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')

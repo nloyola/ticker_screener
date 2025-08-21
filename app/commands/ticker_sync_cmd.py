@@ -3,24 +3,22 @@ import argparse
 from rich.console import Console
 
 from app.container import Container
-from app.tickers import TickerFetcher
 
 from .base_command import BaseCommand
 
 console = Console()
 
 
-class TickerFetcherCommand(BaseCommand):
-    _NAME = 'ticker-fetcher'
-    _DESCRIPTION = 'fetches stock ticker price data'
+class TickerSyncCmd(BaseCommand):
+    _NAME = 'ticker-sync'
+    _DESCRIPTION = 'fetches all ticker symbols from Tiingo'
 
     def __init__(self, container: Container) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.fetcher = TickerFetcher(container)
+        self.ticker_sync = container.ticker_sync
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument('--sector', help='filter sectors by name (case-insensitive)')
 
     def handle(self, args: argparse.Namespace) -> None:
-        sector_filter = args.sector.lower() if args.sector else None
-        self.fetcher.fetch(sector_filter)
+        self.ticker_sync.sync()

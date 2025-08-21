@@ -2,12 +2,13 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import date, datetime
 
+from app.container import Container
 from app.models import PriceData
 
 
 class PriceDataRepo:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, container: Container):
+        self.db_path = container.db_path
 
     def _connect(self) -> sqlite3.Connection:
         sqlite3.register_adapter(date, lambda d: d.isoformat())

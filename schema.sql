@@ -1,5 +1,34 @@
 PRAGMA journal_mode = WAL;
 
+-- metadata table for simple key/value app state
+CREATE TABLE IF NOT EXISTS metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- keep updated_at fresh on updates
+CREATE TRIGGER IF NOT EXISTS trg_metadata_updated_at
+AFTER UPDATE ON metadata
+FOR EACH ROW BEGIN
+  UPDATE metadata
+  SET updated_at = CURRENT_TIMESTAMP
+  WHERE key = NEW.key;
+END;
+
+CREATE TABLE IF NOT EXISTS ticker (
+  ticker TEXT PRIMARY KEY,
+  last REAL,
+  prev_close REAL,
+  volume INTEGER,
+  bid_price REAL,
+  ask_price REAL,
+  timestamp TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ticker_volume ON ticker(volume);
+CREATE INDEX IF NOT EXISTS idx_ticker_timestamp ON ticker(timestamp);
+
 CREATE TABLE IF NOT EXISTS sector (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        sector TEXT,

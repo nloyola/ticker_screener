@@ -1,6 +1,7 @@
 import sqlite3
 from collections.abc import Iterable, Iterator
 
+from app.container import Container
 from app.models import StockCriteria
 
 COLUMNS = (
@@ -80,8 +81,8 @@ def _row_values(sc: StockCriteria) -> tuple:
 
 
 class StockCriteriaRepo:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, container: Container):
+        self.db_path = container.db_path
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path)

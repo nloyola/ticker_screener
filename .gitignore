@@ -13,3 +13,4 @@ wheels/
 /*.xlsx
 /public/*.html
 /.mypy_cache/
+/data/

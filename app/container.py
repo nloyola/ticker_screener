@@ -10,6 +10,14 @@ class Provider:
         raise NotImplementedError
 
 
+class Value(Provider):
+    def __init__(self, value: Any):
+        self._value = value
+
+    def get(self) -> Any:
+        return self._value
+
+
 class Singleton(Provider):
     def __init__(self, factory: Callable[[], Any]):
         self._factory = factory

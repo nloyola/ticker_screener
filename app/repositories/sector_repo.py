@@ -2,12 +2,13 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import datetime
 
+from app.container import Container
 from app.models import Sector
 
 
 class SectorRepo:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, container: Container):
+        self.db_path = container.db_path
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)

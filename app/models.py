@@ -2,6 +2,17 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 
+@dataclass
+class Ticker:
+    ticker: str
+    last: float | None
+    prev_close: float | None
+    volume: int | None
+    bid_price: float | None
+    ask_price: float | None
+    timestamp: str | None
+
+
 @dataclass(frozen=True)
 class Sector:
     id: int
