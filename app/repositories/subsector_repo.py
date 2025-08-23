@@ -63,3 +63,21 @@ class SubsectorRepo:
         with self._connect() as con:
             con.execute('DELETE FROM subsector')
             con.commit()
+
+    def get_by_ticker(self, ticker: str) -> Subsector | None:
+        """
+        Returns the Subsector that contains the given ticker, or None if not found.
+        Assumes subsector.tickers is a comma-separated string of tickers.
+        """
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                SELECT id, sector_id, subsector, tickers, created_at
+                FROM subsector
+                WHERE ',' || tickers || ',' LIKE ?
+                """,
+                (f'%,{ticker},%',),
+            )
+            row = cur.fetchone()
+            return Subsector(*row) if row else None

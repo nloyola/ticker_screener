@@ -1,23 +1,30 @@
+import logging
+from datetime import date, datetime
+from typing import TYPE_CHECKING
+
 import pandas as pd
-from rich.console import Console
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 from app.container import Container
 from app.models import StockCriteria
 
-console = Console()
+if TYPE_CHECKING:
+    from app.repositories.price_data_repo import PriceDataRepo
+    from app.repositories.stock_criteria_repo import StockCriteriaRepo
+
+logger = logging.getLogger(__name__)
 
 
 class Analyzer:
     def __init__(self, container: Container) -> None:
-        self.stock_criteria_repo = container.stock_criteria_repo
-        self.price_data_repo = container.price_data_repo
+        self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
+        self.price_data_repo: PriceDataRepo = container.price_data_repo
 
     def analyze(self) -> None:
         df = self.load_price_data()
         if df is None:
-            print('No price data found.')
+            logger.info('No price data found.')
             return
 
         # analyze each ticker -> StockCriteria | None
@@ -25,7 +32,8 @@ class Analyzer:
 
         # keep only real StockCriteria objects
         items: list[StockCriteria] = [sc for sc in results if sc is not None]
-        self.save_to_repository(items)
+        date_created = datetime.now().date()
+        self.save_to_repository(items, date_created)
 
     def load_price_data(self) -> pd.DataFrame | None:
         # Pull all rows via the repository
@@ -60,6 +68,8 @@ class Analyzer:
     def analyze_ticker(self, ticker: str, df: pd.DataFrame) -> StockCriteria | None:
         if df.empty or len(df) < 60:
             return None  # Not enough data
+
+        logger.info(f'generating criteria for {ticker}')
 
         # Technical indicators
         df['50dma'] = df['close'].rolling(window=50).mean()
@@ -149,9 +159,9 @@ class Analyzer:
             macd_bullish=int(macd_bullish),
         )
 
-    def save_to_repository(self, items: list[StockCriteria]) -> None:
+    def save_to_repository(self, items: list[StockCriteria], date_created: date) -> None:
         if not items:
             print('No valid results to save.')
             return
         print(f'saving {len(items)} criteria rows via StockCriteriaRepo')
-        self.stock_criteria_repo.bulk_insert(items)
+        self.stock_criteria_repo.bulk_insert(items, date_created)

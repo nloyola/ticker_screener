@@ -86,3 +86,17 @@ class PriceDataRepo:
                 (ticker,),
             ).fetchone()
             return PriceData(**row) if row else None
+
+    def delete_before(self, cutoff: date) -> int:
+        """
+        Delete all price_data rows earlier than cutoff date.
+        Returns the number of deleted rows.
+        """
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                'DELETE FROM price_data WHERE date < ?',
+                (cutoff,),
+            )
+            con.commit()
+            return cur.rowcount

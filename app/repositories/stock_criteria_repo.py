@@ -1,5 +1,6 @@
 import sqlite3
 from collections.abc import Iterable, Iterator
+from datetime import date
 
 from app.container import Container
 from app.models import StockCriteria
@@ -30,6 +31,7 @@ COLUMNS = (
     'dma_50_rising',
     'rsi_50_75',
     'macd_bullish',
+    'date_created',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -49,7 +51,7 @@ def _as_float(v) -> float | None:
     return float(v)
 
 
-def _row_values(sc: StockCriteria) -> tuple:
+def _row_values(sc: StockCriteria, date_created: date) -> tuple:
     # Convert to plain Python ints/floats; booleans -> 0/1
     return (
         _as_int(sc.subsector_id),  # INTEGER
@@ -77,6 +79,7 @@ def _row_values(sc: StockCriteria) -> tuple:
         _as_int(sc.dma_50_rising),  # INTEGER
         _as_int(sc.rsi_50_75),  # INTEGER
         _as_int(sc.macd_bullish),  # INTEGER
+        date_created,
     )
 
 
@@ -99,14 +102,14 @@ class StockCriteriaRepo:
         with self._connect() as con:
             con.execute(sql, _row_values(sc))
 
-    def bulk_insert(self, items: Iterable[StockCriteria]) -> None:
+    def bulk_insert(self, items: Iterable[StockCriteria], date_created: date) -> None:
         sql = f"""
-            INSERT INTO stock_criteria ({','.join(COLUMNS)})
-            VALUES ({PLACEHOLDERS})
-            ON CONFLICT(ticker) DO UPDATE SET
-            {','.join(f'{c}=excluded.{c}' for c in COLUMNS if c != 'ticker')}
+        INSERT INTO stock_criteria ({','.join(COLUMNS)})
+        VALUES ({PLACEHOLDERS})
+        ON CONFLICT(ticker) DO UPDATE SET
+        {','.join(f'{c}=excluded.{c}' for c in COLUMNS if c != 'ticker')}
         """
-        values = [_row_values(sc) for sc in items]
+        values = [_row_values(sc, date_created) for sc in items]
         with self._connect() as con:
             con.executemany(sql, values)
 

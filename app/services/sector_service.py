@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from app.container import Container
+from app.models import Subsector
+
+if TYPE_CHECKING:
+    from app.repositories.sector_repo import SectorRepo
+    from app.repositories.subsector_repo import SubsectorRepo
 
 
 @dataclass(frozen=True)
@@ -33,8 +39,8 @@ class SectorService:
     """
 
     def __init__(self, container: Container):
-        self._sectors = container.sector_repo
-        self._subsectors = container.subsector_repo
+        self._sectors: SectorRepo = container.sector_repo
+        self._subsectors: SubsectorRepo = container.subsector_repo
 
     def get_all(self) -> list[SectorAggregate]:
         """
@@ -67,6 +73,9 @@ class SectorService:
             )
 
         return aggregates
+
+    def subsector_for_ticker(self, ticker: str) -> Subsector:
+        return self._subsectors.get_by_ticker(ticker)
 
     @staticmethod
     def _parse_tickers(tickers: str | None) -> list[str]:
