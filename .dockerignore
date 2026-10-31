@@ -1,0 +1,12 @@
+# Build context for the screener image. An allow-list, so nothing that is not a
+# build input can reach the image: not .env, the database, the spreadsheet or
+# the virtualenv.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!main.py
+!schema.sql
+!app/
+!config/
+**/__pycache__
