@@ -3,11 +3,17 @@ import sys
 
 from dotenv import load_dotenv
 
-# is there input from stdin?
-if not sys.stdin.isatty():
-    load_dotenv(stream=sys.stdin)
-else:
-    load_dotenv()
+_REQUIRED_KEYS = ('TIINGO_API_KEY', 'DB_NAME')
+
+# When the environment already holds every key (the container sets them), it is
+# the whole configuration and stdin is left alone: a non-interactive run would
+# otherwise block reading an open stdin. Otherwise read a .env piped on stdin,
+# or the .env file.
+if not all(os.getenv(key) for key in _REQUIRED_KEYS):
+    if not sys.stdin.isatty():
+        load_dotenv(stream=sys.stdin)
+    else:
+        load_dotenv()
 
 
 class Config:
