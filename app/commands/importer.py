@@ -9,20 +9,16 @@ import pandas as pd
 
 from app.commands.base_command import BaseCommand
 from app.container import Container
-from app.models import Sector, Subsector
+from app.db import clear_market_data
 
 
 class ImporterCommand(BaseCommand):
     _NAME = 'import'
-    _DESCRIPTION = 'Imports sectors, subsectors, and tickers from an Excel file.'
+    _DESCRIPTION = 'Replaces all sectors, subsectors, and tickers with those in an Excel file.'
 
     def __init__(self, container: Container) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.sector_repo = container.sector_repo
-        self.subsector_repo = container.subsector_repo
-
-        # cache sector name → id to minimize DB lookups
-        self._sector_id_cache: dict[str, int] = {}
+        self.db = container.db
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
@@ -51,37 +47,12 @@ class ImporterCommand(BaseCommand):
             return None
         return ','.join(tickers)
 
-    def _get_or_create_sector_id(self, sector_name: str) -> int:
+    def _read_rows(self, filename: str) -> list[tuple[str, str | None, str | None]]:
         """
-        Returns sector.id for the given sector name, creating it if needed.
-        Caches results in-memory for performance.
+        Reads the spreadsheet into (sector, subsector, tickers_csv) rows, skipping
+        rows without a sector. Raises before the database is touched if the file
+        is missing a required column.
         """
-        key = sector_name.lower().strip()
-        if key in self._sector_id_cache:
-            return self._sector_id_cache[key]
-
-        # Try repo lookup (adjust to your API)
-        sectors = self.sector_repo.find(sector_name)
-        if len(sectors) > 0:
-            self._sector_id_cache[key] = sectors[0].id
-            return sectors[0].id
-
-        # Create if not found
-        created = self.sector_repo.insert(Sector(id=0, sector=sector_name))
-        # Some repos return the created model, others return the id — handle both:
-        sector_id = created.id if hasattr(created, 'id') else created
-        self._sector_id_cache[key] = sector_id
-        return sector_id
-
-    def _insert_subsector(self, sector_id: int, name: str | None, tickers_csv: str | None) -> None:
-        """
-        Inserts a subsector row. If your repo supports upsert or uniqueness
-        constraints on (sector_id, subsector), you can switch to upsert here.
-        """
-        model = Subsector(id=0, sector_id=sector_id, subsector=name, tickers=tickers_csv)
-        self.subsector_repo.insert(model)
-
-    def excel_import(self, filename: str) -> None:
         df = pd.read_excel(
             filename,
             dtype={'sector': 'string', 'subsector': 'string', 'tickers': 'string'},
@@ -95,11 +66,7 @@ class ImporterCommand(BaseCommand):
         # Normalize NA → None
         df = df[required].replace({np.nan: None, pd.NA: None})
 
-        inserted_sectors = 0
-        inserted_subsectors = 0
-
-        # Optional: begin a transaction if your repos expose it (pseudo-code):
-        # with self.sector_repo.transaction():
+        rows: list[tuple[str, str | None, str | None]] = []
         for _, row in df.iterrows():
             sector = (row['sector'] or '').strip()
             if not sector:
@@ -109,17 +76,39 @@ class ImporterCommand(BaseCommand):
             if isinstance(subsector, str):
                 subsector = subsector.strip() or None
 
-            tickers = self._parse_tickers(row['tickers'])
-            tickers_csv = self._join_tickers(tickers)
+            tickers_csv = self._join_tickers(self._parse_tickers(row['tickers']))
+            rows.append((sector, subsector, tickers_csv))
+        return rows
 
-            # Ensure sector exists, get id
-            pre_cache_len = len(self._sector_id_cache)
-            sector_id = self._get_or_create_sector_id(sector)
-            if len(self._sector_id_cache) > pre_cache_len:
-                inserted_sectors += 1  # newly created
+    def excel_import(self, filename: str) -> None:
+        """
+        Replaces every sector and subsector with the spreadsheet's contents.
 
-            # Insert subsector row (linked via FK)
-            self._insert_subsector(sector_id, subsector, tickers_csv)
-            inserted_subsectors += 1
+        New subsector rows get new ids, so the market data tables, whose rows
+        point at subsector ids, are emptied too; the next screener run refills
+        them. Everything happens in one transaction: a failure leaves the
+        database as it was. Tables not owned by the screener are never touched.
+        """
+        rows = self._read_rows(filename)
 
-        print(f'Imported {inserted_subsectors} subsector rows and created {inserted_sectors} new sectors (if any).')
+        with self.db.connect() as con:
+            con.execute('DELETE FROM subsector')
+            con.execute('DELETE FROM sector')
+            clear_market_data(con)
+
+            sector_ids: dict[str, int] = {}
+            for sector, subsector, tickers_csv in rows:
+                sector_id = sector_ids.get(sector)
+                if sector_id is None:
+                    cur = con.execute('INSERT INTO sector (sector) VALUES (?)', (sector,))
+                    sector_id = cur.lastrowid
+                    sector_ids[sector] = sector_id
+                con.execute(
+                    'INSERT INTO subsector (sector_id, subsector, tickers) VALUES (?, ?, ?)',
+                    (sector_id, subsector, tickers_csv),
+                )
+
+        print(
+            f'Replaced all sectors: imported {len(sector_ids)} sectors and {len(rows)} subsectors; '
+            'emptied the market data tables.'
+        )
