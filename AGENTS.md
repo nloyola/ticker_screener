@@ -13,7 +13,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 ## Safe Areas To Edit
 
-- Do edit: `app/**`, `main.py`, `schema.sql`, `config/**`, `templates/**`, `pyproject.toml`, `Dockerfile`, `.dockerignore`, `README.md`.
+- Do edit: `app/**`, `tests/**`, `main.py`, `schema.sql`, `config/**`, `templates/**`, `pyproject.toml`, `Dockerfile`, `.dockerignore`, `README.md`.
 - Change with care:
   - `schema.sql` - the parent's tests use a verbatim copy (`internal/repo/testdata/screener_schema.sql`, checked by its `make schema:check`), and the dashboard's repositories read these tables. A schema change needs the matching change in the parent.
   - `uv.lock` - change it only through `uv add`, `uv remove` or `uv lock`, never by hand.
@@ -40,7 +40,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 ## Testing
 
-- There is no test suite yet. Check a change by running the affected commands against a scratch database (`DB_NAME=/path/to/scratch.db uv run python main.py db-init`), never against `data/stock_data.db` unless that is the point.
+- `uv run pytest` runs the tests in `tests/`. They cover only the progress lines (`app/progress.py`, documented in `README.md`), which the dashboard parses. Check any other change by running the affected commands against a scratch database (`DB_NAME=/path/to/scratch.db uv run python main.py db-init`), never against `data/stock_data.db` unless that is the point.
 - `ticker-sync` and `ticker-fetcher` call Tiingo with the real API key and count against its rate limits; run them on one sector or ticker (`--sector`, `--ticker`) when checking a change.
 
 
@@ -49,6 +49,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 Feature branches use the `dev-*` prefix and merge into `main`. Before merging:
 
 - `uv run ruff check .` and `uv run ruff format --check .` are clean.
+- `uv run pytest` passes.
 - The changed commands run against a scratch database.
 - Docs updated (`README.md`, this file, `CLAUDE.md`) when behavior or commands change.
 - No `.env`, database or other gitignored files committed.

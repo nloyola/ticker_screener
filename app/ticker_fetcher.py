@@ -9,6 +9,7 @@ from tiingo import TiingoClient
 
 from app.container import Container
 from app.models import PriceData
+from app.progress import report_progress
 
 if TYPE_CHECKING:
     from app.repositories.price_data_repo import PriceDataRepo
@@ -41,6 +42,9 @@ class TickerFetcher:
 
     For debugging purposes, a single sector can be requested. See '--sector' option.
 
+    Prints a 'PROGRESS stage=fetch subsector=<done>/<total>' line before the first subsector and after each one,
+    where the total is the number of subsectors fetched (see app/progress.py).
+
     A ticker whose download fails is skipped. With 'strict' each failure is logged as a warning;
     either way 'fetch' returns the number of tickers attempted and failed.
 
@@ -69,7 +73,9 @@ class TickerFetcher:
             if subsector is None:
                 logger.error(f"ticker not in any subsector: '{ticker_filter}'")
                 return self.stats
+            report_progress('fetch', subsector='0/1')
             self._fetch_for_tickers(subsector.id, [ticker_filter])
+            report_progress('fetch', subsector='1/1')
             return self.stats
 
         if sector_filter:
@@ -79,10 +85,13 @@ class TickerFetcher:
                 logger.error(f"[red]❌ sector not in DB:[/red] '{sector_filter}'")
                 return self.stats
 
-        for sector in sectors:
-            for subsector in sector.subsectors:
-                logger.info(f'fetching sector: {sector.sector}, subsector: {subsector.subsector}')
-                self._fetch_for_tickers(subsector.id, subsector.tickers)
+        subsectors = [(sector, subsector) for sector in sectors for subsector in sector.subsectors]
+        total = len(subsectors)
+        report_progress('fetch', subsector=f'0/{total}')
+        for done, (sector, subsector) in enumerate(subsectors, start=1):
+            logger.info(f'fetching sector: {sector.sector}, subsector: {subsector.subsector}')
+            self._fetch_for_tickers(subsector.id, subsector.tickers)
+            report_progress('fetch', subsector=f'{done}/{total}')
 
         return self.stats
 

@@ -8,6 +8,7 @@ from ta.trend import MACD
 
 from app.container import Container
 from app.models import StockCriteria
+from app.progress import report_progress
 
 if TYPE_CHECKING:
     from app.repositories.price_data_repo import PriceDataRepo
@@ -22,6 +23,12 @@ class Analyzer:
         self.price_data_repo: PriceDataRepo = container.price_data_repo
 
     def analyze(self) -> None:
+        """Prints 'PROGRESS stage=analyze status=start' before the work and 'status=done' after it."""
+        report_progress('analyze', status='start')
+        self._analyze()
+        report_progress('analyze', status='done')
+
+    def _analyze(self) -> None:
         df = self.load_price_data()
         if df is None:
             logger.info('No price data found.')
