@@ -37,6 +37,7 @@ uv run python main.py db-init                  # create missing tables, empty th
 uv run python main.py import --excel FILE      # replace sectors, subsectors and tickers from a spreadsheet
 uv run python main.py ticker-sync              # fetch every ticker symbol from Tiingo
 uv run python main.py ticker-fetcher [--sector NAME] [--ticker SYMBOL]   # fetch price data
+uv run python main.py ticker-fetcher --strict [--max-failure-rate 0.5]   # exit 1 when too many tickers fail
 uv run python main.py analyze                  # compute stock_criteria from price_data
 uv run python main.py market-value             # portfolio value charts in public/ (yfinance)
 uv run ruff check .                            # lint
