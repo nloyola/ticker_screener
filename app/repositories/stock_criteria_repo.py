@@ -1,9 +1,10 @@
 import sqlite3
 from collections.abc import Iterable, Iterator
+from contextlib import AbstractContextManager
 from datetime import date
 
 from app.container import Container
-from app.db import open_connection
+from app.db import open_connection, scoped
 from app.models import StockCriteria
 
 COLUMNS = (
@@ -88,10 +89,10 @@ class StockCriteriaRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         con = open_connection(self.db_path)
         con.row_factory = sqlite3.Row
-        return con
+        return scoped(con)
 
     def insert(self, sc: StockCriteria) -> None:
         sql = f"""

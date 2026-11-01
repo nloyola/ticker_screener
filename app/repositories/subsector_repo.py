@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 
 from app.container import Container
-from app.db import open_connection
+from app.db import open_connection, scoped
 from app.models import Subsector
 
 
@@ -12,12 +13,12 @@ class SubsectorRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
         # Enable FK constraints on every new connection (SQLite is per-connection)
         con.execute('PRAGMA foreign_keys = ON;')
-        return con
+        return scoped(con)
 
     def insert(self, subsector: Subsector) -> int | None:
         """

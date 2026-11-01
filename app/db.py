@@ -1,7 +1,7 @@
 import datetime as _dt
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 # Enable TIMESTAMP <-> datetime conversion via ISO 8601
@@ -20,6 +20,16 @@ def open_connection(db_path: str, **kwargs) -> sqlite3.Connection:
     con = sqlite3.connect(db_path, **kwargs)
     con.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
     return con
+
+
+@contextmanager
+def scoped(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Commits con on success, rolls it back on an exception, and closes it either way.
+
+    A bare `with con:` only commits or rolls back; it leaves the connection open.
+    """
+    with closing(con), con:
+        yield con
 
 
 class SQLite:

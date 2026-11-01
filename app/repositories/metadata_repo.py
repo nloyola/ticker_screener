@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 
 from app.container import Container
-from app.db import open_connection
+from app.db import open_connection, scoped
 
 
 class MetadataRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
-        return con
+        return scoped(con)
 
     def get(self, key: str) -> str | None:
         with self._connect() as con:
