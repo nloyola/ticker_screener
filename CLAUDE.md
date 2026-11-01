@@ -39,13 +39,14 @@ uv run python main.py ticker-sync              # fetch every ticker symbol from 
 uv run python main.py ticker-fetcher [--sector NAME] [--ticker SYMBOL]   # fetch price data
 uv run python main.py ticker-fetcher --strict [--max-failure-rate 0.5]   # exit 1 when too many tickers fail
 uv run python main.py analyze                  # compute stock_criteria from price_data
+uv run python main.py run-refresh              # under screener.lock: ticker-fetcher --strict, then analyze
 uv run python main.py market-value             # portfolio value charts in public/ (yfinance)
 uv run pytest                                  # tests
 uv run ruff check .                            # lint
 uv run ruff format .                           # format
 ```
 
-The tests in `tests/` cover only the `PROGRESS` lines (`app/progress.py`) that the parent's admin pages parse; their format is documented in `README.md`.
+The tests in `tests/` cover only what the parent's admin pages rely on: the `PROGRESS` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`.
 
 ## Git Workflow
 

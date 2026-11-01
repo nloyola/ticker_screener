@@ -10,6 +10,7 @@ from app.commands.base_command import BaseCommand, CLI_Interface
 from app.commands.db_init import DbInit
 from app.commands.importer import ImporterCommand
 from app.commands.market_value import MarketValueCommand
+from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.commands.ticker_sync_cmd import TickerSyncCmd
 from app.wiring import build_container
@@ -98,6 +99,7 @@ def main() -> None:
     TickerFetcherCmd(container).add_to_cli(cli)
     TickerSyncCmd(container).add_to_cli(cli)
     AnalyzerCommand(container).add_to_cli(cli)
+    RunRefreshCmd(container).add_to_cli(cli)
     MarketValueCommand().add_to_cli(cli)
     cli.execute()
 
