@@ -1,0 +1,61 @@
+# AGENTS: Working in this Repository
+
+This guide is for human and AI coding agents contributing to the ticker screener. It summarizes the stack, safe edit areas, required tooling, and the commands you should run before merging a branch.
+
+
+## Project Overview
+
+- Stack: Python 3.12 (`.python-version`), uv (`pyproject.toml`, `uv.lock`), stdlib `sqlite3`, pandas, `ta` for the indicators, `tiingo` and `requests` for market data, yfinance for `market-value`, rich for console output.
+- Data: the SQLite database named by `DB_NAME`, shared with the Go dashboard in [nloyola/stock_analyzer](https://github.com/nloyola/stock_analyzer), where this repo is the `screener/` submodule. The screener owns `schema.sql` and fills `ticker`, `price_data`, `stock_criteria` and `metadata`. The dashboard's admin pages own the contents of `sector` and `subsector`; `import` still replaces both from a spreadsheet. The dashboard's own tables (`admin_user`, `admin_session`, `analyzer_schema_migration`) live in the same file: never read, write, drop or empty them, and never add them to `schema.sql`. Only `clear_market_data` (`app/db.py`) empties tables, and only those in `MARKET_DATA_TABLES`.
+- Structure: see [CLAUDE.md § Architecture](CLAUDE.md#architecture).
+- Deployment: the `ticker-screener` image (`Dockerfile`, with `.dockerignore` as an allow-list), built and shipped by the parent repo's `make release:build` and `make release:push`, and run by hand on `tikitak-vps` in one-off containers (`docker compose -f compose.production.yaml run --rm screener analyze`). The runbook is the parent's `documentation/install.md`.
+
+
+## Safe Areas To Edit
+
+- Do edit: `app/**`, `main.py`, `schema.sql`, `config/**`, `templates/**`, `pyproject.toml`, `Dockerfile`, `.dockerignore`, `README.md`.
+- Change with care:
+  - `schema.sql` - the parent's tests use a verbatim copy (`internal/repo/testdata/screener_schema.sql`, checked by its `make schema:check`), and the dashboard's repositories read these tables. A schema change needs the matching change in the parent.
+  - `uv.lock` - change it only through `uv add`, `uv remove` or `uv lock`, never by hand.
+- Avoid editing (local data or build output, all gitignored):
+  - `.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`
+  - `data/`, `stock_data/`, `public/*.html`, `/*.json`, `/*.xlsx`
+
+
+## Environment & Tooling
+
+- Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
+- Environment file: `.env` at the root, loaded by `app/config.py` only when the environment does not already hold every key. Keys: `TIINGO_API_KEY` (required), `DB_NAME` (required, the database path). Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
+- Run `main.py` from the repo root: it reads `config/0-stdout.json` and `schema.sql` relative to the working directory.
+
+
+## Coding Standards
+
+- `uv run ruff check .` and `uv run ruff format --check .` clean (`pyproject.toml`: 120 columns, single quotes, rules `E`, `F`, `I`, `UP`, `B`).
+- Keep the layering: commands parse arguments and call a service or worker class; repositories own all SQL; `models.py` has no I/O. A new table gets a repository in `app/repositories/`, registered in `build_container` (`app/wiring.py`).
+- A new subcommand subclasses `BaseCommand` in `app/commands/` and is registered in `main()`.
+- Log through `logging.getLogger(__name__)`; use rich only for interactive console output.
+- Do database work inside `SQLite.connect()`, which wraps it in one transaction and rolls back on error.
+
+
+## Testing
+
+- There is no test suite yet. Check a change by running the affected commands against a scratch database (`DB_NAME=/path/to/scratch.db uv run python main.py db-init`), never against `data/stock_data.db` unless that is the point.
+- `ticker-sync` and `ticker-fetcher` call Tiingo with the real API key and count against its rate limits; run them on one sector or ticker (`--sector`, `--ticker`) when checking a change.
+
+
+## Pre-Merge Checklist
+
+Feature branches use the `dev-*` prefix and merge into `main`. Before merging:
+
+- `uv run ruff check .` and `uv run ruff format --check .` are clean.
+- The changed commands run against a scratch database.
+- Docs updated (`README.md`, this file, `CLAUDE.md`) when behavior or commands change.
+- No `.env`, database or other gitignored files committed.
+- After merging, commit the new submodule commit in the parent repo, with any matching schema snapshot change.
+
+
+## Security & Secrets
+
+- Never commit `.env`, databases or spreadsheets.
+- Never log or print `TIINGO_API_KEY`.

@@ -14,3 +14,14 @@ wheels/
 /public/*.html
 /.mypy_cache/
 /data/
+# Environment: local development settings
+/.env
+
+# Agent tooling: local settings and planning artifacts, never committed
+/.claude/
+/.superpowers/
+.worktrees/
+docs/superpowers/
+/.codex
+/.agents/
+/skills-lock.json
