@@ -4,6 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from app.container import Container
+from app.db import open_connection
 
 
 class MetadataRepo:
@@ -11,7 +12,7 @@ class MetadataRepo:
         self.db_path = container.db_path
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
         return con
 

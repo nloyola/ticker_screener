@@ -8,6 +8,19 @@ from pathlib import Path
 sqlite3.register_adapter(_dt.datetime, lambda dt: dt.isoformat(timespec='seconds'))
 sqlite3.register_converter('TIMESTAMP', lambda b: _dt.datetime.fromisoformat(b.decode()))
 
+# How long a connection waits for a lock held by another connection before
+# raising "database is locked". The stock_analyzer dashboard reads this file
+# while a screener run writes it; schema.sql puts it in WAL mode, where readers
+# never block the writer, but two writers still queue for the write lock.
+BUSY_TIMEOUT_MS = 30_000
+
+
+def open_connection(db_path: str, **kwargs) -> sqlite3.Connection:
+    """Opens a connection to the database. Every connection must come from here."""
+    con = sqlite3.connect(db_path, **kwargs)
+    con.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}')
+    return con
+
 
 class SQLite:
     def __init__(self, db_path: str):
@@ -15,7 +28,7 @@ class SQLite:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(
+        con = open_connection(
             self.db_path,
             detect_types=sqlite3.PARSE_DECLTYPES,  # use TIMESTAMP converter
             isolation_level=None,  # autocommit mode; we'll BEGIN manually
@@ -46,7 +59,7 @@ def clear_market_data(con: sqlite3.Connection) -> None:
 
 def init_db(db_path: str):
     schema = Path('schema.sql').read_text(encoding='utf-8')
-    con = sqlite3.connect(db_path)
+    con = open_connection(db_path)
     try:
         con.executescript(schema)
     finally:

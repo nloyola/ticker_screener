@@ -3,6 +3,7 @@ from collections.abc import Iterable, Iterator
 from datetime import date
 
 from app.container import Container
+from app.db import open_connection
 from app.models import StockCriteria
 
 COLUMNS = (
@@ -88,7 +89,7 @@ class StockCriteriaRepo:
         self.db_path = container.db_path
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path)
+        con = open_connection(self.db_path)
         con.row_factory = sqlite3.Row
         return con
 

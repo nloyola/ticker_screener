@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from datetime import date, datetime
 
 from app.container import Container
+from app.db import open_connection
 from app.models import PriceData
 
 
@@ -13,7 +14,7 @@ class PriceDataRepo:
     def _connect(self) -> sqlite3.Connection:
         sqlite3.register_adapter(date, lambda d: d.isoformat())
         sqlite3.register_converter('DATE', lambda s: datetime.strptime(s.decode(), '%Y-%m-%d').date())
-        con = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
         return con
 

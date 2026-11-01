@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import Sequence
 
 from app.container import Container
+from app.db import open_connection
 from app.models import Ticker
 
 
@@ -12,7 +13,7 @@ class TickerRepo:
         self.db_path = container.db_path
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
         return con
 
