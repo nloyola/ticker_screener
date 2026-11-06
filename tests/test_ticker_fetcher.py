@@ -1,17 +1,27 @@
 """TickerFetcher downloads each ticker's whole window and replaces its stored rows, against a real database."""
 
 import argparse
+import logging
 from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+import requests
+from tiingo.restclient import RestClientError
 
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.db import init_db
 from app.models import PriceData
 from app.repositories.price_data_repo import PriceDataRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
-from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
+from app.ticker_fetcher import (
+    HISTORY_DAYS,
+    RETRY_ATTEMPTS,
+    RETRY_MAX_DELAY,
+    TickerFetcher,
+    retry_delay,
+    window_start,
+)
 
 TODAY = date.today()
 OLD_DAY = window_start(TODAY) - timedelta(days=1)
@@ -32,6 +42,32 @@ class FakeTiingo:
             {'date': f'{d.isoformat()}T00:00:00.000Z', 'adjClose': close, 'adjVolume': 100}
             for d, close in self.prices[ticker]
         ]
+
+
+def http_error(status: int, retry_after: str | None = None) -> RestClientError:
+    """The error TiingoClient raises for an HTTP error status: a RestClientError wrapping requests' HTTPError."""
+    response = requests.Response()
+    response.status_code = status
+    if retry_after is not None:
+        response.headers['Retry-After'] = retry_after
+    return RestClientError(
+        requests.HTTPError(f'{status} Error for url: https://api.tiingo.com?token=test-key', response=response)
+    )
+
+
+class ScriptedTiingo:
+    """Answers each get_ticker_price call with the next item of the ticker's script: an exception to raise, or rows."""
+
+    def __init__(self, scripts: dict[str, list]) -> None:
+        self.scripts = scripts
+        self.calls: list[str] = []
+
+    def get_ticker_price(self, ticker, frequency, startDate, endDate, columns):
+        self.calls.append(ticker)
+        answer = self.scripts[ticker].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return [{'date': f'{d.isoformat()}T00:00:00.000Z', 'adjClose': close, 'adjVolume': 100} for d, close in answer]
 
 
 class FakeSectorService:
@@ -71,6 +107,7 @@ def make_fetcher(repo: PriceDataRepo, tiingo: FakeTiingo, subsectors: dict[int, 
     )
     fetcher = TickerFetcher(container)
     fetcher.client = tiingo
+    fetcher.sleep = lambda seconds: None
     return fetcher
 
 
@@ -202,3 +239,98 @@ def test_fetch_without_strict_never_prunes(repo):
     run_cmd(make_fetcher(repo, FakeTiingo({}), {1: ['CVX']}))
 
     assert stored(repo, 'CVX') == [(1, OLD_DAY, 1.0)]
+
+
+def test_retries_a_429_and_stores_the_next_answer(repo):
+    tiingo = ScriptedTiingo({'CVX': [http_error(429), [(days_ago(1), 1.0)]]})
+
+    stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
+
+    assert tiingo.calls == ['CVX', 'CVX']
+    assert (stats.attempted, stats.failed) == (1, 0)
+    assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]
+
+
+def test_three_server_errors_fail_the_ticker_once(repo):
+    store(repo, 'CVX', [(days_ago(2), 2.0)])
+    tiingo = ScriptedTiingo({'CVX': [http_error(503)] * 3})
+
+    stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
+
+    assert tiingo.calls == ['CVX'] * RETRY_ATTEMPTS
+    assert (stats.attempted, stats.failed) == (1, 1)
+    assert stored(repo, 'CVX') == [(1, days_ago(2), 2.0)]
+
+
+def test_connection_errors_are_retried(repo):
+    tiingo = ScriptedTiingo(
+        {'CVX': [requests.ConnectionError('reset'), requests.Timeout('slow'), [(days_ago(1), 1.0)]]}
+    )
+
+    stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
+
+    assert len(tiingo.calls) == 3
+    assert stats.failed == 0
+
+
+@pytest.mark.parametrize('error', [http_error(404), http_error(401), ValueError('bad JSON')])
+def test_other_errors_fail_at_once(repo, error):
+    tiingo = ScriptedTiingo({'CVX': [error]})
+
+    stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
+
+    assert tiingo.calls == ['CVX']
+    assert stats.failed == 1
+
+
+def test_waits_grow_and_honour_retry_after(repo):
+    tiingo = ScriptedTiingo({'CVX': [http_error(500), http_error(429, retry_after='7')] + [[(days_ago(1), 1.0)]]})
+    fetcher = make_fetcher(repo, tiingo, {1: ['CVX']})
+    waits: list[float] = []
+    fetcher.sleep = waits.append
+
+    fetcher.fetch()
+
+    assert len(waits) == 2
+    assert 1.0 <= waits[0] <= 3.0  # about 2 s, with jitter
+    assert waits[1] == 7.0
+
+
+def test_retry_delay():
+    assert retry_delay(http_error(429, retry_after='7'), 1, rand=lambda: 0.5) == 7.0
+    assert retry_delay(http_error(429, retry_after='3600'), 1, rand=lambda: 0.5) == RETRY_MAX_DELAY
+    # a date or a garbled Retry-After falls back to the backoff
+    assert retry_delay(http_error(429, retry_after='Wed, 21 Oct 2026 07:28:00 GMT'), 2, rand=lambda: 0.5) == 4.0
+    assert retry_delay(http_error(503), 1, rand=lambda: 0.0) == 1.0
+    assert retry_delay(http_error(503), 1, rand=lambda: 1.0) == 3.0
+    assert retry_delay(requests.ConnectionError(), 2, rand=lambda: 0.5) == 4.0
+
+
+def test_retry_logs_never_show_the_key(repo, caplog):
+    caplog.set_level(logging.DEBUG)
+    tiingo = ScriptedTiingo({'CVX': [http_error(503)] * 3})
+
+    make_fetcher(repo, tiingo, {1: ['CVX']}).fetch(strict=True)
+
+    assert 'CVX' in caplog.text
+    assert '503' in caplog.text
+    assert 'test-key' not in caplog.text
+
+
+def test_ticker_with_no_rows_in_the_window_is_logged_as_a_warning(repo, caplog):
+    make_fetcher(repo, FakeTiingo({'CVX': []}), {1: ['CVX']}).fetch()
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert 'CVX' in warnings[0].getMessage()
+    assert 'delisted' in warnings[0].getMessage()
+
+
+def test_malformed_row_fails_only_that_ticker(repo):
+    tiingo = ScriptedTiingo({'CVX': [[(days_ago(1), None)]], 'XOM': [[(days_ago(1), 2.0)]]})
+
+    stats = make_fetcher(repo, tiingo, {1: ['CVX', 'XOM']}).fetch()
+
+    assert tiingo.calls == ['CVX', 'XOM']  # not retried
+    assert (stats.attempted, stats.failed) == (2, 1)
+    assert stored(repo, 'XOM') == [(1, days_ago(1), 2.0)]
