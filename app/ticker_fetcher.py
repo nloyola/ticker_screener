@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import requests
-from tiingo import TiingoClient
-from tiingo.restclient import RestClientError
 
 from app.container import Container
 from app.models import PriceData
@@ -32,6 +30,14 @@ RETRY_BASE_DELAY = 2.0
 # the longest wait, whatever Tiingo's Retry-After asks for, so a spent hourly limit cannot stall a run
 RETRY_MAX_DELAY = 60.0
 
+TIINGO_PRICES_URL = 'https://api.tiingo.com/tiingo/daily/{ticker}/prices'
+# seconds to wait for Tiingo to accept the connection, and then for each read of its answer, so a server that stops
+# answering fails the attempt (as a requests.Timeout, which is retried) instead of hanging the run
+CONNECT_TIMEOUT = 10.0
+READ_TIMEOUT = 30.0
+# the most characters of an error answer's body quoted in a log line
+ERROR_DETAIL_LIMIT = 200
+
 
 @dataclass
 class FetchStats:
@@ -48,10 +54,55 @@ def window_start(today: date) -> date:
     return today - timedelta(days=HISTORY_DAYS)
 
 
+class TiingoPrices:
+    """Requests a ticker's daily prices from Tiingo's end-of-day endpoint, sending the key in a header."""
+
+    def __init__(self, api_key: str) -> None:
+        self.session = requests.Session()
+        self.session.headers['Authorization'] = f'Token {api_key}'
+
+    def daily_prices(self, ticker: str, start: date, end: date) -> list[dict]:
+        """
+        The ticker's rows from 'start' to 'end', each with 'date', 'adjClose' and 'adjVolume'; an empty list when the
+        range holds no trading day. Raises requests' HTTPError for an error status and requests.Timeout when Tiingo
+        stops answering.
+        """
+        response = self.session.get(
+            TIINGO_PRICES_URL.format(ticker=ticker),
+            params={
+                'startDate': start.isoformat(),
+                'endDate': end.isoformat(),
+                'resampleFreq': 'daily',
+                'columns': 'date,adjClose,adjVolume',
+            },
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 def _response(error: Exception) -> requests.Response | None:
-    """The HTTP response behind an error TiingoClient raised, if any: it wraps requests' HTTPError."""
-    cause = error.args[0] if isinstance(error, RestClientError) and error.args else error
-    return getattr(cause, 'response', None)
+    """The HTTP response behind an error, if any: requests' HTTPError carries it."""
+    return getattr(error, 'response', None)
+
+
+def error_detail(error: Exception) -> str:
+    """
+    The error, followed by what Tiingo said in the body of an error answer (its JSON 'detail', or else the text),
+    shortened to ERROR_DETAIL_LIMIT characters.
+    """
+    response = _response(error)
+    if response is None:
+        return str(error)
+    try:
+        body = response.json()
+        detail = body.get('detail') if isinstance(body, dict) else None
+    except ValueError:
+        detail = None
+    detail = ' '.join(str(detail if detail is not None else response.text).split())
+    if len(detail) > ERROR_DETAIL_LIMIT:
+        detail = detail[: ERROR_DETAIL_LIMIT - 1] + '…'
+    return f'{error}: {detail}' if detail else str(error)
 
 
 def is_transient(error: Exception) -> bool:
@@ -102,13 +153,14 @@ class TickerFetcher:
 
     A request that meets a transient error (a 429, a 5xx, a failed connection) is retried up to RETRY_ATTEMPTS times
     in all, with exponential backoff and jitter, honouring Tiingo's Retry-After. Any other error, such as a 404 for an
-    unknown ticker, fails at once. A ticker whose download fails after its last attempt is skipped. With 'strict' each
+    unknown ticker, fails at once. An attempt that Tiingo stops answering times out (CONNECT_TIMEOUT, READ_TIMEOUT) and
+    is retried too. A ticker whose download fails after its last attempt is skipped. With 'strict' each
     failure is logged as a warning; either way 'fetch' returns the number of tickers attempted and failed.
 
     A ticker whose download holds no trading day in the whole window is logged as a warning: it is likely delisted,
     and can be removed at the dashboard's /admin/sectors.
 
-    The Tiingo API is used to fetch price data.
+    Prices come from Tiingo's end-of-day endpoint (see TiingoPrices).
     """
 
     def __init__(self, container: Container) -> None:
@@ -116,8 +168,7 @@ class TickerFetcher:
         self.sector_service: SectorService = container.sector_service
         self.price_data_repo: PriceDataRepo = container.price_data_repo
 
-        config = {'session': True, 'api_key': self.tiingo_api_key}
-        self.client = TiingoClient(config)
+        self.client = TiingoPrices(self.tiingo_api_key)
         self.sleep: Callable[[float], None] = time.sleep
         self.strict = False
         self.stats = FetchStats()
@@ -210,14 +261,7 @@ class TickerFetcher:
         """Requests the ticker's prices, retrying transient errors; raises the last error once the attempts run out."""
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                # the JSON response is an empty list when the range holds no trading day
-                return self.client.get_ticker_price(
-                    ticker,
-                    frequency='daily',
-                    startDate=start.strftime('%Y-%m-%d'),
-                    endDate=end.strftime('%Y-%m-%d'),
-                    columns='date,adjClose,adjVolume',
-                )
+                return self.client.daily_prices(ticker, start, end)
             except Exception as e:
                 if attempt == RETRY_ATTEMPTS or not is_transient(e):
                     raise
@@ -230,5 +274,6 @@ class TickerFetcher:
         raise AssertionError('unreachable')
 
     def _redact(self, error: Exception) -> str:
-        # the client sends the key in a header, but never let it reach the log
-        return str(error).replace(self.tiingo_api_key, '***') if self.tiingo_api_key else str(error)
+        # the key goes in a header, never in the URL, but never let it reach the log, even quoted back in a body
+        text = error_detail(error)
+        return text.replace(self.tiingo_api_key, '***') if self.tiingo_api_key else text

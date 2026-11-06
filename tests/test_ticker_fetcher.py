@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from tiingo.restclient import RestClientError
+from requests.adapters import HTTPAdapter
 
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.db import init_db
@@ -15,10 +15,15 @@ from app.models import PriceData
 from app.repositories.price_data_repo import PriceDataRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.ticker_fetcher import (
+    CONNECT_TIMEOUT,
+    ERROR_DETAIL_LIMIT,
     HISTORY_DAYS,
+    READ_TIMEOUT,
     RETRY_ATTEMPTS,
     RETRY_MAX_DELAY,
     TickerFetcher,
+    TiingoPrices,
+    error_detail,
     retry_delay,
     window_start,
 )
@@ -28,14 +33,14 @@ OLD_DAY = window_start(TODAY) - timedelta(days=1)
 
 
 class FakeTiingo:
-    """Answers get_ticker_price from canned responses; a ticker with no response raises, as a failed request does."""
+    """Answers daily_prices from canned responses; a ticker with no response raises, as a failed request does."""
 
     def __init__(self, prices: dict[str, list[tuple[date, float]]]) -> None:
         self.prices = prices
         self.requests: list[tuple[str, str, str]] = []
 
-    def get_ticker_price(self, ticker, frequency, startDate, endDate, columns):
-        self.requests.append((ticker, startDate, endDate))
+    def daily_prices(self, ticker: str, start: date, end: date) -> list[dict]:
+        self.requests.append((ticker, start.isoformat(), end.isoformat()))
         if ticker not in self.prices:
             raise RuntimeError(f'500 Server Error for ticker {ticker}, token test-key')
         return [
@@ -44,25 +49,31 @@ class FakeTiingo:
         ]
 
 
-def http_error(status: int, retry_after: str | None = None) -> RestClientError:
-    """The error TiingoClient raises for an HTTP error status: a RestClientError wrapping requests' HTTPError."""
+def tiingo_response(status: int, body: bytes = b'[]', retry_after: str | None = None) -> requests.Response:
     response = requests.Response()
     response.status_code = status
+    response.reason = 'Not Found' if status == 404 else 'Error'
+    response._content = body
+    response.url = 'https://api.tiingo.com/tiingo/daily/CVX/prices'
     if retry_after is not None:
         response.headers['Retry-After'] = retry_after
-    return RestClientError(
-        requests.HTTPError(f'{status} Error for url: https://api.tiingo.com?token=test-key', response=response)
-    )
+    return response
+
+
+def http_error(status: int, retry_after: str | None = None, body: bytes = b'') -> requests.HTTPError:
+    """The error raise_for_status raises for an HTTP error status, carrying the response."""
+    response = tiingo_response(status, body, retry_after)
+    return requests.HTTPError(f'{status} Error for url: {response.url}', response=response)
 
 
 class ScriptedTiingo:
-    """Answers each get_ticker_price call with the next item of the ticker's script: an exception to raise, or rows."""
+    """Answers each daily_prices call with the next item of the ticker's script: an exception to raise, or rows."""
 
     def __init__(self, scripts: dict[str, list]) -> None:
         self.scripts = scripts
         self.calls: list[str] = []
 
-    def get_ticker_price(self, ticker, frequency, startDate, endDate, columns):
+    def daily_prices(self, ticker: str, start: date, end: date) -> list[dict]:
         self.calls.append(ticker)
         answer = self.scripts[ticker].pop(0)
         if isinstance(answer, Exception):
@@ -173,6 +184,15 @@ def test_error_message_never_shows_the_key(repo, caplog):
     make_fetcher(repo, FakeTiingo({}), {1: ['CVX']}).fetch(strict=True)
 
     assert 'CVX' in caplog.text
+    assert 'test-key' not in caplog.text
+
+
+def test_error_detail_quoted_back_never_shows_the_key(repo, caplog):
+    tiingo = ScriptedTiingo({'CVX': [http_error(401, body=b'{"detail": "Invalid token test-key"}')]})
+
+    make_fetcher(repo, tiingo, {1: ['CVX']}).fetch(strict=True)
+
+    assert 'Invalid token ***' in caplog.text
     assert 'test-key' not in caplog.text
 
 
@@ -334,3 +354,100 @@ def test_malformed_row_fails_only_that_ticker(repo):
     assert tiingo.calls == ['CVX', 'XOM']  # not retried
     assert (stats.attempted, stats.failed) == (2, 1)
     assert stored(repo, 'XOM') == [(1, days_ago(1), 2.0)]
+
+
+def test_not_found_warning_carries_tiingos_detail(repo, caplog):
+    body = b'{"detail": "Error: Ticker \'NOPE\' not found"}'
+    tiingo = ScriptedTiingo({'NOPE': [http_error(404, body=body)]})
+
+    stats = make_fetcher(repo, tiingo, {1: ['NOPE']}).fetch(strict=True)
+
+    assert stats.failed == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "Ticker 'NOPE' not found" in warnings[0]
+    assert '404' in warnings[0]
+
+
+def test_retried_ticker_writes_no_error_record(repo, caplog):
+    caplog.set_level(logging.DEBUG)
+    body = b'{"detail": "busy"}'
+    tiingo = ScriptedTiingo({'CVX': [http_error(503, body=body)] * 3, 'XOM': [http_error(503, body=body), []]})
+
+    make_fetcher(repo, tiingo, {1: ['CVX', 'XOM']}).fetch(strict=True)
+
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    retries = [r.getMessage() for r in caplog.records if 'retrying' in r.getMessage()]
+    assert len(retries) == 3 and all('busy' in m for m in retries)
+
+
+def test_error_detail():
+    assert error_detail(ValueError('bad JSON')) == 'bad JSON'
+    assert error_detail(http_error(404, body=b'{"detail": "gone"}')).endswith(': gone')
+    assert error_detail(http_error(502, body=b'<html>\n  Bad   gateway</html>')).endswith(': <html> Bad gateway</html>')
+    assert error_detail(http_error(503)) == '503 Error for url: https://api.tiingo.com/tiingo/daily/CVX/prices'
+    long = error_detail(http_error(500, body=b'x' * 1000))
+    assert long.endswith('x…') and len(long.rsplit(': ', 1)[1]) == ERROR_DETAIL_LIMIT
+
+
+class ScriptedAdapter(HTTPAdapter):
+    """Stands in for the network under a real requests.Session: answers each request with the next scripted item."""
+
+    def __init__(self, answers: list) -> None:
+        super().__init__()
+        self.answers = answers
+        self.sent: list[tuple[requests.PreparedRequest, object]] = []
+
+    def send(self, request, **kwargs):
+        self.sent.append((request, kwargs['timeout']))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        answer.request = request
+        return answer
+
+
+def tiingo_prices(answers: list) -> tuple[TiingoPrices, ScriptedAdapter]:
+    client = TiingoPrices('test-key')
+    adapter = ScriptedAdapter(answers)
+    client.session.mount('https://', adapter)
+    return client, adapter
+
+
+def test_tiingo_prices_sends_the_key_in_a_header_with_a_timeout():
+    body = b'[{"date": "2026-11-05T00:00:00.000Z", "adjClose": 1.5, "adjVolume": 10}]'
+    client, adapter = tiingo_prices([tiingo_response(200, body)])
+
+    rows = client.daily_prices('CVX', date(2026, 7, 9), date(2026, 11, 6))
+
+    assert rows == [{'date': '2026-11-05T00:00:00.000Z', 'adjClose': 1.5, 'adjVolume': 10}]
+    ((request, timeout),) = adapter.sent
+    assert request.method == 'GET'
+    assert request.url == (
+        'https://api.tiingo.com/tiingo/daily/CVX/prices?startDate=2026-07-09&endDate=2026-11-06'
+        '&resampleFreq=daily&columns=date%2CadjClose%2CadjVolume'
+    )
+    assert request.headers['Authorization'] == 'Token test-key'
+    assert 'test-key' not in request.url
+    assert timeout == (CONNECT_TIMEOUT, READ_TIMEOUT)
+
+
+def test_tiingo_prices_raises_http_error_with_the_response():
+    client, _ = tiingo_prices([tiingo_response(404, b'{"detail": "not found"}')])
+
+    with pytest.raises(requests.HTTPError) as error:
+        client.daily_prices('CVX', date(2026, 7, 9), date(2026, 11, 6))
+
+    assert error.value.response.status_code == 404
+
+
+def test_timed_out_request_is_retried_and_then_succeeds(repo):
+    body = f'[{{"date": "{days_ago(1).isoformat()}T00:00:00.000Z", "adjClose": 1.0, "adjVolume": 100}}]'.encode()
+    client, adapter = tiingo_prices([requests.ReadTimeout('read timed out'), tiingo_response(200, body)])
+    fetcher = make_fetcher(repo, client, {1: ['CVX']})
+
+    stats = fetcher.fetch()
+
+    assert len(adapter.sent) == 2
+    assert (stats.attempted, stats.failed) == (1, 0)
+    assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]

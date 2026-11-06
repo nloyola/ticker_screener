@@ -780,9 +780,9 @@ dependencies = [
     { name = "plotly" },
     { name = "python-dotenv" },
     { name = "pytz" },
+    { name = "requests" },
     { name = "rich" },
     { name = "ta" },
-    { name = "tiingo" },
     { name = "yfinance" },
 ]
 
@@ -802,9 +802,9 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.1.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "pytz", specifier = ">=2025.2" },
+    { name = "requests", specifier = ">=2.32.3" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "ta", specifier = ">=0.11.0" },
-    { name = "tiingo", specifier = ">=0.16.1" },
     { name = "yfinance", specifier = ">=0.2.61" },
 ]
 
@@ -824,19 +824,6 @@ dependencies = [
     { name = "pandas" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e0/9a/37d92a6b470dc9088612c2399a68f1a9ac22872d4e1eff416818e22ab11b/ta-0.11.0.tar.gz", hash = "sha256:de86af43418420bd6b088a2ea9b95483071bf453c522a8441bc2f12bcf8493fd", size = 25308, upload-time = "2023-11-02T13:53:35.434Z" }
-
-[[package]]
-name = "tiingo"
-version = "0.16.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "requests" },
-    { name = "websocket-client" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/10/11/eb351d95d6d9745e471ace6a5f26138d2e215d3c005cb7be67a9ce0f1cd2/tiingo-0.16.1.tar.gz", hash = "sha256:9f9425caea79c4144cd8817607a0e39d7894953563cdff9b12f382cdc11ccabd", size = 630355, upload-time = "2025-04-05T14:36:16.521Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fa/65/6c6ac5afba03988275e6d602476208f707f64930d8fa7f05396a169f7874/tiingo-0.16.1-py2.py3-none-any.whl", hash = "sha256:045b3295de8599de729681a6dee4191d99e9b584027ec70bc597b6a139d7c1eb", size = 16374, upload-time = "2025-04-05T14:36:14.957Z" },
-]
 
 [[package]]
 name = "typing-extensions"
@@ -863,15 +850,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/8a/78/16493d9c386d8e60e442a35feac5e00f0913c0f4b7c217c11e8ec2ff53e0/urllib3-2.4.0.tar.gz", hash = "sha256:414bc6535b787febd7567804cc015fee39daab8ad86268f1310a9250697de466", size = 390672, upload-time = "2025-04-10T15:23:39.232Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6b/11/cc635220681e93a0183390e26485430ca2c7b5f9d33b15c74c2861cb8091/urllib3-2.4.0-py3-none-any.whl", hash = "sha256:4e16665048960a0900c702d4a66415956a584919c03361cac9f1df5c5dd7e813", size = 128680, upload-time = "2025-04-10T15:23:37.377Z" },
-]
-
-[[package]]
-name = "websocket-client"
-version = "1.8.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e6/30/fba0d96b4b5fbf5948ed3f4681f7da2f9f64512e1d303f94b4cc174c24a5/websocket_client-1.8.0.tar.gz", hash = "sha256:3239df9f44da632f96012472805d40a23281a991027ce11d2f45a6f24ac4c3da", size = 54648, upload-time = "2024-04-23T22:16:16.976Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/84/44687a29792a70e111c5c477230a72c4b957d88d16141199bf9acb7537a3/websocket_client-1.8.0-py3-none-any.whl", hash = "sha256:17b44cc997f5c498e809b22cdf2d9c7a9e71c02c8cc2b6c56e7c2d1239bfa526", size = 58826, upload-time = "2024-04-23T22:16:14.422Z" },
 ]
 
 [[package]]
