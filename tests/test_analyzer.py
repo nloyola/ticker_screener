@@ -1,4 +1,4 @@
-"""The core criteria Analyzer.analyze_ticker computes, pinned to today's behaviour.
+"""The core criteria Analyzer.analyze_ticker computes.
 
 Each test builds a made-up price series, loads it through Analyzer.load_price_data exactly as a run does, and
 checks the stored values against numbers worked out by hand. Close prices are linear or zigzag so the averages,
@@ -11,7 +11,6 @@ highs and indicators have closed forms:
   RSI = 100 * 28 / 41 = 68.29. A close that never falls has RSI 100.
 """
 
-import math
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -278,18 +277,18 @@ def test_50_day_average_rising_before_but_not_lately():
     assert sc.dma_50_rising == 0
 
 
-def test_ema_10_weights_every_row_as_pandas_adjust_true():
-    # One huge first close makes the start of the series visible in today's EMA. With adjust=True each close i of n
-    # weighs (1 - a)^(n - 1 - i), a = 2 / 11, over the sum of all the weights. Step 4 of the screener review
-    # rollout may switch to adjust=False, which would give 107.21 here.
-    closes = [1_000_000.0] + [100.0] * 59
+def test_ema_10_is_the_trading_ema_seeded_with_the_first_close():
+    # One huge first close makes the start of the series visible in today's EMA. The trading EMA (pandas'
+    # adjust=False) starts at the first close and then moves a = 2 / 11 of the way to each new close, so after n - 1
+    # closes of 100 the first close's excess has decayed by (1 - a)^(n - 1). pandas' default adjust=True would
+    # weigh every close over the sum of the weights instead, giving 100.65 here.
+    closes = [10_000_000.0] + [100.0] * 74
     n, a = len(closes), 2 / 11
-    weights = [(1 - a) ** (n - 1 - i) for i in range(n)]
-    expected = sum(w * c for w, c in zip(weights, closes, strict=True)) / sum(weights)
+    expected = 100.0 + (closes[0] - 100.0) * (1 - a) ** (n - 1)
     sc = analyze(closes, volumes_with_last(n, 2000))
 
-    assert round(expected, 2) == 101.31
-    assert sc.ema_10 == 101.31
+    assert round(expected, 2) == 103.56
+    assert sc.ema_10 == 103.56
 
 
 def test_close_above_the_50_day_average_but_under_the_10_day_ema():
@@ -349,45 +348,15 @@ def test_macd_below_its_signal_line_when_the_rise_turns():
 # --- How much history is needed ---------------------------------------------
 
 
-def test_fewer_than_60_rows_is_not_scored():
-    assert analyze(rising(59), volumes_with_last(59, 2000)) is None
+@pytest.mark.parametrize('rows', [59, 60, 74])
+def test_fewer_than_75_rows_is_not_scored(rows):
+    # dma_50_rising compares today's 50-day average with the ones 14 and 24 days ago, which needs 75 rows
+    assert analyze(rising(rows), volumes_with_last(rows, 2000)) is None
 
 
 def test_no_rows_is_not_scored():
     analyzer, _ = make_analyzer([])
     assert analyzer.load_price_data() is None
-
-
-@pytest.mark.parametrize('rows', [60, 64])
-def test_60_to_64_rows_leaves_both_earlier_averages_unknown(rows):
-    # today's behaviour, which step 4 of the screener review rollout changes
-    sc = analyze(rising(rows), volumes_with_last(rows, 2000))
-
-    assert sc.dma_50_prev_15d is None
-    assert sc.dma_50_25d_ago is None
-    assert sc.dma_50_rising == 0
-    assert sc.core_criteria_met is False
-
-
-@pytest.mark.parametrize('rows', [65, 74])
-def test_65_to_74_rows_leaves_the_25_day_average_unknown(rows):
-    # today's behaviour, which step 4 of the screener review rollout changes
-    sc = analyze(rising(rows), volumes_with_last(rows, 2000))
-
-    assert sc.dma_50_prev_15d is not None
-    assert sc.dma_50_25d_ago is None
-    assert sc.dma_50_rising == 0
-    assert sc.core_criteria_score == 4
-    assert sc.core_criteria_met is False
-
-
-def test_60_rows_leaves_the_60_day_high_unknown():
-    # the 60-day high is taken from yesterday's window, which needs 61 rows; today it is stored as NaN
-    sc = analyze(rising(60), volumes_with_last(60, 2000))
-
-    assert math.isnan(sc.high_60d)
-    assert sc.breakout_60d == 0
-    assert sc.breakout_20d == 1
 
 
 def test_75_rows_is_enough_to_score_fully():
@@ -407,7 +376,7 @@ def test_analyze_saves_one_row_per_ticker_with_enough_history():
     rows = (
         price_rows('AAA', rising(100), volumes_with_last(100, 2000))
         + price_rows('BBB', rising(100), volumes_with_last(100, 1500))
-        + price_rows('CCC', rising(59))
+        + price_rows('CCC', rising(74))
     )
     analyzer, criteria_repo = make_analyzer(rows)
 

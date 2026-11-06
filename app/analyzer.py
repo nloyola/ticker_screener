@@ -16,6 +16,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# dma_50_rising compares today's 50-day average with the ones 14 and 24 days ago, so a ticker needs 50 + 24 rows
+# and today's to be scored fully. A ticker with fewer rows is not scored at all.
+MIN_ROWS = 75
+
 
 class Analyzer:
     def __init__(self, container: Container) -> None:
@@ -87,14 +91,14 @@ class Analyzer:
         return df[['subsector_id', 'close', 'volume']]
 
     def analyze_ticker(self, ticker: str, df: pd.DataFrame) -> StockCriteria | None:
-        if df.empty or len(df) < 60:
-            return None  # Not enough data
+        if len(df) < MIN_ROWS:
+            return None
 
         logger.info(f'generating criteria for {ticker}')
 
         # Technical indicators
         df['50dma'] = df['close'].rolling(window=50).mean()
-        df['10ema'] = df['close'].ewm(span=10).mean()
+        df['10ema'] = df['close'].ewm(span=10, adjust=False).mean()
         df['volume_avg_20'] = df['volume'].rolling(window=20).mean()
         df['max_20d'] = df['close'].rolling(window=20).max()
         df['max_60d'] = df['close'].rolling(window=60).max()
@@ -111,8 +115,8 @@ class Analyzer:
         avg_vol = df['volume_avg_20'].iloc[-1].item()
         dma_50 = df['50dma'].iloc[-1].item()
 
-        dma_50_prev = df['50dma'].iloc[-15] if len(df) >= 65 else float('nan')
-        dma_50_early = df['50dma'].iloc[-25] if len(df) >= 75 else float('nan')
+        dma_50_prev = df['50dma'].iloc[-15].item()
+        dma_50_early = df['50dma'].iloc[-25].item()
 
         ema_10 = df['10ema'].iloc[-1].item()
         high_20d = df['max_20d'].iloc[-2].item()
@@ -165,8 +169,8 @@ class Analyzer:
             max_vol_10d=int(high_vol_10d),
             dma_50=round(dma_50, 2),
             ema_10=round(ema_10, 2),
-            dma_50_prev_15d=round(dma_50_prev, 2) if pd.notna(dma_50_prev) else None,
-            dma_50_25d_ago=round(dma_50_early, 2) if pd.notna(dma_50_early) else None,
+            dma_50_prev_15d=round(dma_50_prev, 2),
+            dma_50_25d_ago=round(dma_50_early, 2),
             rsi=round(rsi_val, 2),
             macd=round(macd_val, 2),
             signal=round(signal_val, 2),
