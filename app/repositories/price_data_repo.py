@@ -39,6 +39,22 @@ class PriceDataRepo:
                 [(p.subsector_id, p.ticker, p.date, p.close, p.volume) for p in items],
             )
 
+    def replace_for_ticker(self, ticker: str, rows: Iterable[PriceData]) -> None:
+        """Replaces every stored row of ticker with rows, in one transaction."""
+        rows = list(rows)
+        others = {p.ticker for p in rows} - {ticker}
+        if others:
+            raise ValueError(f'rows for {sorted(others)} passed to replace the rows of {ticker}')
+        with self._connect() as con:
+            con.execute('DELETE FROM price_data WHERE ticker = ?', (ticker,))
+            con.executemany(
+                """
+                INSERT INTO price_data (subsector_id, ticker, date, close, volume)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [(p.subsector_id, p.ticker, p.date, p.close, p.volume) for p in rows],
+            )
+
     def get(self, ticker: str, d: date) -> PriceData | None:
         with self._connect() as con:
             row = con.execute(

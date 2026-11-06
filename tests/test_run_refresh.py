@@ -63,10 +63,15 @@ class FakeFetcher:
     def __init__(self, stats: FetchStats) -> None:
         self.stats = stats
         self.calls = []
+        self.prunes = 0
 
     def fetch(self, **kwargs) -> FetchStats:
         self.calls.append(kwargs)
         return self.stats
+
+    def prune(self) -> int:
+        self.prunes += 1
+        return 0
 
 
 def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, FakeFetcher, list[str]]:
@@ -90,6 +95,7 @@ def test_fetches_strictly_then_analyzes(db_path):
     run(cmd)
 
     assert fetcher.calls == [{'strict': True}]
+    assert fetcher.prunes == 1
     assert analyzed == [True]
 
 
@@ -101,13 +107,14 @@ def test_fetches_strictly_then_analyzes(db_path):
         (FetchStats(attempted=10, failed=3), ('--max-failure-rate', '0.2')),
     ],
 )
-def test_failed_fetch_exits_1_without_analyzing(db_path, stats, argv):
-    cmd, _, analyzed = make_cmd(db_path, stats)
+def test_failed_fetch_exits_1_without_pruning_or_analyzing(db_path, stats, argv):
+    cmd, fetcher, analyzed = make_cmd(db_path, stats)
 
     with pytest.raises(SystemExit) as exit_info:
         run(cmd, *argv)
 
     assert exit_info.value.code == 1
+    assert fetcher.prunes == 0
     assert analyzed == []
     with screener_lock(db_path):  # released on the way out
         pass

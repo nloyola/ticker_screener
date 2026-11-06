@@ -47,7 +47,7 @@ def make_fetcher(sectors: list[SectorAggregate]) -> TickerFetcher:
     container = SimpleNamespace(
         tiingo_api_key='test-key',
         sector_service=FakeSectorService(sectors),
-        price_data_repo=SimpleNamespace(bulk_insert=lambda rows: None),
+        price_data_repo=SimpleNamespace(replace_for_ticker=lambda ticker, rows: None),
     )
     fetcher = TickerFetcher(container)
     fetcher._fetch_ticker_data = lambda subsector_id, ticker: []

@@ -1,10 +1,9 @@
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from pandas import DataFrame
 from tiingo import TiingoClient
 
 from app.container import Container
@@ -18,7 +17,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# logger.setLevel(logging.DEBUG)
+# the days of prices 'price_data' keeps, and each run downloads, per ticker
+HISTORY_DAYS = 120
 
 
 @dataclass
@@ -31,14 +31,26 @@ class FetchStats:
         return self.failed / self.attempted if self.attempted else 0.0
 
 
+def window_start(today: date) -> date:
+    """The first day of the window 'price_data' keeps, ending today."""
+    return today - timedelta(days=HISTORY_DAYS)
+
+
 class TickerFetcher:
     """
     Fetches price data for all the sectors in the 'sector' DB table
 
-    The 'price_data' table holds the last 120 days worth of data.
+    The 'price_data' table holds the last HISTORY_DAYS days of data. Every run downloads each ticker's whole window
+    and replaces the ticker's stored rows with it, because Tiingo restates the adjusted closes of past days after a
+    split or dividend: appending only the new days would leave old and new rows on different bases. Tiingo counts one
+    request per ticker however long the range is, so the full window costs no more requests.
 
-    If the 'price_data' table already has data for the ticker, then only the latest data is fetched.
-    E.g. if the latest date is for 5 days ago, then only the last 5 days worth of data is fetched.
+    A ticker whose download fails keeps its stored rows, and so does one whose download holds no trading day. A
+    ticker listed in more than one subsector is downloaded once per run, for the first subsector that lists it.
+
+    'fetch' never deletes the rows of a ticker it could not download. 'prune' deletes every ticker's rows older than
+    the window; call it once per run, and only after a fetch that succeeded (run-refresh, 'ticker-fetcher --strict'),
+    so a fetch that fails for every ticker leaves 'price_data' as it was.
 
     For debugging purposes, a single sector can be requested. See '--sector' option.
 
@@ -60,12 +72,14 @@ class TickerFetcher:
         self.client = TiingoClient(config)
         self.strict = False
         self.stats = FetchStats()
+        self._fetched: set[str] = set()
 
     def fetch(
         self, sector_filter: str | None = None, ticker_filter: str | None = None, strict: bool = False
     ) -> FetchStats:
         self.strict = strict
         self.stats = FetchStats()
+        self._fetched = set()
         sectors = self.sector_service.get_all()
 
         if ticker_filter:
@@ -95,45 +109,33 @@ class TickerFetcher:
 
         return self.stats
 
-    def _fetch_for_tickers(self, subsector_id: int, tickers: list[str]) -> None:
-        price_data: list[PriceData] = []
-        for ticker in tickers:
-            self.stats.attempted += 1
-            new_data = self._fetch_ticker_data(subsector_id, ticker)
-            if new_data is None:
-                self.stats.failed += 1
-            else:
-                price_data = price_data + new_data
+    def prune(self) -> int:
+        """Deletes every ticker's rows dated before the window and returns how many were deleted."""
+        cutoff = window_start(date.today())
+        deleted = self.price_data_repo.delete_before(cutoff)
+        logger.info(f'removed {deleted} price rows dated before {cutoff}')
+        return deleted
 
-        # save all downloaded rows at once
-        if price_data:
-            self.price_data_repo.bulk_insert(price_data)
+    def _fetch_for_tickers(self, subsector_id: int, tickers: list[str]) -> None:
+        for ticker in tickers:
+            if ticker in self._fetched:
+                logger.debug(f'already fetched in this run: {ticker}')
+                continue
+            self._fetched.add(ticker)
+            self.stats.attempted += 1
+            rows = self._fetch_ticker_data(subsector_id, ticker)
+            if rows is None:
+                self.stats.failed += 1
+            elif rows:
+                self.price_data_repo.replace_for_ticker(ticker, rows)
+            else:
+                logger.debug(f'no prices in the last {HISTORY_DAYS} days, stored rows kept: {ticker}')
 
     def _fetch_ticker_data(self, subsector_id: int, ticker: str) -> list[PriceData] | None:
-        """Returns the new rows for the ticker, or None when the download fails."""
-        rows = list(self.price_data_repo.all_for_ticker(ticker))
-        if rows:
-            df = (
-                DataFrame([{'date': r.date, 'close': r.close, 'volume': r.volume} for r in rows])
-                .set_index('date')
-                .sort_index()
-            )
-            last_local_date: date = pd.to_datetime(df.index.max()).date()
-            fetch_start_date: date = last_local_date + timedelta(days=1)
-
-            data_start_date: date = pd.to_datetime(df.index.min()).date()
-            self._remove_stale_data(ticker, data_start_date)
-        else:
-            data_start_date = None
-            fetch_start_date = (datetime.now() - timedelta(days=120)).date()
-
-        fetch_end_date = datetime.now().date()
+        """Returns the ticker's rows for the whole window, or None when the download fails."""
+        fetch_end_date = date.today()
+        fetch_start_date = window_start(fetch_end_date)
         logger.debug(f'⬇️ downloading data for ticker: {ticker}, dates: {fetch_start_date} to {fetch_end_date}')
-
-        days_between = (fetch_end_date - fetch_start_date).days
-        if days_between < 1:
-            logger.debug(f'nothing to download for ticker: {ticker}, dates: {fetch_start_date} to {fetch_end_date}')
-            return []
 
         try:
             # the JSON response is an empty list when the range holds no trading day
@@ -162,14 +164,3 @@ class TickerFetcher:
             level = logging.WARNING if self.strict else logging.DEBUG
             logger.log(level, f'⚠️ Error loading data for {ticker} from Tiingo: {error}')
             return None
-
-    def _remove_stale_data(self, ticker: str, data_start_date: date) -> None:
-        if data_start_date is None:
-            return
-
-        date_120d = (datetime.now() - timedelta(days=120)).date()
-        stale_data_num_days = (date_120d - data_start_date).days
-
-        if stale_data_num_days > 0:
-            logger.info(f'removing stale data for ticker {ticker}, num_days: {stale_data_num_days}')
-            self.price_data_repo.delete_before(date_120d)

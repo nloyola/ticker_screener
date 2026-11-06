@@ -49,6 +49,7 @@ class RunRefreshCmd(BaseCommand):
                 if not strict_fetch_succeeded(stats, args.max_failure_rate):
                     logger.error('run-refresh: fetch failed, analyze skipped')
                     sys.exit(1)
+                self.ticker_fetcher.prune()
                 self.analyzer.analyze()
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)

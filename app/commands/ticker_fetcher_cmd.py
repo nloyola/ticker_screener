@@ -39,7 +39,8 @@ class TickerFetcherCmd(BaseCommand):
             '--strict',
             action='store_true',
             help='log each failed ticker, print a summary and exit 1 when nothing was fetched, '
-            'every ticker failed or the failure rate exceeds --max-failure-rate',
+            'every ticker failed or the failure rate exceeds --max-failure-rate; otherwise delete the price rows '
+            'older than 120 days (without --strict, old rows are never deleted)',
         )
         parser.add_argument(
             '--max-failure-rate',
@@ -53,8 +54,11 @@ class TickerFetcherCmd(BaseCommand):
         sector_filter = args.sector.lower() if args.sector else None
         ticker_filter = args.ticker if args.ticker else None
         stats = self.ticker_fetcher.fetch(sector_filter=sector_filter, ticker_filter=ticker_filter, strict=args.strict)
-        if args.strict and not strict_fetch_succeeded(stats, args.max_failure_rate):
-            sys.exit(1)
+        if args.strict:
+            if not strict_fetch_succeeded(stats, args.max_failure_rate):
+                sys.exit(1)
+            # only a fetch judged a success may age out old rows: one that failed for every ticker keeps them all
+            self.ticker_fetcher.prune()
 
 
 def strict_fetch_succeeded(stats: 'FetchStats', max_failure_rate: float) -> bool:
