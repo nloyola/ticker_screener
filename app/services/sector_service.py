@@ -74,8 +74,15 @@ class SectorService:
 
         return aggregates
 
-    def subsector_for_ticker(self, ticker: str) -> Subsector:
-        return self._subsectors.get_by_ticker(ticker)
+    def subsector_for_ticker(self, ticker: str) -> Subsector | None:
+        """
+        Returns the first subsector, in id order, whose ticker list holds ticker (compared upper-cased), or None.
+        """
+        wanted = ticker.strip().upper()
+        for sub in self._subsectors.all():
+            if wanted in self._parse_tickers(sub.tickers):
+                return sub
+        return None
 
     @staticmethod
     def _parse_tickers(tickers: str | None) -> list[str]:

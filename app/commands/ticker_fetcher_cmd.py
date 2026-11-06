@@ -36,7 +36,7 @@ class TickerFetcherCmd(BaseCommand):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument('--sector', help='filter sectors by name (case-insensitive)')
-        parser.add_argument('--ticker', help='fetch a single ticker')
+        parser.add_argument('--ticker', help='fetch a single ticker (case-insensitive)')
         parser.add_argument(
             '--strict',
             action='store_true',
@@ -55,7 +55,8 @@ class TickerFetcherCmd(BaseCommand):
     def handle(self, args: argparse.Namespace, container: Container) -> None:
         ticker_fetcher: TickerFetcher = container.ticker_fetcher
         sector_filter = args.sector.lower() if args.sector else None
-        ticker_filter = args.ticker if args.ticker else None
+        # tickers are stored upper-cased, as the dashboard writes them
+        ticker_filter = args.ticker.strip().upper() if args.ticker and args.ticker.strip() else None
         stats = ticker_fetcher.fetch(sector_filter=sector_filter, ticker_filter=ticker_filter, strict=args.strict)
         if args.strict:
             if not strict_fetch_succeeded(stats, args.max_failure_rate):
