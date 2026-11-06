@@ -3,11 +3,13 @@
 import sqlite3
 import threading
 import time
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
 from app.db import BUSY_TIMEOUT_MS, SQLite, init_db, open_connection
+from app.models import PriceData, StockCriteria
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.sector_repo import SectorRepo
@@ -86,3 +88,24 @@ def test_repositories_commit_on_success_and_roll_back_on_error(db_path):
             raise RuntimeError
     assert repo.get('kept') == 'v'
     assert repo.get('dropped') is None
+
+
+def test_dates_round_trip_on_every_connection(db_path):
+    """
+    Dates are stored as ISO text and read back as dates: the DATE adapter and converter are registered once, so a
+    DATE column reads back as a date on any connection, and PriceDataRepo parses price_data.date, declared TEXT.
+    """
+    container = SimpleNamespace(db_path=db_path)
+    PriceDataRepo(container).replace_for_ticker(
+        'XOM', [PriceData(id=0, subsector_id=1, ticker='XOM', date=date(2026, 11, 5), close=110.5, volume=1000)]
+    )
+    StockCriteriaRepo(container).bulk_insert([StockCriteria(id=0, subsector_id=1, ticker='XOM')], date(2026, 11, 6))
+
+    assert [p.date for p in PriceDataRepo(container).all_for_ticker('XOM')] == [date(2026, 11, 5)]
+    with SQLite(db_path).connect() as con:
+        assert con.execute('SELECT date_created FROM stock_criteria').fetchone()[0] == date(2026, 11, 6)
+    raw = open_connection(db_path)
+    try:
+        assert raw.execute('SELECT date, typeof(date) FROM price_data').fetchone() == ('2026-11-05', 'text')
+    finally:
+        raw.close()

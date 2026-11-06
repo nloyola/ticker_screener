@@ -1,11 +1,16 @@
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager
-from datetime import date, datetime
+from datetime import date
 
 from app.container import Container
 from app.db import open_connection, scoped
 from app.models import PriceData
+
+
+def _price_data(row: sqlite3.Row) -> PriceData:
+    # schema.sql declares price_data.date as TEXT, so no converter applies to it: parse the ISO date here
+    return PriceData(**{**dict(row), 'date': date.fromisoformat(row['date'])})
 
 
 class PriceDataRepo:
@@ -13,8 +18,6 @@ class PriceDataRepo:
         self.db_path = container.db_path
 
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
-        sqlite3.register_adapter(date, lambda d: d.isoformat())
-        sqlite3.register_converter('DATE', lambda s: datetime.strptime(s.decode(), '%Y-%m-%d').date())
         con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
         return scoped(con)
@@ -65,9 +68,9 @@ class PriceDataRepo:
                 """,
                 (ticker, d),
             ).fetchone()
-            return PriceData(**row) if row else None
+            return _price_data(row) if row else None
 
-    def all(self) -> Iterable[PriceData]:
+    def all(self) -> Iterator[PriceData]:
         with self._connect() as con:
             rows = con.execute("""
                 SELECT id, subsector_id, ticker, date, close, volume
@@ -75,9 +78,9 @@ class PriceDataRepo:
                 ORDER BY ticker, date
             """).fetchall()
             for r in rows:
-                yield PriceData(**r)
+                yield _price_data(r)
 
-    def all_for_ticker(self, ticker: str) -> PriceData | None:
+    def all_for_ticker(self, ticker: str) -> Iterator[PriceData]:
         with self._connect() as con:
             rows = con.execute(
                 """
@@ -89,7 +92,7 @@ class PriceDataRepo:
                 (ticker,),
             )
             for r in rows:
-                yield PriceData(**r)
+                yield _price_data(r)
 
     def latest_for_ticker(self, ticker: str) -> PriceData | None:
         with self._connect() as con:
@@ -103,7 +106,7 @@ class PriceDataRepo:
                 """,
                 (ticker,),
             ).fetchone()
-            return PriceData(**row) if row else None
+            return _price_data(row) if row else None
 
     def delete_before(self, cutoff: date) -> int:
         """

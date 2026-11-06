@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 
@@ -17,7 +17,7 @@ class Ticker:
 class Sector:
     id: int
     sector: str
-    created_at: datetime = datetime.now()
+    created_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class Subsector:
     sector_id: int
     subsector: str
     tickers: str
-    created_at: datetime = datetime.now()
+    created_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass(frozen=True)

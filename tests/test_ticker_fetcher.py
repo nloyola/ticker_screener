@@ -129,8 +129,7 @@ def store(repo: PriceDataRepo, ticker: str, rows: list[tuple[date, float]], subs
 
 
 def stored(repo: PriceDataRepo, ticker: str) -> list[tuple[int, date, float]]:
-    # the date column is declared TEXT, so rows come back with ISO date strings
-    return [(p.subsector_id, date.fromisoformat(str(p.date)), p.close) for p in repo.all_for_ticker(ticker)]
+    return [(p.subsector_id, p.date, p.close) for p in repo.all_for_ticker(ticker)]
 
 
 def days_ago(n: int) -> date:

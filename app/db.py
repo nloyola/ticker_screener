@@ -4,9 +4,13 @@ from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-# Enable TIMESTAMP <-> datetime conversion via ISO 8601
+# Convert TIMESTAMP <-> datetime and DATE <-> date via ISO 8601, for every connection opened with
+# detect_types=sqlite3.PARSE_DECLTYPES. Registered once here, at import, rather than per connection: every
+# repository imports this module, so they all read and write dates the same way.
 sqlite3.register_adapter(_dt.datetime, lambda dt: dt.isoformat(timespec='seconds'))
 sqlite3.register_converter('TIMESTAMP', lambda b: _dt.datetime.fromisoformat(b.decode()))
+sqlite3.register_adapter(_dt.date, lambda d: d.isoformat())
+sqlite3.register_converter('DATE', lambda b: _dt.date.fromisoformat(b.decode()))
 
 # How long a connection waits for a lock held by another connection before
 # raising "database is locked". The stock_analyzer dashboard reads this file

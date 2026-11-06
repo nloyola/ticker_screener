@@ -1,5 +1,5 @@
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from datetime import date
 
@@ -94,16 +94,6 @@ class StockCriteriaRepo:
         con.row_factory = sqlite3.Row
         return scoped(con)
 
-    def insert(self, sc: StockCriteria) -> None:
-        sql = f"""
-            INSERT INTO stock_criteria ({','.join(COLUMNS)})
-            VALUES ({PLACEHOLDERS})
-            ON CONFLICT(ticker) DO UPDATE SET
-            {','.join(f'{c}=excluded.{c}' for c in COLUMNS if c != 'ticker')}
-        """
-        with self._connect() as con:
-            con.execute(sql, _row_values(sc))
-
     def bulk_insert(self, items: Iterable[StockCriteria], date_created: date) -> None:
         sql = f"""
         INSERT INTO stock_criteria ({','.join(COLUMNS)})
@@ -114,21 +104,3 @@ class StockCriteriaRepo:
         values = [_row_values(sc, date_created) for sc in items]
         with self._connect() as con:
             con.executemany(sql, values)
-
-    def get(self, ticker: str) -> StockCriteria | None:
-        with self._connect() as con:
-            row = con.execute(
-                'SELECT * FROM stock_criteria WHERE ticker = ?',
-                (ticker,),
-            ).fetchone()
-            return StockCriteria(**row) if row else None
-
-    def all(self) -> Iterator[StockCriteria]:
-        with self._connect() as con:
-            rows = con.execute('SELECT * FROM stock_criteria ORDER BY ticker').fetchall()
-            for r in rows:
-                yield StockCriteria(**r)
-
-    def delete(self, ticker: str) -> None:
-        with self._connect() as con:
-            con.execute('DELETE FROM stock_criteria WHERE ticker = ?', (ticker,))
