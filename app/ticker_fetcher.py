@@ -12,6 +12,7 @@ import requests
 from app.container import Container
 from app.models import PriceData
 from app.progress import report_progress
+from app.services.sector_service import normalize_ticker
 
 if TYPE_CHECKING:
     from app.repositories.price_data_repo import PriceDataRepo
@@ -180,17 +181,19 @@ class TickerFetcher:
         self.strict = strict
         self.stats = FetchStats()
         self._fetched = set()
-        sectors = self.sector_service.get_all()
 
         if ticker_filter:
-            subsector = self.sector_service.subsector_for_ticker(ticker_filter)
+            ticker = normalize_ticker(ticker_filter)
+            subsector = self.sector_service.subsector_for_ticker(ticker)
             if subsector is None:
-                logger.error(f"ticker not in any subsector: '{ticker_filter}'")
+                logger.error(f"ticker not in any subsector: '{ticker}'")
                 return self.stats
             report_progress('fetch', subsector='0/1')
-            self._fetch_for_tickers(subsector.id, [ticker_filter])
+            self._fetch_for_tickers(subsector.id, [ticker])
             report_progress('fetch', subsector='1/1')
             return self.stats
+
+        sectors = self.sector_service.get_all()
 
         if sector_filter:
             sectors = [g for g in sectors if g.sector.lower() == sector_filter]

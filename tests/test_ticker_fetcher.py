@@ -195,6 +195,15 @@ def test_error_detail_quoted_back_never_shows_the_key(repo, caplog):
     assert 'test-key' not in caplog.text
 
 
+def test_a_single_ticker_is_fetched_and_stored_normalized(repo):
+    tiingo = FakeTiingo({'XOM': [(days_ago(1), 2.0)]})
+
+    make_fetcher(repo, tiingo, {1: ['CVX'], 2: ['XOM']}).fetch(ticker_filter=' xom ')
+
+    assert [ticker for ticker, _, _ in tiingo.requests] == ['XOM']
+    assert stored(repo, 'XOM') == [(2, days_ago(1), 2.0)]
+
+
 def test_prune_deletes_only_rows_before_the_window(repo):
     store(repo, 'CVX', [(OLD_DAY, 1.0), (window_start(TODAY), 2.0)])
 

@@ -46,16 +46,21 @@ def test_finds_nothing_for_a_ticker_no_list_holds(service, ticker):
     assert service.subsector_for_ticker(ticker) is None
 
 
-def test_first_subsector_in_id_order_wins(service):
-    sector_id = service._subsectors.all()[0].sector_id
-    service._subsectors.insert(Subsector(id=0, sector_id=sector_id, subsector='Later', tickers='CVX'))
-    assert service.subsector_for_ticker('CVX').subsector == 'Spaced'
+def test_searches_in_the_order_a_full_fetch_walks(service):
+    """Sectors by name, then subsectors by id: the first listing a full fetch meets is the one --ticker finds."""
+    mixed_id = next(iter(service._sectors.all())).id
+    alpha_id = service._sectors.insert(Sector(id=0, sector='Alpha'))  # sorts before 'Mixed' though inserted later
+    service._subsectors.insert(Subsector(id=0, sector_id=mixed_id, subsector='Later', tickers='CVX'))
+    assert service.subsector_for_ticker('CVX').subsector == 'Spaced'  # same sector: lower id first
+
+    service._subsectors.insert(Subsector(id=0, sector_id=alpha_id, subsector='First by name', tickers='CVX'))
+    assert service.subsector_for_ticker('CVX').subsector == 'First by name'
+    walk = [sub.subsector for sector in service.get_all() for sub in sector.subsectors if 'CVX' in sub.tickers]
+    assert walk[0] == 'First by name'
 
 
-@pytest.mark.parametrize(
-    ('argv', 'expected'), [(['--ticker', ' brk_b '], 'BRK_B'), (['--ticker', ' '], None), ([], None)]
-)
-def test_ticker_fetcher_upper_cases_the_ticker(argv, expected):
+@pytest.mark.parametrize(('argv', 'expected'), [(['--ticker', ' brk_b '], 'BRK_B'), ([], None)])
+def test_ticker_fetcher_normalizes_the_ticker(argv, expected):
     calls = []
 
     def fetch(sector_filter=None, ticker_filter=None, strict=False):
@@ -67,3 +72,11 @@ def test_ticker_fetcher_upper_cases_the_ticker(argv, expected):
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args(argv), SimpleNamespace(ticker_fetcher=SimpleNamespace(fetch=fetch)))
     assert calls == [expected]
+
+
+def test_ticker_fetcher_rejects_a_blank_ticker(capsys):
+    parser = argparse.ArgumentParser()
+    TickerFetcherCmd().add_arguments(parser)
+    with pytest.raises(SystemExit):
+        parser.parse_args(['--ticker', ' '])
+    assert 'must not be blank' in capsys.readouterr().err

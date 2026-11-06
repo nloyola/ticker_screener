@@ -5,11 +5,15 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from app.container import Container
-from app.models import Subsector
 
 if TYPE_CHECKING:
     from app.repositories.sector_repo import SectorRepo
     from app.repositories.subsector_repo import SubsectorRepo
+
+
+def normalize_ticker(ticker: str) -> str:
+    """The canonical form of a ticker symbol, as stored: trimmed and upper-cased."""
+    return ticker.strip().upper()
 
 
 @dataclass(frozen=True)
@@ -74,14 +78,17 @@ class SectorService:
 
         return aggregates
 
-    def subsector_for_ticker(self, ticker: str) -> Subsector | None:
+    def subsector_for_ticker(self, ticker: str) -> SubsectorWithTickers | None:
         """
-        Returns the first subsector, in id order, whose ticker list holds ticker (compared upper-cased), or None.
+        Returns the first subsector whose ticker list holds ticker, compared normalized, or None. Subsectors are
+        searched in get_all's order, the order a full fetch walks them, so a ticker listed in several subsectors is
+        stored under the same one by either.
         """
-        wanted = ticker.strip().upper()
-        for sub in self._subsectors.all():
-            if wanted in self._parse_tickers(sub.tickers):
-                return sub
+        wanted = normalize_ticker(ticker)
+        for sector in self.get_all():
+            for sub in sector.subsectors:
+                if wanted in sub.tickers:
+                    return sub
         return None
 
     @staticmethod
@@ -94,7 +101,7 @@ class SectorService:
             return []
         seen = set()
         out: list[str] = []
-        for t in (x.strip().upper() for x in tickers.split(',') if x.strip()):
+        for t in (normalize_ticker(x) for x in tickers.split(',') if x.strip()):
             if t not in seen:
                 seen.add(t)
                 out.append(t)

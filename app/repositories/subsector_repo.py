@@ -50,7 +50,7 @@ class SubsectorRepo:
         with self._connect() as con:
             cur = con.cursor()
             cur.execute(
-                'SELECT id, sector_id, subsector, tickers, created_at FROM subsector WHERE sector_id = ?',
+                'SELECT id, sector_id, subsector, tickers, created_at FROM subsector WHERE sector_id = ? ORDER BY id',
                 (sector_id,),
             )
             return [Subsector(*row) for row in cur.fetchall()]
@@ -65,10 +65,3 @@ class SubsectorRepo:
         with self._connect() as con:
             con.execute('DELETE FROM subsector')
             con.commit()
-
-    def all(self) -> Sequence[Subsector]:
-        """Returns every subsector, in id order."""
-        with self._connect() as con:
-            cur = con.cursor()
-            cur.execute('SELECT id, sector_id, subsector, tickers, created_at FROM subsector ORDER BY id')
-            return [Subsector(*row) for row in cur.fetchall()]
