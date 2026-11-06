@@ -46,7 +46,7 @@ uv run ruff check .                            # lint
 uv run ruff format .                           # format
 ```
 
-The tests in `tests/` cover only what the parent's admin pages rely on: the `PROGRESS` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`.
+The tests in `tests/` cover what the parent's admin pages rely on, the `PROGRESS` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, and the core criteria `analyze` computes (`tests/test_analyzer.py`, made-up price series checked against hand-worked values).
 
 ## Git Workflow
 
