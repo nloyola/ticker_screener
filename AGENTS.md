@@ -25,7 +25,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 ## Environment & Tooling
 
 - Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
-- Environment file: `.env` at the root, loaded by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs. Keys: `DB_NAME` (the database path, needed by every command but `market-value`) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
+- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command but `market-value`) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
 - Run `main.py` from the repo root: it reads `config/0-stdout.json` and `schema.sql` relative to the working directory.
 
 

@@ -4,6 +4,8 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
+from app.config import ConfigError
+
 
 class Provider:
     def get(self) -> Any:  # override in subclasses
@@ -15,6 +17,20 @@ class Value(Provider):
         self._value = value
 
     def get(self) -> Any:
+        return self._value
+
+
+class Required(Provider):
+    """A config value that raises ConfigError when read while unset, so a command that reads a key it did not list
+    in REQUIRED_CONFIG fails naming it instead of running without it."""
+
+    def __init__(self, key: str, value: str | None):
+        self._key = key
+        self._value = value
+
+    def get(self) -> str:
+        if not self._value:
+            raise ConfigError(f'{self._key} was read but the command does not list it in REQUIRED_CONFIG')
         return self._value
 
 

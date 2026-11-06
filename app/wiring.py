@@ -1,7 +1,7 @@
 # wiring.py
 from app.analyzer import Analyzer
-from app.config import Config
-from app.container import Container, Singleton, Value
+from app.config import DB_NAME, TIINGO_API_KEY, Config
+from app.container import Container, Required, Singleton
 from app.db import SQLite
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
@@ -18,8 +18,8 @@ def build_container(config: Config) -> Container:
     c = Container()
 
     # every provider is lazy: only what a command reads from the container is built
-    c.register('tiingo_api_key', Value(config.tiingo_api_key))
-    c.register('db_path', Value(config.db_name))
+    c.register('tiingo_api_key', Required(TIINGO_API_KEY, config.tiingo_api_key))
+    c.register('db_path', Required(DB_NAME, config.db_name))
 
     # Core infra
     c.register('db', Singleton(lambda: SQLite(c.db_path)))  # one SQLite wrapper

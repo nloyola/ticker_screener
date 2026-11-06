@@ -128,4 +128,51 @@ def test_db_init_builds_nothing_it_does_not_use(tmp_path):
 
     DbInit().handle(argparse.Namespace(), container)
 
-    assert container.read == ['db_path']
+    assert container.read == ['db_path', 'db_path', 'db']
+
+
+def test_reading_a_key_the_command_did_not_require_names_it():
+    container = build_container(Config(db_name='/data/a.db', tiingo_api_key=None))
+
+    with pytest.raises(ConfigError, match='TIINGO_API_KEY'):
+        container.ticker_fetcher  # noqa: B018
+
+
+def test_the_dotenv_file_is_read_when_stdin_is_not_a_terminal(clean_env):
+    (clean_env / '.env').write_text('DB_NAME=/file.db\nTIINGO_API_KEY=file-key\n')
+
+    cfg = load_config(require=('DB_NAME', 'TIINGO_API_KEY'))
+
+    assert cfg.db_name == '/file.db'
+    assert cfg.tiingo_api_key == 'file-key'
+
+
+def test_stdin_wins_over_the_dotenv_file(clean_env, monkeypatch):
+    (clean_env / '.env').write_text('DB_NAME=/file.db\nTIINGO_API_KEY=file-key\n')
+    monkeypatch.setattr(sys, 'stdin', io.StringIO('DB_NAME=/piped.db\n'))
+
+    cfg = load_config(require=('DB_NAME', 'TIINGO_API_KEY'))
+
+    assert cfg.db_name == '/piped.db'
+    assert cfg.tiingo_api_key == 'file-key'
+
+
+def test_an_empty_environment_value_is_filled_from_the_dotenv_file(clean_env, monkeypatch):
+    monkeypatch.setenv('TIINGO_API_KEY', '')
+    monkeypatch.setenv('DB_NAME', '/data/a.db')
+    (clean_env / '.env').write_text('TIINGO_API_KEY=file-key\n')
+
+    cfg = load_config(require=('DB_NAME', 'TIINGO_API_KEY'))
+
+    assert cfg.tiingo_api_key == 'file-key'
+    assert os.environ['TIINGO_API_KEY'] == ''
+
+
+def test_db_init_keeps_the_database_when_stdin_has_no_answer(tmp_path):
+    db = tmp_path / 'a.db'
+    assert run_main(tmp_path, 'db-init', DB_NAME=str(db)).returncode == 0
+
+    result = run_main(tmp_path, 'db-init', DB_NAME=str(db))
+
+    assert result.returncode == 0, result.stderr
+    assert 'Keeping existing database unchanged.' in result.stdout
