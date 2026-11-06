@@ -216,10 +216,10 @@ def test_replace_for_ticker_rejects_another_tickers_rows(repo):
 
 
 def run_cmd(fetcher: TickerFetcher, *argv: str) -> None:
-    cmd = TickerFetcherCmd(SimpleNamespace(ticker_fetcher=fetcher))
+    cmd = TickerFetcherCmd()
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
-    cmd.handle(parser.parse_args(argv))
+    cmd.handle(parser.parse_args(argv), SimpleNamespace(ticker_fetcher=fetcher))
 
 
 def test_strict_fetch_where_every_download_fails_leaves_price_data_unchanged(repo):

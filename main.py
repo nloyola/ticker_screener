@@ -4,6 +4,7 @@ import json
 import logging.config
 import logging.handlers
 import pathlib
+import sys
 
 from app.commands.analyzer import AnalyzerCommand
 from app.commands.base_command import BaseCommand, CLI_Interface
@@ -13,6 +14,7 @@ from app.commands.market_value import MarketValueCommand
 from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.commands.ticker_sync_cmd import TickerSyncCmd
+from app.config import ConfigError, load_config
 from app.wiring import build_container
 
 logger = logging.getLogger(__name__)
@@ -79,27 +81,34 @@ class CommandLineInterface(CLI_Interface):
         handler.add_arguments(subparser)
 
     def execute(self) -> None:
-        """Parses and executes the command provided in the command line arguments."""
+        """
+        Parses the command line, checks the config keys the named command needs, builds the container and runs the
+        command. A missing key stops here with one line naming it and exit 2, before any work.
+        """
         args = self.parser.parse_args()
-        if args.command in self.commands:
-            self.commands[args.command].handle(args)
-        else:
+        command = self.commands.get(args.command)
+        if command is None:
             self.parser.print_help()
+            return
+        try:
+            config = load_config(require=command.REQUIRED_CONFIG)
+        except ConfigError as err:
+            print(f'{self.parser.prog} {args.command}: {err}', file=sys.stderr)
+            sys.exit(2)
+        command.handle(args, build_container(config))
 
 
 def main() -> None:
     setup_logging()
     logging.basicConfig(level=logging.INFO)
 
-    container = build_container()
-
     cli = CommandLineInterface()
-    DbInit(container).add_to_cli(cli)
-    ImporterCommand(container).add_to_cli(cli)
-    TickerFetcherCmd(container).add_to_cli(cli)
-    TickerSyncCmd(container).add_to_cli(cli)
-    AnalyzerCommand(container).add_to_cli(cli)
-    RunRefreshCmd(container).add_to_cli(cli)
+    DbInit().add_to_cli(cli)
+    ImporterCommand().add_to_cli(cli)
+    TickerFetcherCmd().add_to_cli(cli)
+    TickerSyncCmd().add_to_cli(cli)
+    AnalyzerCommand().add_to_cli(cli)
+    RunRefreshCmd().add_to_cli(cli)
     MarketValueCommand().add_to_cli(cli)
     cli.execute()
 

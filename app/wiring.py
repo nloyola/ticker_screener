@@ -1,4 +1,5 @@
 # wiring.py
+from app.analyzer import Analyzer
 from app.config import Config
 from app.container import Container, Singleton, Value
 from app.db import SQLite
@@ -13,13 +14,12 @@ from app.ticker_fetcher import TickerFetcher
 from app.ticker_sync_tiingo import TickerSync
 
 
-def build_container() -> Container:
+def build_container(config: Config) -> Container:
     c = Container()
 
-    c.register('tiingo_api_key', Value(Config.get_tiingo_api_key()))
-
-    # Config values can be simple factories/singletons too
-    c.register('db_path', Value(Config.get_db_name()))
+    # every provider is lazy: only what a command reads from the container is built
+    c.register('tiingo_api_key', Value(config.tiingo_api_key))
+    c.register('db_path', Value(config.db_name))
 
     # Core infra
     c.register('db', Singleton(lambda: SQLite(c.db_path)))  # one SQLite wrapper
@@ -34,4 +34,5 @@ def build_container() -> Container:
     c.register('sector_service', Singleton(lambda: SectorService(c)))
     c.register('ticker_fetcher', Singleton(lambda: TickerFetcher(c)))
     c.register('ticker_sync', Singleton(lambda: TickerSync(c)))
+    c.register('analyzer', Singleton(lambda: Analyzer(c)))
     return c

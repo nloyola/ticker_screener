@@ -7,6 +7,8 @@ import plotly.graph_objs as go
 import yfinance as yf
 from rich.console import Console
 
+from app.container import Container
+
 from .base_command import BaseCommand
 
 console = Console()
@@ -18,15 +20,18 @@ class MarketValueCommand(BaseCommand):
 
     _DATA_DIR = 'stock_data'
 
+    # reads nothing from the config or the database
+    REQUIRED_CONFIG = ()
+
     def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        os.makedirs(self._DATA_DIR, exist_ok=True)
 
     # def add_arguments(self, parser: argparse.ArgumentParser) -> None:
     # parser.add_argument("--json", help="use the stock tickers from the JSON file")
     # parser.add_argument("--sector", help="filter groups by sector name (case-insensitive)")
 
-    def handle(self, args: argparse.Namespace) -> None:
+    def handle(self, args: argparse.Namespace, container: Container) -> None:
+        os.makedirs(self._DATA_DIR, exist_ok=True)
         holdings = {
             'XUS.TO': [
                 {'date': '2025-04-10', 'shares': 100},

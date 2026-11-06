@@ -25,7 +25,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 ## Environment & Tooling
 
 - Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
-- Environment file: `.env` at the root, loaded by `app/config.py` only when the environment does not already hold every key. Keys: `TIINGO_API_KEY` (required), `DB_NAME` (required, the database path). Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
+- Environment file: `.env` at the root, loaded by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs. Keys: `DB_NAME` (the database path, needed by every command but `market-value`) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
 - Run `main.py` from the repo root: it reads `config/0-stdout.json` and `schema.sql` relative to the working directory.
 
 
@@ -33,7 +33,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 - `uv run ruff check .` and `uv run ruff format --check .` clean (`pyproject.toml`: 120 columns, single quotes, rules `E`, `F`, `I`, `UP`, `B`).
 - Keep the layering: commands parse arguments and call a service or worker class; repositories own all SQL; `models.py` has no I/O. A new table gets a repository in `app/repositories/`, registered in `build_container` (`app/wiring.py`).
-- A new subcommand subclasses `BaseCommand` in `app/commands/` and is registered in `main()`.
+- A new subcommand subclasses `BaseCommand` in `app/commands/`, lists the config keys it needs in `REQUIRED_CONFIG`, takes its workers from the container in `handle` (never in `__init__`), and is registered in `main()`.
 - Log through `logging.getLogger(__name__)`; use rich only for interactive console output.
 - Do database work inside `SQLite.connect()`, which wraps it in one transaction and rolls back on error.
 

@@ -2,6 +2,9 @@ import argparse
 
 from rich.console import Console
 
+from app.config import DB_NAME
+from app.container import Container
+
 console = Console()
 
 
@@ -11,7 +14,14 @@ class CLI_Interface:
 
 
 class BaseCommand:
-    """Base class for creating commands."""
+    """
+    Base class for creating commands.
+
+    A command builds nothing when it is registered: handle() takes what it needs from the container, which main()
+    builds only after checking the config keys the command lists in REQUIRED_CONFIG.
+    """
+
+    REQUIRED_CONFIG: tuple[str, ...] = (DB_NAME,)
 
     def __init__(self, name: str, description: str) -> None:
         self._name = name
@@ -30,6 +40,6 @@ class BaseCommand:
         """Hook to add arguments to the subparser."""
         pass
 
-    def handle(self, args: argparse.Namespace) -> None:
+    def handle(self, args: argparse.Namespace, container: Container) -> None:
         """The logic for handling the command."""
         raise NotImplementedError('Subclasses must implement the handle() method.')

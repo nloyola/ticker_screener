@@ -74,25 +74,25 @@ class FakeFetcher:
         return 0
 
 
-def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, FakeFetcher, list[str]]:
+def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleNamespace, FakeFetcher, list[str]]:
     fetcher = FakeFetcher(stats)
-    container = SimpleNamespace(db_path=db_path, ticker_fetcher=fetcher, stock_criteria_repo=None, price_data_repo=None)
-    cmd = RunRefreshCmd(container)
     analyzed = []
-    cmd.analyzer = SimpleNamespace(analyze=lambda: analyzed.append(True))
-    return cmd, fetcher, analyzed
+    container = SimpleNamespace(
+        db_path=db_path, ticker_fetcher=fetcher, analyzer=SimpleNamespace(analyze=lambda: analyzed.append(True))
+    )
+    return RunRefreshCmd(), container, fetcher, analyzed
 
 
-def run(cmd: RunRefreshCmd, *argv: str) -> None:
+def run(cmd: RunRefreshCmd, container: SimpleNamespace, *argv: str) -> None:
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
-    cmd.handle(parser.parse_args(argv))
+    cmd.handle(parser.parse_args(argv), container)
 
 
 def test_fetches_strictly_then_analyzes(db_path):
-    cmd, fetcher, analyzed = make_cmd(db_path, FetchStats(attempted=10, failed=1))
+    cmd, container, fetcher, analyzed = make_cmd(db_path, FetchStats(attempted=10, failed=1))
 
-    run(cmd)
+    run(cmd, container)
 
     assert fetcher.calls == [{'strict': True}]
     assert fetcher.prunes == 1
@@ -108,10 +108,10 @@ def test_fetches_strictly_then_analyzes(db_path):
     ],
 )
 def test_failed_fetch_exits_1_without_pruning_or_analyzing(db_path, stats, argv):
-    cmd, fetcher, analyzed = make_cmd(db_path, stats)
+    cmd, container, fetcher, analyzed = make_cmd(db_path, stats)
 
     with pytest.raises(SystemExit) as exit_info:
-        run(cmd, *argv)
+        run(cmd, container, *argv)
 
     assert exit_info.value.code == 1
     assert fetcher.prunes == 0
@@ -121,11 +121,11 @@ def test_failed_fetch_exits_1_without_pruning_or_analyzing(db_path, stats, argv)
 
 
 def test_held_lock_exits_75_without_fetching(db_path, capsys):
-    cmd, fetcher, analyzed = make_cmd(db_path, FetchStats(attempted=10, failed=0))
+    cmd, container, fetcher, analyzed = make_cmd(db_path, FetchStats(attempted=10, failed=0))
 
     with screener_lock(db_path):
         with pytest.raises(SystemExit) as exit_info:
-            run(cmd)
+            run(cmd, container)
 
     assert EXIT_LOCK_HELD == 75
     assert exit_info.value.code == 75

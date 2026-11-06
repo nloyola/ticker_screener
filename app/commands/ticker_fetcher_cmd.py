@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
+from app.config import DB_NAME, TIINGO_API_KEY
 from app.container import Container
 
 from .base_command import BaseCommand
@@ -28,9 +29,10 @@ class TickerFetcherCmd(BaseCommand):
     _NAME = 'ticker-fetcher'
     _DESCRIPTION = 'fetches stock ticker price data'
 
-    def __init__(self, container: Container) -> None:
+    REQUIRED_CONFIG = (DB_NAME, TIINGO_API_KEY)
+
+    def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.ticker_fetcher: TickerFetcher = container.ticker_fetcher
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument('--sector', help='filter sectors by name (case-insensitive)')
@@ -50,15 +52,16 @@ class TickerFetcherCmd(BaseCommand):
             help='with --strict, the highest fraction of failed tickers (0 to 1) that still exits 0 (default: 0.5)',
         )
 
-    def handle(self, args: argparse.Namespace) -> None:
+    def handle(self, args: argparse.Namespace, container: Container) -> None:
+        ticker_fetcher: TickerFetcher = container.ticker_fetcher
         sector_filter = args.sector.lower() if args.sector else None
         ticker_filter = args.ticker if args.ticker else None
-        stats = self.ticker_fetcher.fetch(sector_filter=sector_filter, ticker_filter=ticker_filter, strict=args.strict)
+        stats = ticker_fetcher.fetch(sector_filter=sector_filter, ticker_filter=ticker_filter, strict=args.strict)
         if args.strict:
             if not strict_fetch_succeeded(stats, args.max_failure_rate):
                 sys.exit(1)
             # only a fetch judged a success may age out old rows: one that failed for every ticker keeps them all
-            self.ticker_fetcher.prune()
+            ticker_fetcher.prune()
 
 
 def strict_fetch_succeeded(stats: 'FetchStats', max_failure_rate: float) -> bool:

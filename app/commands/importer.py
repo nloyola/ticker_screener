@@ -9,24 +9,23 @@ import pandas as pd
 
 from app.commands.base_command import BaseCommand
 from app.container import Container
-from app.db import clear_market_data
+from app.db import SQLite, clear_market_data
 
 
 class ImporterCommand(BaseCommand):
     _NAME = 'import'
     _DESCRIPTION = 'Replaces all sectors, subsectors, and tickers with those in an Excel file.'
 
-    def __init__(self, container: Container) -> None:
+    def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.db = container.db
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             '--excel', required=True, help='Path to Excel file with columns: sector, subsector, tickers'
         )
 
-    def handle(self, args: argparse.Namespace) -> None:
-        self.excel_import(args.excel)
+    def handle(self, args: argparse.Namespace, container: Container) -> None:
+        self.excel_import(container.db, args.excel)
 
     # ---- internals ---------------------------------------------------------
 
@@ -80,7 +79,7 @@ class ImporterCommand(BaseCommand):
             rows.append((sector, subsector, tickers_csv))
         return rows
 
-    def excel_import(self, filename: str) -> None:
+    def excel_import(self, db: SQLite, filename: str) -> None:
         """
         Replaces every sector and subsector with the spreadsheet's contents.
 
@@ -91,7 +90,7 @@ class ImporterCommand(BaseCommand):
         """
         rows = self._read_rows(filename)
 
-        with self.db.connect() as con:
+        with db.connect() as con:
             con.execute('DELETE FROM subsector')
             con.execute('DELETE FROM sector')
             clear_market_data(con)

@@ -15,12 +15,12 @@ class DbInit(BaseCommand):
     _NAME = 'db-init'
     _DESCRIPTION = 'creates missing tables and empties the market data tables, keeping sectors'
 
-    def __init__(self, container: Container) -> None:
+    def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.db_path = container.db_path
 
-    def handle(self, args: argparse.Namespace) -> None:
-        db_file = Path(self.db_path)
+    def handle(self, args: argparse.Namespace, container: Container) -> None:
+        db_path: str = container.db_path
+        db_file = Path(db_path)
         tables = ', '.join(MARKET_DATA_TABLES)
 
         if db_file.exists():
@@ -36,7 +36,7 @@ class DbInit(BaseCommand):
                 print('Keeping existing database unchanged.')
                 return
 
-        init_db(self.db_path)
-        with SQLite(self.db_path).connect() as con:
+        init_db(db_path)
+        with SQLite(db_path).connect() as con:
             clear_market_data(con)
         print(f"DB ready at: '{db_file}'. Emptied {tables}; kept sectors and subsectors.")

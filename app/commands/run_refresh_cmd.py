@@ -4,7 +4,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
-from app.analyzer import Analyzer
+from app.config import DB_NAME, TIINGO_API_KEY
 from app.container import Container
 from app.screener_lock import ScreenerLockHeld, screener_lock
 
@@ -12,6 +12,7 @@ from .base_command import BaseCommand
 from .ticker_fetcher_cmd import failure_rate_arg, strict_fetch_succeeded
 
 if TYPE_CHECKING:
+    from app.analyzer import Analyzer
     from app.ticker_fetcher import TickerFetcher
 
 logger = logging.getLogger(__name__)
@@ -27,11 +28,10 @@ class RunRefreshCmd(BaseCommand):
         f'exits {EXIT_LOCK_HELD} if another refresh holds the lock'
     )
 
-    def __init__(self, container: Container) -> None:
+    REQUIRED_CONFIG = (DB_NAME, TIINGO_API_KEY)
+
+    def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
-        self.db_path: str = container.db_path
-        self.ticker_fetcher: TickerFetcher = container.ticker_fetcher
-        self.analyzer = Analyzer(container)
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
@@ -42,15 +42,17 @@ class RunRefreshCmd(BaseCommand):
             help='the highest fraction of failed tickers (0 to 1) that still runs analyze (default: 0.5)',
         )
 
-    def handle(self, args: argparse.Namespace) -> None:
+    def handle(self, args: argparse.Namespace, container: Container) -> None:
+        ticker_fetcher: TickerFetcher = container.ticker_fetcher
+        analyzer: Analyzer = container.analyzer
         try:
-            with screener_lock(self.db_path):
-                stats = self.ticker_fetcher.fetch(strict=True)
+            with screener_lock(container.db_path):
+                stats = ticker_fetcher.fetch(strict=True)
                 if not strict_fetch_succeeded(stats, args.max_failure_rate):
                     logger.error('run-refresh: fetch failed, analyze skipped')
                     sys.exit(1)
-                self.ticker_fetcher.prune()
-                self.analyzer.analyze()
+                ticker_fetcher.prune()
+                analyzer.analyze()
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)
             sys.exit(EXIT_LOCK_HELD)
