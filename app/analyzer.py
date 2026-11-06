@@ -34,8 +34,22 @@ class Analyzer:
             logger.info('No price data found.')
             return
 
-        # analyze each ticker -> StockCriteria | None
-        results = [self.analyze_ticker(ticker, group_df) for ticker, group_df in df.groupby(level='ticker')]
+        # A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with
+        # today's date_created, so it keeps its previous stock_criteria row instead.
+        newest = df.index.get_level_values('date').max()
+        results: list[StockCriteria | None] = []
+        stale = 0
+        for ticker, group_df in df.groupby(level='ticker'):
+            last = group_df.index.get_level_values('date').max()
+            if last < newest:
+                logger.warning(
+                    f'{ticker} not scored: its last price is from {last}, before the newest market date {newest}'
+                )
+                stale += 1
+                continue
+            results.append(self.analyze_ticker(ticker, group_df))
+
+        print(f'skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest})')
 
         # keep only real StockCriteria objects
         items: list[StockCriteria] = [sc for sc in results if sc is not None]

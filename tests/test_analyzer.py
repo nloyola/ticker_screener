@@ -420,3 +420,38 @@ def test_analyze_saves_one_row_per_ticker_with_enough_history():
     assert by_ticker['AAA'].core_criteria_met is True
     assert by_ticker['BBB'].core_criteria_met is False
     assert by_ticker['BBB'].breakout_confirmed == 0
+
+
+def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(caplog, capsys):
+    # STALE's download failed in the last fetch, so its rows end a day before everyone else's
+    rows = (
+        price_rows('AAA', rising(100), volumes_with_last(100, 2000))
+        + price_rows('BBB', rising(100), volumes_with_last(100, 1500))
+        + price_rows('STALE', rising(99), volumes_with_last(99, 2000))
+    )
+    analyzer, criteria_repo = make_analyzer(rows)
+
+    with caplog.at_level('WARNING', logger='app.analyzer'):
+        analyzer.analyze()
+
+    ((items, _),) = criteria_repo.saved
+    assert sorted(sc.ticker for sc in items) == ['AAA', 'BBB']
+    newest, last = date(2026, 1, 1) + timedelta(days=99), date(2026, 1, 1) + timedelta(days=98)
+    warnings = [r for r in caplog.records if r.levelname == 'WARNING']
+    assert [r.getMessage() for r in warnings] == [
+        f'STALE not scored: its last price is from {last}, before the newest market date {newest}'
+    ]
+    assert 'skipped 1 stale ticker' in capsys.readouterr().out
+
+
+def test_analyze_with_every_ticker_current_skips_none(capsys):
+    rows = price_rows('AAA', rising(100), volumes_with_last(100, 2000)) + price_rows(
+        'BBB', rising(100), volumes_with_last(100, 2000)
+    )
+    analyzer, criteria_repo = make_analyzer(rows)
+
+    analyzer.analyze()
+
+    ((items, _),) = criteria_repo.saved
+    assert sorted(sc.ticker for sc in items) == ['AAA', 'BBB']
+    assert 'skipped 0 stale tickers' in capsys.readouterr().out
