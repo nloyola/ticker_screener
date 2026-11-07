@@ -25,7 +25,7 @@ Its exit code tells a caller what happened:
 | Code | Meaning |
 |---|---|
 | `0` | The fetch and the analysis both ran. |
-| `1` | The strict fetch failed (nothing fetched, every ticker failed, or the failure rate exceeded `--max-failure-rate`), so `analyze` did not run; or a step raised an error. |
+| `1` | The strict fetch failed (nothing fetched, every ticker failed, or the failure rate exceeded `--max-failure-rate`), so `analyze` did not run; or the price API stopped the fetch before any price request (EODHD with too few calls left today, or refusing the key), logged as an ERROR line ending in `ticker-fetcher stopped: <reason>`, which the stock_analyzer admin pages quote, so keep that wording; or a step raised an error. |
 | `75` | Another refresh holds the lock. Nothing ran; try again later. |
 
 The lock is a `flock`, which the kernel releases when its process exits or dies, so a crashed run never leaves it held. The `screener.lock` file stays on disk between runs and must not be deleted while a refresh may be running. Running `ticker-fetcher` or `analyze` on its own takes no lock.

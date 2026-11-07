@@ -171,7 +171,7 @@ def test_eodhd_run_whose_key_is_refused_stops_before_any_price_request(repo, cap
     assert len(adapter.sent) == 1
 
 
-def test_run_refresh_stopped_by_eodhd_exits_1_without_pruning_or_analyzing(repo, tmp_path):  # noqa: F811
+def test_run_refresh_stopped_by_eodhd_exits_1_without_pruning_or_analyzing(repo, tmp_path, caplog):  # noqa: F811
     client, adapter = eodhd([answer(401, {}, 'https://eodhd.com/api/user')])
     fetcher = make_fetcher(repo, client, {1: ['AAPL']})
     analyzed = []
@@ -190,6 +190,9 @@ def test_run_refresh_stopped_by_eodhd_exits_1_without_pruning_or_analyzing(repo,
     assert exit_info.value.code == 1
     assert analyzed == []
     assert len(adapter.sent) == 1
+    # the stock_analyzer runner quotes the reason after this prefix in the run's message (README, exit codes)
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1 and errors[0].startswith('ticker-fetcher stopped: EODHD refused the API key')
 
 
 @pytest.mark.parametrize(
