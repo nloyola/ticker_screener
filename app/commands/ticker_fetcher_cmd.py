@@ -3,8 +3,9 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from app.config import DB_NAME, TIINGO_API_KEY
+from app.config import DB_NAME, PRICE_API
 from app.container import Container
+from app.price_apis import PriceApiStop
 from app.services.sector_service import normalize_ticker
 
 from .base_command import BaseCommand
@@ -33,7 +34,7 @@ class TickerFetcherCmd(BaseCommand):
     _NAME = 'ticker-fetcher'
     _DESCRIPTION = 'fetches stock ticker price data'
 
-    REQUIRED_CONFIG = (DB_NAME, TIINGO_API_KEY)
+    REQUIRED_CONFIG = (DB_NAME, PRICE_API)
 
     def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
@@ -59,7 +60,9 @@ class TickerFetcherCmd(BaseCommand):
     def handle(self, args: argparse.Namespace, container: Container) -> None:
         ticker_fetcher: TickerFetcher = container.ticker_fetcher
         sector_filter = args.sector.lower() if args.sector else None
-        stats = ticker_fetcher.fetch(sector_filter=sector_filter, ticker_filter=args.ticker, strict=args.strict)
+        stats = fetch_or_exit(
+            ticker_fetcher, sector_filter=sector_filter, ticker_filter=args.ticker, strict=args.strict
+        )
         if args.strict:
             if not strict_fetch_succeeded(stats, args.max_failure_rate):
                 sys.exit(1)
@@ -67,14 +70,28 @@ class TickerFetcherCmd(BaseCommand):
             ticker_fetcher.prune()
 
 
+def fetch_or_exit(ticker_fetcher: 'TickerFetcher', **kwargs) -> 'FetchStats':
+    """Runs the fetch; exits 1, after logging why, when the price API stopped it before any price request."""
+    try:
+        return ticker_fetcher.fetch(**kwargs)
+    except PriceApiStop as err:
+        logger.error(f'ticker-fetcher stopped: {err}')
+        sys.exit(1)
+
+
 def strict_fetch_succeeded(stats: 'FetchStats', max_failure_rate: float) -> bool:
     """
     Prints the strict summary line and returns False, after logging an error, when nothing was fetched, every
     ticker failed or the failure rate exceeds max_failure_rate.
+
+    The line starts 'ticker-fetcher: <N> attempted, <N> failed', which the dashboard's runner parses, and always ends
+    with the skipped count, even at 0: 'ticker-fetcher: 1228 attempted, 2 failed (0%, threshold 50%), 15 skipped
+    (not covered by Tiingo)'.
     """
     print(
         f'ticker-fetcher: {stats.attempted} attempted, {stats.failed} failed '
-        f'({stats.failure_rate:.0%}, threshold {max_failure_rate:.0%})'
+        f'({stats.failure_rate:.0%}, threshold {max_failure_rate:.0%}), {stats.skipped} skipped'
+        + (f' (not covered by {stats.api})' if stats.api else '')
     )
     if stats.attempted == 0 or stats.failed == stats.attempted or stats.failure_rate > max_failure_rate:
         logger.error('ticker-fetcher failed')

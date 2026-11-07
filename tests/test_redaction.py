@@ -98,7 +98,7 @@ def test_request_errors_holding_the_url_never_show_the_key(repo, output, error):
 
 
 def test_error_detail_masks_api_token_in_the_url():
-    from app.ticker_fetcher import error_detail
+    from app.price_apis.http import error_detail
 
     response = requests.Response()
     response.status_code = 404

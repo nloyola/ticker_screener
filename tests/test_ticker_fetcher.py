@@ -11,42 +11,57 @@ from requests.adapters import HTTPAdapter
 
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.db import init_db
+from app.markets import US
 from app.models import PriceData
-from app.repositories.price_data_repo import PriceDataRepo
-from app.services.sector_service import SectorAggregate, SubsectorWithTickers
-from app.ticker_fetcher import (
+from app.price_apis import DailyPrice
+from app.price_apis.http import (
     CONNECT_TIMEOUT,
     ERROR_DETAIL_LIMIT,
-    HISTORY_DAYS,
     READ_TIMEOUT,
     RETRY_ATTEMPTS,
     RETRY_MAX_DELAY,
-    TickerFetcher,
-    TiingoPrices,
     error_detail,
     retry_delay,
-    window_start,
 )
+from app.price_apis.tiingo import TiingoPrices
+from app.repositories.price_data_repo import PriceDataRepo
+from app.services.sector_service import SectorAggregate, SubsectorWithTickers
+from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
 TODAY = date.today()
 OLD_DAY = window_start(TODAY) - timedelta(days=1)
 
 
-class FakeTiingo:
+class FakeApi:
+    """The parts of a price API (app.price_apis.PriceApi) every fake shares: Tiingo's name and markets, no quota."""
+
+    name = 'Tiingo'
+    markets = frozenset({US})
+    api_key = 'test-key'
+
+    def check_quota(self, needed: int) -> None:
+        pass
+
+
+def tiingo_rows(rows: list[tuple[date, float]]) -> list[DailyPrice]:
+    """Rows as Tiingo sends them, parsed as TiingoPrices parses them, so a malformed row fails the same way."""
+    return TiingoPrices.to_prices(
+        [{'date': f'{d.isoformat()}T00:00:00.000Z', 'adjClose': close, 'adjVolume': 100} for d, close in rows]
+    )
+
+
+class FakeTiingo(FakeApi):
     """Answers daily_prices from canned responses; a ticker with no response raises, as a failed request does."""
 
     def __init__(self, prices: dict[str, list[tuple[date, float]]]) -> None:
         self.prices = prices
         self.requests: list[tuple[str, str, str]] = []
 
-    def daily_prices(self, ticker: str, start: date, end: date) -> list[dict]:
+    def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
         self.requests.append((ticker, start.isoformat(), end.isoformat()))
         if ticker not in self.prices:
             raise RuntimeError(f'500 Server Error for ticker {ticker}, token test-key')
-        return [
-            {'date': f'{d.isoformat()}T00:00:00.000Z', 'adjClose': close, 'adjVolume': 100}
-            for d, close in self.prices[ticker]
-        ]
+        return tiingo_rows(self.prices[ticker])
 
 
 def tiingo_response(status: int, body: bytes = b'[]', retry_after: str | None = None) -> requests.Response:
@@ -66,19 +81,19 @@ def http_error(status: int, retry_after: str | None = None, body: bytes = b'') -
     return requests.HTTPError(f'{status} Error for url: {response.url}', response=response)
 
 
-class ScriptedTiingo:
+class ScriptedTiingo(FakeApi):
     """Answers each daily_prices call with the next item of the ticker's script: an exception to raise, or rows."""
 
     def __init__(self, scripts: dict[str, list]) -> None:
         self.scripts = scripts
         self.calls: list[str] = []
 
-    def daily_prices(self, ticker: str, start: date, end: date) -> list[dict]:
+    def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
         self.calls.append(ticker)
         answer = self.scripts[ticker].pop(0)
         if isinstance(answer, Exception):
             raise answer
-        return [{'date': f'{d.isoformat()}T00:00:00.000Z', 'adjClose': close, 'adjVolume': 100} for d, close in answer]
+        return tiingo_rows(answer)
 
 
 class FakeSectorService:
@@ -112,12 +127,11 @@ def repo(tmp_path) -> PriceDataRepo:
     return PriceDataRepo(SimpleNamespace(db_path=path))
 
 
-def make_fetcher(repo: PriceDataRepo, tiingo: FakeTiingo, subsectors: dict[int, list[str]]) -> TickerFetcher:
+def make_fetcher(repo: PriceDataRepo, api, subsectors: dict[int, list[str]]) -> TickerFetcher:
     container = SimpleNamespace(
-        tiingo_api_key='test-key', sector_service=FakeSectorService(subsectors), price_data_repo=repo
+        price_api_client=api, sector_service=FakeSectorService(subsectors), price_data_repo=repo
     )
     fetcher = TickerFetcher(container)
-    fetcher.client = tiingo
     fetcher.sleep = lambda seconds: None
     return fetcher
 
@@ -428,7 +442,7 @@ def test_tiingo_prices_sends_the_key_in_a_header_with_a_timeout():
 
     rows = client.daily_prices('CVX', date(2026, 7, 9), date(2026, 11, 6))
 
-    assert rows == [{'date': '2026-11-05T00:00:00.000Z', 'adjClose': 1.5, 'adjVolume': 10}]
+    assert rows == [DailyPrice(date=date(2026, 11, 5), close=1.5, volume=10)]
     ((request, timeout),) = adapter.sent
     assert request.method == 'GET'
     assert request.url == (

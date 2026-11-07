@@ -4,12 +4,12 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
-from app.config import DB_NAME, TIINGO_API_KEY
+from app.config import DB_NAME, PRICE_API
 from app.container import Container
 from app.screener_lock import ScreenerLockHeld, screener_lock
 
 from .base_command import BaseCommand
-from .ticker_fetcher_cmd import failure_rate_arg, strict_fetch_succeeded
+from .ticker_fetcher_cmd import failure_rate_arg, fetch_or_exit, strict_fetch_succeeded
 
 if TYPE_CHECKING:
     from app.analyzer import Analyzer
@@ -28,7 +28,7 @@ class RunRefreshCmd(BaseCommand):
         f'exits {EXIT_LOCK_HELD} if another refresh holds the lock'
     )
 
-    REQUIRED_CONFIG = (DB_NAME, TIINGO_API_KEY)
+    REQUIRED_CONFIG = (DB_NAME, PRICE_API)
 
     def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
@@ -47,7 +47,7 @@ class RunRefreshCmd(BaseCommand):
         analyzer: Analyzer = container.analyzer
         try:
             with screener_lock(container.db_path):
-                stats = ticker_fetcher.fetch(strict=True)
+                stats = fetch_or_exit(ticker_fetcher, strict=True)
                 if not strict_fetch_succeeded(stats, args.max_failure_rate):
                     logger.error('run-refresh: fetch failed, analyze skipped')
                     sys.exit(1)

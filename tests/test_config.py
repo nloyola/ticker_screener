@@ -142,7 +142,7 @@ def test_db_init_builds_nothing_it_does_not_use(tmp_path):
 def test_reading_a_key_the_command_did_not_require_names_it():
     container = build_container(Config(db_name='/data/a.db', tiingo_api_key=None, eodhd_api_key=None))
 
-    with pytest.raises(ConfigError, match='TIINGO_API_KEY'):
+    with pytest.raises(ConfigError, match='PRICE_API'):
         container.ticker_fetcher  # noqa: B018
 
 
@@ -202,3 +202,69 @@ def test_eodhd_key_is_loaded_from_the_env_file(clean_env):
     cfg = load_config(require=('DB_NAME',))
 
     assert cfg.eodhd_api_key == 'file-eodhd'
+
+
+@pytest.mark.parametrize('command', ['run-refresh', 'ticker-fetcher'])
+def test_eodhd_commands_stop_naming_the_missing_eodhd_key(tmp_path, command):
+    result = run_main(tmp_path, command, DB_NAME=str(tmp_path / 'a.db'), PRICE_API='eodhd', TIINGO_API_KEY='tiingo-key')
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == (
+        f'main.py {command}: missing required config: EODHD_API_KEY (set in the environment or in .env)'
+    )
+    assert 'PROGRESS' not in result.stdout
+    assert not (tmp_path / 'a.db').exists()
+
+
+@pytest.mark.parametrize('value', ['EODHD', 'polygon', ' tiingo'])
+def test_an_unknown_price_api_stops_naming_it_and_the_allowed_ones(tmp_path, value):
+    result = run_main(
+        tmp_path,
+        'run-refresh',
+        DB_NAME=str(tmp_path / 'a.db'),
+        PRICE_API=value,
+        TIINGO_API_KEY='tiingo-key',
+        EODHD_API_KEY='eodhd-key',
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == f"main.py run-refresh: PRICE_API is '{value}', not one of: tiingo, eodhd"
+    assert not (tmp_path / 'a.db').exists()
+
+
+def test_price_api_defaults_to_tiingo_and_needs_only_its_key(clean_env, monkeypatch):
+    monkeypatch.setenv('DB_NAME', '/data/a.db')
+    monkeypatch.setenv('TIINGO_API_KEY', 'tiingo-key')
+
+    cfg = load_config(require=('DB_NAME', 'PRICE_API'))
+
+    assert cfg.price_api == 'tiingo'
+    assert cfg.eodhd_api_key is None
+
+
+def test_eodhd_needs_only_its_own_key(clean_env, monkeypatch):
+    monkeypatch.setenv('DB_NAME', '/data/a.db')
+    monkeypatch.setenv('PRICE_API', 'eodhd')
+    monkeypatch.setenv('EODHD_API_KEY', 'eodhd-key')
+
+    cfg = load_config(require=('DB_NAME', 'PRICE_API'))
+
+    assert cfg.price_api == 'eodhd'
+    assert cfg.tiingo_api_key is None
+
+
+def test_price_api_is_read_from_the_dotenv_file(clean_env):
+    (clean_env / '.env').write_text('DB_NAME=/file.db\nPRICE_API=eodhd\nEODHD_API_KEY=file-eodhd\n')
+
+    cfg = load_config(require=('DB_NAME', 'PRICE_API'))
+
+    assert (cfg.price_api, cfg.eodhd_api_key) == ('eodhd', 'file-eodhd')
+
+
+@pytest.mark.parametrize('api, client', [('tiingo', 'TiingoPrices'), ('eodhd', 'EodhdPrices')])
+def test_the_container_builds_the_chosen_apis_client(api, client):
+    container = build_container(
+        Config(db_name='/data/a.db', tiingo_api_key='t-key', eodhd_api_key='e-key', price_api=api)
+    )
+
+    assert type(container.price_api_client).__name__ == client
