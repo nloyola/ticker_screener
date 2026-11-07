@@ -74,9 +74,10 @@ class TickerFetcher:
     Before the first price request, the API checks it can serve the run (PriceApi.check_quota), and raises
     PriceApiStop when it cannot: then nothing is fetched.
 
-    'fetch' never deletes the rows of a ticker it could not download. 'prune' deletes every ticker's rows older than
-    the window; call it once per run, and only after a fetch that succeeded (run-refresh, 'ticker-fetcher --strict'),
-    so a fetch that fails for every ticker leaves 'price_data' as it was.
+    'fetch' never deletes the rows of a ticker it could not download. 'prune' deletes the rows older than the window of
+    every ticker in a market the API covers; call it once per run, and only after a fetch that succeeded (run-refresh,
+    'ticker-fetcher --strict'), so a fetch that fails for every ticker leaves 'price_data' as it was. A market the API
+    does not cover keeps all its rows, so a Tiingo run never ages out Canadian prices it did not replace.
 
     For debugging purposes, a single sector can be requested. See '--sector' option.
 
@@ -134,10 +135,14 @@ class TickerFetcher:
         return self.stats
 
     def prune(self) -> int:
-        """Deletes every ticker's rows dated before the window and returns how many were deleted."""
+        """
+        Deletes the rows dated before the window of every ticker in the API's markets, and returns how many were
+        deleted.
+        """
         cutoff = window_start(date.today())
-        deleted = self.price_data_repo.delete_before(cutoff)
-        logger.info(f'removed {deleted} price rows dated before {cutoff}')
+        markets = sorted(self.api.markets)
+        deleted = self.price_data_repo.delete_before(cutoff, markets)
+        logger.info(f'removed {deleted} price rows dated before {cutoff} ({", ".join(markets)})')
         return deleted
 
     def _batches(self, sector_filter: str | None, ticker_filter: str | None) -> list[_Batch] | None:

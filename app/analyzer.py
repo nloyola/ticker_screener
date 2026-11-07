@@ -7,10 +7,12 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 from app.container import Container
+from app.markets import MARKETS, UnsupportedTicker, market_of
 from app.models import StockCriteria
 from app.progress import report_progress
 
 if TYPE_CHECKING:
+    from app.price_apis import PriceApi
     from app.repositories.price_data_repo import PriceDataRepo
     from app.repositories.stock_criteria_repo import StockCriteriaRepo
 
@@ -26,34 +28,60 @@ class Analyzer:
         self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
         self.price_data_repo: PriceDataRepo = container.price_data_repo
 
-    def analyze(self) -> None:
-        """Prints 'PROGRESS stage=analyze status=start' before the work and 'status=done' after it."""
+    def analyze(self, fetched_by: 'PriceApi | None' = None) -> None:
+        """
+        Scores the tickers of every market, or, after a fetch, only those of the markets 'fetched_by' covers (see
+        _analyze). Prints 'PROGRESS stage=analyze status=start' before the work and 'status=done' after it.
+        """
         report_progress('analyze', status='start')
-        self._analyze()
+        self._analyze(fetched_by)
         report_progress('analyze', status='done')
 
-    def _analyze(self) -> None:
+    def _analyze(self, fetched_by: 'PriceApi | None') -> None:
+        """
+        Each ticker is judged against the newest price date of its own market (app/markets.py), since the markets
+        close on different holidays: a US ticker is never left unscored because Canada traded on a US holiday.
+
+        A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with today's
+        date_created, so a ticker whose last price is older than its market's newest keeps its previous stock_criteria
+        row instead. For the same reason, after a fetch only the markets the fetch's API covers are scored: a Tiingo
+        run leaves every Canadian ticker's row and date_created as they were. A standalone 'analyze' ('fetched_by'
+        None) scores every market.
+
+        Prints one summary line per market that has prices.
+        """
         df = self.load_price_data()
         if df is None:
             logger.info('No price data found.')
             return
 
-        # A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with
-        # today's date_created, so it keeps its previous stock_criteria row instead.
-        newest = df.index.get_level_values('date').max()
-        results: list[StockCriteria | None] = []
-        stale = 0
+        by_market: dict[str, list[tuple[str, pd.DataFrame]]] = {market: [] for market in MARKETS}
         for ticker, group_df in df.groupby(level='ticker'):
-            last = group_df.index.get_level_values('date').max()
-            if last < newest:
-                logger.warning(
-                    f'{ticker} not scored: its last price is from {last}, before the newest market date {newest}'
-                )
-                stale += 1
-                continue
-            results.append(self.analyze_ticker(ticker, group_df))
+            try:
+                by_market[market_of(str(ticker))].append((str(ticker), group_df))
+            except UnsupportedTicker as err:
+                logger.warning(f'{ticker} not scored: {err}')
 
-        print(f'skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest})')
+        results: list[StockCriteria | None] = []
+        for market, groups in by_market.items():
+            if not groups:
+                continue
+            if fetched_by is not None and market not in fetched_by.markets:
+                print(f'{market}: not scored, not fetched by this run ({fetched_by.name})')
+                continue
+            newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
+            stale = 0
+            for ticker, group_df in groups:
+                last = group_df.index.get_level_values('date').max()
+                if last < newest:
+                    logger.warning(
+                        f'{ticker} not scored: its last price is from {last}, '
+                        f'before the newest {market} market date {newest}'
+                    )
+                    stale += 1
+                    continue
+                results.append(self.analyze_ticker(ticker, group_df))
+            print(f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest})')
 
         # keep only real StockCriteria objects
         items: list[StockCriteria] = [sc for sc in results if sc is not None]

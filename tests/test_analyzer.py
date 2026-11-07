@@ -408,7 +408,7 @@ def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(c
     newest, last = date(2026, 1, 1) + timedelta(days=99), date(2026, 1, 1) + timedelta(days=98)
     warnings = [r for r in caplog.records if r.levelname == 'WARNING']
     assert [r.getMessage() for r in warnings] == [
-        f'STALE not scored: its last price is from {last}, before the newest market date {newest}'
+        f'STALE not scored: its last price is from {last}, before the newest US market date {newest}'
     ]
     assert 'skipped 1 stale ticker' in capsys.readouterr().out
 

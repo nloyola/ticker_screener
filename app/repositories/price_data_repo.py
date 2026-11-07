@@ -1,9 +1,10 @@
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from datetime import date
 
 from app.container import Container
 from app.db import connect
+from app.markets import market_sql
 from app.models import PriceData
 
 
@@ -102,15 +103,20 @@ class PriceDataRepo:
             ).fetchone()
             return _price_data(row) if row else None
 
-    def delete_before(self, cutoff: date) -> int:
+    def delete_before(self, cutoff: date, markets: Collection[str]) -> int:
         """
-        Delete all price_data rows earlier than cutoff date.
-        Returns the number of deleted rows.
+        Deletes the rows dated before cutoff of the tickers in 'markets' (app/markets.py), and returns how many were
+        deleted. Other markets' rows are kept, whatever their date.
         """
+        markets = list(markets)
+        if not markets:
+            return 0
         with connect(self.db_path) as con:
-            cur = con.cursor()
-            cur.execute(
-                'DELETE FROM price_data WHERE date < ?',
-                (cutoff,),
+            cur = con.execute(
+                f"""
+                DELETE FROM price_data
+                WHERE date < ? AND {market_sql('ticker')} IN ({','.join('?' * len(markets))})
+                """,
+                (cutoff, *markets),
             )
             return cur.rowcount

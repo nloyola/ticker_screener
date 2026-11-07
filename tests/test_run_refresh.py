@@ -61,6 +61,8 @@ def test_lock_is_released_when_its_holder_is_killed(db_path):
 
 
 class FakeFetcher:
+    api = SimpleNamespace(name='Tiingo', markets=frozenset({'US'}))
+
     def __init__(self, stats: FetchStats) -> None:
         self.stats = stats
         self.calls = []
@@ -75,11 +77,13 @@ class FakeFetcher:
         return 0
 
 
-def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleNamespace, FakeFetcher, list[str]]:
+def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleNamespace, FakeFetcher, list[object]]:
     fetcher = FakeFetcher(stats)
     analyzed = []
     container = SimpleNamespace(
-        db_path=db_path, ticker_fetcher=fetcher, analyzer=SimpleNamespace(analyze=lambda: analyzed.append(True))
+        db_path=db_path,
+        ticker_fetcher=fetcher,
+        analyzer=SimpleNamespace(analyze=lambda fetched_by=None: analyzed.append(fetched_by)),
     )
     return RunRefreshCmd(), container, fetcher, analyzed
 
@@ -97,7 +101,7 @@ def test_fetches_strictly_then_analyzes(db_path):
 
     assert fetcher.calls == [{'strict': True}]
     assert fetcher.prunes == 1
-    assert analyzed == [True]
+    assert analyzed == [fetcher.api]  # analyze scores only the markets this run's API fetched
 
 
 @pytest.mark.parametrize(

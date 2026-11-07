@@ -9,6 +9,9 @@ dot, so any other dot is not a ticker the screener can fetch.
 US = 'US'
 CANADA = 'Canada'
 
+# every market, in the order summaries list them
+MARKETS = (US, CANADA)
+
 # the exchange suffixes the screener accepts, and their market
 SUFFIX_MARKETS = {'TO': CANADA, 'V': CANADA}
 
@@ -27,3 +30,13 @@ def market_of(ticker: str) -> str:
         allowed = ', '.join(f'.{s}' for s in SUFFIX_MARKETS)
         raise UnsupportedTicker(f'unsupported exchange suffix: {ticker} (only {allowed})')
     return market
+
+
+def market_sql(column: str) -> str:
+    """
+    The same rule as market_of, as an SQL expression over a ticker column: 'Canada' for a ticker ending in one of
+    SUFFIX_MARKETS' suffixes, 'US' otherwise. GLOB, unlike LIKE, is case-sensitive, as the suffixes are. A ticker
+    market_of refuses counts as US here, but none is ever stored: the fetch fails it without a request.
+    """
+    whens = ' '.join(f"WHEN {column} GLOB '*.{suffix}' THEN '{market}'" for suffix, market in SUFFIX_MARKETS.items())
+    return f"CASE {whens} ELSE '{US}' END"

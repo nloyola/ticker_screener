@@ -52,7 +52,8 @@ class RunRefreshCmd(BaseCommand):
                     logger.error('run-refresh: fetch failed, analyze skipped')
                     sys.exit(1)
                 ticker_fetcher.prune()
-                analyzer.analyze()
+                # only the markets this run fetched: another market's scores would be restamped as current
+                analyzer.analyze(fetched_by=ticker_fetcher.api)
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)
             sys.exit(EXIT_LOCK_HELD)

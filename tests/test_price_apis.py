@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import sqlite3
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ import requests
 
 from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
-from app.markets import CANADA, US, UnsupportedTicker, market_of
+from app.markets import CANADA, US, UnsupportedTicker, market_of, market_sql
 from app.price_apis import DailyPrice, PriceApiStop
 from app.price_apis.eodhd import USAGE_TIMEOUT, EodhdPrices, EodhdUsage, eodhd_symbol
 from tests.test_ticker_fetcher import (  # noqa: F401
@@ -78,6 +79,13 @@ def run_fetch_cmd(fetcher, *argv: str) -> None:
 )
 def test_market_is_read_from_the_suffix(ticker, market):
     assert market_of(ticker) == market
+
+
+@pytest.mark.parametrize('ticker', ['AAPL', 'BRK-B', 'SHOP.TO', 'BBD-B.TO', 'ABC.V', 'TOTO', 'VEEV'])
+def test_market_sql_agrees_with_market_of(ticker):
+    with sqlite3.connect(':memory:') as con:
+        (market,) = con.execute(f'SELECT {market_sql("t")} FROM (SELECT ? AS t)', (ticker,)).fetchone()
+    assert market == market_of(ticker)
 
 
 @pytest.mark.parametrize('ticker', ['VOD.L', 'BRK.B', 'SHOP.TO.TO', '.TO', 'SHOP.'])

@@ -11,7 +11,7 @@ from requests.adapters import HTTPAdapter
 
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.db import init_db
-from app.markets import US
+from app.markets import CANADA, US
 from app.models import PriceData
 from app.price_apis import DailyPrice
 from app.price_apis.http import (
@@ -225,6 +225,34 @@ def test_prune_deletes_only_rows_before_the_window(repo):
 
     assert deleted == 1
     assert stored(repo, 'CVX') == [(1, window_start(TODAY), 2.0)]
+
+
+def test_prune_under_tiingo_keeps_canadian_rows_of_any_age(repo):
+    store(repo, 'CVX', [(OLD_DAY, 1.0), (window_start(TODAY), 2.0)])
+    store(repo, 'SHOP.TO', [(OLD_DAY, 3.0), (window_start(TODAY), 4.0)])
+    store(repo, 'ABC.V', [(OLD_DAY, 5.0)])
+
+    deleted = make_fetcher(repo, FakeTiingo({}), {}).prune()
+
+    assert deleted == 1
+    assert stored(repo, 'CVX') == [(1, window_start(TODAY), 2.0)]
+    assert stored(repo, 'SHOP.TO') == [(1, OLD_DAY, 3.0), (1, window_start(TODAY), 4.0)]
+    assert stored(repo, 'ABC.V') == [(1, OLD_DAY, 5.0)]
+
+
+def test_prune_under_eodhd_ages_out_both_markets(repo):
+    store(repo, 'CVX', [(OLD_DAY, 1.0), (window_start(TODAY), 2.0)])
+    store(repo, 'SHOP.TO', [(OLD_DAY, 3.0), (window_start(TODAY), 4.0)])
+    store(repo, 'ABC.V', [(OLD_DAY, 5.0)])
+    eodhd = FakeTiingo({})
+    eodhd.name, eodhd.markets = 'EODHD', frozenset({US, CANADA})
+
+    deleted = make_fetcher(repo, eodhd, {}).prune()
+
+    assert deleted == 3
+    assert stored(repo, 'CVX') == [(1, window_start(TODAY), 2.0)]
+    assert stored(repo, 'SHOP.TO') == [(1, window_start(TODAY), 4.0)]
+    assert stored(repo, 'ABC.V') == []
 
 
 def test_replace_for_ticker_rejects_another_tickers_rows(repo):
