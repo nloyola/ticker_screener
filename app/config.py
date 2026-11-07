@@ -42,10 +42,10 @@ def load_config(require: Iterable[str]) -> Config:
     the default) and that API's key (PRICE_API_KEYS); the other API's key is not required.
 
     Each key takes the first non-empty value from: the environment, a .env piped on stdin, the .env file in the
-    working directory. When the environment already holds every required key (the containers set them), it is the
-    whole configuration and neither stdin nor the file is read: a non-interactive run would otherwise block reading
-    an open stdin. PRICE_API counts with it: when it is unset in such an environment, the default applies even if
-    the .env file sets it. stdin is read only when it is not a terminal. The environment is never changed.
+    working directory. The file, when there is one, is always read, so a PRICE_API set only there applies even when
+    the environment holds every key (the container images hold no .env). stdin is read only when it is not a terminal
+    and the environment lacks a required key: when the environment already holds them all (the containers set them),
+    a non-interactive run would otherwise block reading an open stdin. The environment is never changed.
     """
     required = tuple(require)
     unknown = [key for key in required if key not in KEYS]
@@ -53,14 +53,14 @@ def load_config(require: Iterable[str]) -> Config:
         raise ValueError(f'unknown config keys: {", ".join(unknown)}')
 
     values = {key: os.getenv(key) or None for key in KEYS}
+    sources = []
     if not all(values[key] for key in _required_keys(required, values)):
-        sources = []
         if sys.stdin is not None and not sys.stdin.isatty():
             sources.append(dotenv_values(stream=sys.stdin))
-        sources.append(dotenv_values('.env'))
-        for source in sources:
-            for key in KEYS:
-                values[key] = values[key] or source.get(key) or None
+    sources.append(dotenv_values('.env'))
+    for source in sources:
+        for key in KEYS:
+            values[key] = values[key] or source.get(key) or None
 
     price_api = None
     if PRICE_API in required:

@@ -27,9 +27,10 @@ def clean_env(monkeypatch, tmp_path):
     return tmp_path
 
 
-def test_environment_is_the_whole_config_and_stdin_is_left_alone(clean_env, monkeypatch):
+def test_a_complete_environment_wins_and_stdin_is_left_alone(clean_env, monkeypatch):
     monkeypatch.setenv('DB_NAME', '/data/a.db')
     monkeypatch.setenv('TIINGO_API_KEY', 'env-key')
+    (clean_env / '.env').write_text('DB_NAME=/file.db\nTIINGO_API_KEY=file-key\n')
     stdin = io.StringIO('DB_NAME=/other.db\n')
     monkeypatch.setattr(sys, 'stdin', stdin)
 
@@ -251,6 +252,31 @@ def test_eodhd_needs_only_its_own_key(clean_env, monkeypatch):
 
     assert cfg.price_api == 'eodhd'
     assert cfg.tiingo_api_key is None
+
+
+def test_price_api_in_the_dotenv_file_applies_when_the_environment_holds_the_keys(clean_env, monkeypatch):
+    monkeypatch.setenv('DB_NAME', '/data/a.db')
+    monkeypatch.setenv('TIINGO_API_KEY', 'tiingo-key')
+    monkeypatch.setenv('EODHD_API_KEY', 'eodhd-key')
+    (clean_env / '.env').write_text('PRICE_API=eodhd\nEODHD_API_KEY=file-eodhd\n')
+    stdin = io.StringIO('PRICE_API=tiingo\n')
+    monkeypatch.setattr(sys, 'stdin', stdin)
+
+    cfg = load_config(require=('DB_NAME', 'PRICE_API'))
+
+    assert (cfg.price_api, cfg.eodhd_api_key) == ('eodhd', 'eodhd-key')
+    assert stdin.tell() == 0
+
+
+def test_price_api_in_the_environment_wins_over_the_dotenv_file(clean_env, monkeypatch):
+    monkeypatch.setenv('DB_NAME', '/data/a.db')
+    monkeypatch.setenv('PRICE_API', 'tiingo')
+    monkeypatch.setenv('TIINGO_API_KEY', 'tiingo-key')
+    (clean_env / '.env').write_text('PRICE_API=eodhd\nEODHD_API_KEY=file-eodhd\n')
+
+    cfg = load_config(require=('DB_NAME', 'PRICE_API'))
+
+    assert cfg.price_api == 'tiingo'
 
 
 def test_price_api_is_read_from_the_dotenv_file(clean_env):
