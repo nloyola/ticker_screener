@@ -55,6 +55,7 @@ def test_lock_is_released_when_its_holder_is_killed(db_path):
     finally:
         holder.send_signal(signal.SIGKILL)
         holder.wait()
+        holder.stdout.close()
     with screener_lock(db_path):
         pass
 
