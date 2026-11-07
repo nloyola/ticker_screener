@@ -5,7 +5,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 ## Project Overview
 
-- Stack: Python 3.12 (`.python-version`), uv (`pyproject.toml`, `uv.lock`), stdlib `sqlite3`, pandas, `ta` for the indicators, `requests` for the Tiingo REST API, openpyxl for the `import` spreadsheet.
+- Stack: Python 3.12 (`.python-version`), uv (`pyproject.toml`, `uv.lock`), stdlib `sqlite3`, pandas, `ta` for the indicators, `requests` for the Tiingo and EODHD REST APIs, openpyxl for the `import` spreadsheet.
 - Data: the SQLite database named by `DB_NAME`, shared with the Go dashboard in [nloyola/stock_analyzer](https://github.com/nloyola/stock_analyzer), where this repo is the `screener/` submodule. The screener owns `schema.sql` and fills `ticker`, `price_data`, `stock_criteria` and `metadata`. The dashboard's admin pages own the contents of `sector` and `subsector`; `import` still replaces both from a spreadsheet. The dashboard's own tables (`admin_user`, `admin_session`, `analyzer_schema_migration`) live in the same file: never read, write, drop or empty them, and never add them to `schema.sql`. Only `clear_market_data` (`app/db.py`) empties tables, and only those in `MARKET_DATA_TABLES`.
 - Structure: see [CLAUDE.md § Architecture](CLAUDE.md#architecture).
 - Deployment: the `ticker-screener` image (`Dockerfile`, with `.dockerignore` as an allow-list), built and shipped by the parent repo's `make release:build` and `make release:push`, and run by hand on `tikitak-vps` in one-off containers (`docker compose -f compose.production.yaml run --rm screener analyze`). The runbook is the parent's `documentation/install.md`.
@@ -25,7 +25,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 ## Environment & Tooling
 
 - Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
-- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command), `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`) and `EODHD_API_KEY` (read, but needed by no command yet). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
+- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command), `PRICE_API` (the price API `ticker-fetcher` and `run-refresh` fetch from: `tiingo`, the default, or `eodhd`), `TIINGO_API_KEY` (needed by `ticker-sync`, and by `ticker-fetcher` and `run-refresh` when `PRICE_API` is `tiingo`) and `EODHD_API_KEY` (needed by `ticker-fetcher` and `run-refresh` when `PRICE_API` is `eodhd`). A command missing a key it needs, or given an unknown `PRICE_API`, exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
 - `main.py` runs from any directory: it finds `config/0-stdout.json` and `schema.sql` relative to its own files.
 
 
@@ -41,7 +41,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 ## Testing
 
 - `uv run pytest` runs the tests in `tests/`. They cover what the dashboard relies on: the progress lines (`app/progress.py`), `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, the core criteria `Analyzer.analyze_ticker` computes (`tests/test_analyzer.py`), that `analyze` leaves stale tickers unscored (`tests/test_analyzer_db.py`), and that `ticker-fetcher --ticker` finds a ticker's subsector by parsing the ticker lists (`tests/test_sector_service.py`). A change to the criteria or indicators must update those tests to match. Check any other change by running the affected commands against a scratch database (`DB_NAME=/path/to/scratch.db uv run python main.py db-init`), never against `data/stock_data.db` unless that is the point.
-- `ticker-sync` and `ticker-fetcher` call Tiingo with the real API key and count against its rate limits; run them on one sector or ticker (`--sector`, `--ticker`) when checking a change.
+- `ticker-sync` calls Tiingo, and `ticker-fetcher` the API `PRICE_API` names, with the real API key, and count against its limits; run them on one sector or ticker (`--sector`, `--ticker`) when checking a change.
 
 
 ## Pre-Merge Checklist
