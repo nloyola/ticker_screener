@@ -9,8 +9,8 @@ from app.container import Container
 from app.markets import UnsupportedTicker, market_of
 from app.models import PriceData
 from app.price_apis import PriceApi
-from app.price_apis.http import RETRY_ATTEMPTS, error_detail, is_transient, retry_delay
-from app.progress import report_progress
+from app.price_apis.http import RETRY_ATTEMPTS, error_detail, is_transient, response_of, retry_delay
+from app.progress import NO_PRICES, NOT_FOUND, report_flagged, report_progress
 from app.redaction import redact
 from app.services.sector_service import normalize_ticker
 
@@ -93,6 +93,11 @@ class TickerFetcher:
 
     A ticker whose download holds no trading day in the whole window is logged as a warning: it is likely delisted,
     and can be removed at the dashboard's /admin/sectors.
+
+    A ticker the API answers with a 404, and one whose download holds no trading day, is also reported with a
+    'FLAGGED ticker=<ticker> reason=not_found|no_prices [last=<date>]' line after its warning, where 'last' is the
+    newest price date stored for it before this run, read now because a later 'prune' may delete every one of its
+    rows (see app/progress.py). 'flagged' holds the tickers reported, so analyze does not report them again as stale.
     """
 
     def __init__(self, container: Container) -> None:
@@ -104,6 +109,7 @@ class TickerFetcher:
         self.strict = False
         self.stats = FetchStats()
         self._fetched: set[str] = set()
+        self.flagged: set[str] = set()
 
     def fetch(
         self, sector_filter: str | None = None, ticker_filter: str | None = None, strict: bool = False
@@ -112,6 +118,7 @@ class TickerFetcher:
         self.strict = strict
         self.stats = FetchStats(api=self.api.name)
         self._fetched = set()
+        self.flagged = set()
         logger.info(f'price API: {self.api.name}')
 
         batches = self._batches(sector_filter, ticker_filter)
@@ -212,6 +219,13 @@ class TickerFetcher:
                     f'no prices from {self.api.name} in the last {HISTORY_DAYS} days, likely delisted, '
                     f'stored rows kept: {ticker}'
                 )
+                self._flag(ticker, NO_PRICES)
+
+    def _flag(self, ticker: str, reason: str) -> None:
+        """Prints the ticker's FLAGGED line, with the newest price date stored for it, if any."""
+        latest = self.price_data_repo.latest_for_ticker(ticker)
+        report_flagged(ticker, reason, latest.date if latest else None)
+        self.flagged.add(ticker)
 
     def _fetch_ticker_data(self, subsector_id: int, ticker: str) -> list[PriceData] | None:
         """Returns the ticker's rows for the whole window, or None when the download fails."""
@@ -238,6 +252,9 @@ class TickerFetcher:
             # a failed request, or a row that is not a price
             level = logging.WARNING if self.strict else logging.DEBUG
             logger.log(level, f'⚠️ Error loading data for {ticker} from {self.api.name}: {self._redact(e)}')
+            response = response_of(e)
+            if response is not None and response.status_code == 404:
+                self._flag(ticker, NOT_FOUND)
             return None
 
     def _get_prices(self, ticker: str, start: date, end: date):

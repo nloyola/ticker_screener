@@ -67,6 +67,7 @@ class FakeFetcher:
         self.stats = stats
         self.calls = []
         self.prunes = 0
+        self.flagged = {'GONE'}
 
     def fetch(self, **kwargs) -> FetchStats:
         self.calls.append(kwargs)
@@ -83,7 +84,9 @@ def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleName
     container = SimpleNamespace(
         db_path=db_path,
         ticker_fetcher=fetcher,
-        analyzer=SimpleNamespace(analyze=lambda fetched_by=None: analyzed.append(fetched_by)),
+        analyzer=SimpleNamespace(
+            analyze=lambda fetched_by=None, already_flagged=(): analyzed.append((fetched_by, already_flagged))
+        ),
     )
     return RunRefreshCmd(), container, fetcher, analyzed
 
@@ -101,7 +104,8 @@ def test_fetches_strictly_then_analyzes(db_path):
 
     assert fetcher.calls == [{'strict': True}]
     assert fetcher.prunes == 1
-    assert analyzed == [fetcher.api]  # analyze scores only the markets this run's API fetched
+    # analyze scores only the markets this run's API fetched, and does not flag again what the fetch flagged
+    assert analyzed == [(fetcher.api, {'GONE'})]
 
 
 @pytest.mark.parametrize(

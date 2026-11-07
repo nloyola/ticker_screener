@@ -1,12 +1,13 @@
-"""The PROGRESS lines are parsed by the stock_analyzer admin pages: these tests pin their format."""
+"""The PROGRESS and FLAGGED lines are parsed by the stock_analyzer admin pages: these tests pin their format."""
 
 import re
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
 from app.analyzer import Analyzer
-from app.progress import format_progress
+from app.progress import format_flagged, format_progress, report_flagged
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.ticker_fetcher import TickerFetcher
 
@@ -32,6 +33,38 @@ def test_format_progress_rejects_tokens_that_break_the_grammar(stage, fields):
         format_progress(stage, **fields)
 
 
+# the grammar documented in README.md § Flagged tickers
+FLAGGED_LINE = re.compile(
+    r'FLAGGED ticker=[A-Za-z0-9_./-]+ reason=(not_found|no_prices|stale)( last=\d{4}-\d{2}-\d{2})?'
+)
+
+
+@pytest.mark.parametrize(
+    'ticker, reason, last, line',
+    [
+        ('BLD', 'no_prices', date(2026, 7, 2), 'FLAGGED ticker=BLD reason=no_prices last=2026-07-02'),
+        ('SMOP', 'not_found', None, 'FLAGGED ticker=SMOP reason=not_found'),
+        ('RCI-B.TO', 'stale', date(2026, 11, 5), 'FLAGGED ticker=RCI-B.TO reason=stale last=2026-11-05'),
+    ],
+)
+def test_format_flagged(ticker, reason, last, line):
+    assert format_flagged(ticker, reason, last) == line
+    assert FLAGGED_LINE.fullmatch(line)
+
+
+@pytest.mark.parametrize('ticker, reason', [('BRK B', 'stale'), ('A=B', 'stale'), ('CVX', 'gone')])
+def test_format_flagged_rejects_what_breaks_the_grammar(ticker, reason):
+    with pytest.raises(ValueError):
+        format_flagged(ticker, reason, None)
+
+
+def test_report_flagged_logs_a_ticker_the_grammar_cannot_carry(capsys, caplog):
+    report_flagged('BRK B', 'stale', None)
+
+    assert capsys.readouterr().out == ''
+    assert 'BRK B' in caplog.text
+
+
 class FakeSectorService:
     def __init__(self, sectors: list[SectorAggregate]) -> None:
         self.sectors = sectors
@@ -47,7 +80,7 @@ def make_fetcher(sectors: list[SectorAggregate]) -> TickerFetcher:
     container = SimpleNamespace(
         price_api_client=SimpleNamespace(name='Tiingo', markets=frozenset({'US'}), check_quota=lambda needed: None),
         sector_service=FakeSectorService(sectors),
-        price_data_repo=SimpleNamespace(replace_for_ticker=lambda ticker, rows: None),
+        price_data_repo=SimpleNamespace(replace_for_ticker=lambda ticker, rows: None, latest_for_ticker=lambda t: None),
     )
     fetcher = TickerFetcher(container)
     fetcher._fetch_ticker_data = lambda subsector_id, ticker: []

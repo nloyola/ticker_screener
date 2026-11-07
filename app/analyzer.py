@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Collection
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
@@ -9,7 +10,7 @@ from ta.trend import MACD
 from app.container import Container
 from app.markets import MARKETS, UnsupportedTicker, market_of
 from app.models import StockCriteria
-from app.progress import report_progress
+from app.progress import STALE, report_flagged, report_progress
 
 if TYPE_CHECKING:
     from app.price_apis import PriceApi
@@ -28,16 +29,16 @@ class Analyzer:
         self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
         self.price_data_repo: PriceDataRepo = container.price_data_repo
 
-    def analyze(self, fetched_by: 'PriceApi | None' = None) -> None:
+    def analyze(self, fetched_by: 'PriceApi | None' = None, already_flagged: Collection[str] = ()) -> None:
         """
         Scores the tickers of every market, or, after a fetch, only those of the markets 'fetched_by' covers (see
         _analyze). Prints 'PROGRESS stage=analyze status=start' before the work and 'status=done' after it.
         """
         report_progress('analyze', status='start')
-        self._analyze(fetched_by)
+        self._analyze(fetched_by, already_flagged)
         report_progress('analyze', status='done')
 
-    def _analyze(self, fetched_by: 'PriceApi | None') -> None:
+    def _analyze(self, fetched_by: 'PriceApi | None', already_flagged: Collection[str]) -> None:
         """
         Each ticker is judged against the newest price date of its own market (app/markets.py), since the markets
         close on different holidays: a US ticker is never left unscored because Canada traded on a US holiday.
@@ -47,6 +48,10 @@ class Analyzer:
         row instead. For the same reason, after a fetch only the markets the fetch's API covers are scored: a Tiingo
         run leaves every Canadian ticker's row and date_created as they were. A standalone 'analyze' ('fetched_by'
         None) scores every market.
+
+        Each stale ticker is reported with a 'FLAGGED ticker=<ticker> reason=stale last=<date>' line after its warning
+        (see app/progress.py), except one in 'already_flagged': the fetch reported it already, as not found or with no
+        prices, and kept the rows judged here.
 
         Prints one summary line per market that has prices.
         """
@@ -79,6 +84,8 @@ class Analyzer:
                         f'before the newest {market} market date {newest}'
                     )
                     stale += 1
+                    if ticker not in already_flagged:
+                        report_flagged(ticker, STALE, last)
                     continue
                 results.append(self.analyze_ticker(ticker, group_df))
             print(f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest})')

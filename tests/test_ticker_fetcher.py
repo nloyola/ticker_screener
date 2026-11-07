@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -501,3 +502,78 @@ def test_timed_out_request_is_retried_and_then_succeeds(repo):
     assert len(adapter.sent) == 2
     assert (stats.attempted, stats.failed) == (1, 0)
     assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]
+
+
+def flagged_lines(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith('FLAGGED')]
+
+
+def test_not_found_ticker_is_flagged_with_its_last_stored_date(repo, capsys):
+    store(repo, 'GONE', [(days_ago(40), 1.0), (days_ago(30), 2.0)])
+    tiingo = ScriptedTiingo({'GONE': [http_error(404)], 'NEW': [http_error(404)], 'CVX': [[(days_ago(1), 3.0)]]})
+
+    fetcher = make_fetcher(repo, tiingo, {1: ['GONE', 'NEW', 'CVX']})
+    fetcher.fetch(strict=True)
+
+    assert flagged_lines(capsys.readouterr().out) == [
+        f'FLAGGED ticker=GONE reason=not_found last={days_ago(30)}',
+        'FLAGGED ticker=NEW reason=not_found',
+    ]
+    assert fetcher.flagged == {'GONE', 'NEW'}
+
+
+def test_not_found_is_flagged_without_strict_too(repo, capsys):
+    make_fetcher(repo, ScriptedTiingo({'GONE': [http_error(404)]}), {1: ['GONE']}).fetch()
+
+    assert flagged_lines(capsys.readouterr().out) == ['FLAGGED ticker=GONE reason=not_found']
+
+
+@pytest.mark.parametrize('error', [http_error(401), http_error(503), ValueError('bad JSON')])
+def test_other_failures_are_not_flagged(repo, capsys, error):
+    fetcher = make_fetcher(repo, ScriptedTiingo({'CVX': [error] * RETRY_ATTEMPTS}), {1: ['CVX']})
+    fetcher.fetch(strict=True)
+
+    assert flagged_lines(capsys.readouterr().out) == []
+    assert fetcher.flagged == set()
+
+
+def test_empty_download_is_flagged_with_the_date_stored_before_the_run(repo, capsys):
+    # BLD's newest stored row is older than the window, so the prune after this fetch deletes every one of its rows
+    store(repo, 'BLD', [(OLD_DAY - timedelta(days=5), 1.0), (OLD_DAY, 2.0)])
+    fetcher = make_fetcher(repo, FakeTiingo({'BLD': [], 'NONE': [], 'CVX': [(days_ago(1), 3.0)]}), {})
+    fetcher.sector_service = FakeSectorService({1: ['BLD', 'NONE', 'CVX']})
+
+    run_cmd(fetcher, '--strict')
+
+    assert flagged_lines(capsys.readouterr().out) == [
+        f'FLAGGED ticker=BLD reason=no_prices last={OLD_DAY}',
+        'FLAGGED ticker=NONE reason=no_prices',
+    ]
+    assert stored(repo, 'BLD') == []  # pruned: only the line still knows its last date
+    assert fetcher.flagged == {'BLD', 'NONE'}
+
+
+def test_flagged_line_follows_its_warning_and_is_printed_once(repo, capsys):
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.WARNING)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        fetcher = make_fetcher(repo, FakeTiingo({'CVX': [], 'XOM': []}), {1: ['CVX', 'XOM'], 2: ['CVX']})
+        fetcher.fetch(strict=True)
+    finally:
+        root.removeHandler(handler)
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if not line.startswith('PROGRESS')]
+    assert len(lines) == 4
+    assert 'delisted' in lines[0] and 'CVX' in lines[0]
+    assert lines[1] == 'FLAGGED ticker=CVX reason=no_prices'
+    assert 'delisted' in lines[2] and 'XOM' in lines[2]
+    assert lines[3] == 'FLAGGED ticker=XOM reason=no_prices'
+
+
+def test_fetched_tickers_are_not_flagged(repo, capsys):
+    fetcher = make_fetcher(repo, FakeTiingo({'CVX': [(days_ago(1), 1.0)]}), {1: ['CVX']})
+    fetcher.fetch(strict=True)
+
+    assert flagged_lines(capsys.readouterr().out) == []

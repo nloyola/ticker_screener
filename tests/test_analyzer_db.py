@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from app.analyzer import Analyzer
 from app.commands.run_refresh_cmd import RunRefreshCmd
@@ -73,6 +74,10 @@ def summary_lines(out: str) -> list[str]:
     return [line for line in out.splitlines() if line.startswith(('US:', 'Canada:'))]
 
 
+def flagged_lines(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith('FLAGGED')]
+
+
 def test_stale_ticker_keeps_its_previous_row_and_date(path, container, capsys):
     analyzer = container.analyzer
 
@@ -87,8 +92,10 @@ def test_stale_ticker_keeps_its_previous_row_and_date(path, container, capsys):
     analyzer.analyze()
 
     assert criteria(path) == {'AAA': (200.0, TODAY.isoformat()), 'STALE': (199.0, LAST_RUN.isoformat())}
+    out = capsys.readouterr().out
     # US-only data: one line, for the US, and nothing about Canada
-    assert summary_lines(capsys.readouterr().out) == [f'US: skipped 1 stale ticker (last price before {TODAY})']
+    assert summary_lines(out) == [f'US: skipped 1 stale ticker (last price before {TODAY})']
+    assert flagged_lines(out) == [f'FLAGGED ticker=STALE reason=stale last={TODAY - timedelta(days=1)}']
 
 
 def test_us_holiday_leaves_us_tickers_scored(path, container, capsys):
@@ -174,3 +181,50 @@ def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path,
         f'US: skipped 0 stale tickers (last price before {TODAY})',
         'Canada: not scored, not fetched by this run (Tiingo)',
     ]
+
+
+def test_stale_ticker_already_flagged_is_counted_but_not_flagged_again(path, container, capsys):
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    container.price_data_repo.bulk_insert(price_rows('GONE', TODAY - timedelta(days=2)))
+    container.price_data_repo.bulk_insert(price_rows('LATE', TODAY - timedelta(days=1)))
+
+    container.analyzer.analyze(already_flagged={'GONE'})
+
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [f'US: skipped 2 stale tickers (last price before {TODAY})']
+    assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={TODAY - timedelta(days=1)}']
+
+
+class TiingoWithDeadTickers(TiingoStub):
+    """TiingoStub, except that it does not know GONE (a 404) and has no prices in the window for EMPTY."""
+
+    def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
+        if ticker == 'GONE':
+            response = requests.Response()
+            response.status_code = 404
+            raise requests.HTTPError('404 Client Error: Not Found', response=response)
+        if ticker == 'EMPTY':
+            return []
+        return super().daily_prices(ticker, start, end)
+
+
+def test_run_refresh_flags_each_dead_or_stale_ticker_once(path, container, capsys):
+    # every ticker was scored by the last run; GONE and EMPTY keep their rows, which analyze finds stale
+    yesterday = TODAY - timedelta(days=1)
+    for ticker in ('AAA', 'GONE', 'EMPTY'):
+        container.price_data_repo.bulk_insert(price_rows(ticker, yesterday))
+
+    container.price_api_client = TiingoWithDeadTickers()
+    container.sector_service = SectorServiceStub(['AAA', 'GONE', 'EMPTY'])
+    container.ticker_fetcher = TickerFetcher(container)
+    cmd = RunRefreshCmd()
+    parser = argparse.ArgumentParser()
+    cmd.add_arguments(parser)
+    cmd.handle(parser.parse_args([]), container)
+
+    out = capsys.readouterr().out
+    assert flagged_lines(out) == [
+        f'FLAGGED ticker=GONE reason=not_found last={yesterday}',
+        f'FLAGGED ticker=EMPTY reason=no_prices last={yesterday}',
+    ]
+    assert summary_lines(out) == [f'US: skipped 2 stale tickers (last price before {TODAY})']
