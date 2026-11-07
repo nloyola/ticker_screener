@@ -4,7 +4,7 @@ Fetches stock price data from Tiingo or EODHD, computes the screening criteria a
 
 ## Refreshing the database
 
-`run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since both APIs restate past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and the API's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one in its market keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary.
+`run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since both APIs restate past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and the API's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. Both kinds, and every stale ticker below, are also reported on a `FLAGGED` line (see [Flagged tickers](#flagged-tickers)). `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one in its market keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary.
 
 ## Price APIs and markets
 
@@ -63,4 +63,33 @@ PROGRESS stage=fetch subsector=2/3
 PROGRESS stage=fetch subsector=3/3
 PROGRESS stage=analyze status=start
 PROGRESS stage=analyze status=done
+```
+
+## Flagged tickers
+
+`ticker-fetcher` and `analyze`, and so `run-refresh`, print one flagged line on stdout for each ticker that looks dead or behind, flushed as soon as it is printed, right after the warning that logs the same ticker. The stock_analyzer admin pages collect them to list a run's problem tickers and offer to delete them, so the format is part of the same contract as the progress lines: change it only together with the parser there. `tests/test_progress.py` covers the format, and `tests/test_ticker_fetcher.py` and `tests/test_analyzer_db.py` when each line is printed.
+
+Every flagged line has this shape, and no other output line starts with `FLAGGED`:
+
+```
+FLAGGED ticker=<ticker> reason=<reason> [last=<YYYY-MM-DD>]
+```
+
+- The fields follow the progress lines' rules: single spaces between them, lowercase keys, and values of only letters, digits and `_ . / -`. A ticker those values cannot carry is logged at WARNING instead of flagged.
+- `last` is omitted when there is no date to give. A reader should ignore fields and reasons it does not know.
+
+| Reason | Printed by | Meaning | `last` |
+|---|---|---|---|
+| `not_found` | `ticker-fetcher` | The price API answered the ticker's price request with a 404: it does not know the ticker. Printed with or without `--strict`. | The newest price date stored for the ticker before this run, if any. |
+| `no_prices` | `ticker-fetcher` | The download holds no trading day in the last 120 days (the "likely delisted" warning). | The newest price date stored for the ticker before this run, if any. It is read during the fetch, since the prune that follows a strict fetch may delete every row the ticker had. |
+| `stale` | `analyze` | Not scored, because its last price is older than the newest price date of its market. | That last price date. |
+
+Each ticker is flagged at most once per run. A ticker listed in several subsectors is fetched, and so flagged, once. A ticker that fails its fetch keeps its stored rows, which `analyze` then finds stale, so `run-refresh` passes the tickers the fetch flagged to `analyze`, which still counts them in its stale summary but does not flag them again: the fetch's reason wins. A standalone `analyze` flags every stale ticker. Other failed downloads (a 401, a 5xx after its retries, a malformed answer) and tickers with an exchange suffix no market has are not flagged: they say nothing about whether the ticker still trades.
+
+For example, a refresh where SMOP is unknown to the API, BLD has no recent prices and DINE is a day behind prints, among its log lines:
+
+```
+FLAGGED ticker=SMOP reason=not_found last=2026-10-31
+FLAGGED ticker=BLD reason=no_prices last=2026-07-02
+FLAGGED ticker=DINE reason=stale last=2026-11-05
 ```
