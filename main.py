@@ -11,7 +11,8 @@ from app.commands.importer import ImporterCommand
 from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.commands.ticker_sync_cmd import TickerSyncCmd
-from app.config import ConfigError, load_config
+from app.config import DB_NAME, ConfigError, load_config
+from app.db import upgrade_db
 from app.wiring import build_container
 
 logger = logging.getLogger(__name__)
@@ -76,8 +77,9 @@ class CommandLineInterface(CLI_Interface):
 
     def execute(self) -> None:
         """
-        Parses the command line, checks the config keys the named command needs, builds the container and runs the
-        command. A missing key stops here with one line naming it and exit 2, before any work.
+        Parses the command line, checks the config keys the named command needs, upgrades the database's schema,
+        builds the container and runs the command. A missing key stops here with one line naming it and exit 2,
+        before any work.
         """
         args = self.parser.parse_args()
         command = self.commands.get(args.command)
@@ -89,6 +91,8 @@ class CommandLineInterface(CLI_Interface):
         except ConfigError as err:
             print(f'{self.parser.prog} {args.command}: {err}', file=sys.stderr)
             sys.exit(2)
+        if DB_NAME in command.REQUIRED_CONFIG:
+            upgrade_db(config.db_name)  # before the command opens the database, so it sees the current schema
         command.handle(args, build_container(config))
 
 

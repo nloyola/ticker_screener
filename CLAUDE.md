@@ -18,7 +18,7 @@ In production the screener runs as the `ticker-screener` Docker image (`Dockerfi
 Under `app/`, wired together by a small dependency-injection container:
 
 - **models.py** - Plain data types (`Ticker`, `PriceData`, `StockCriteria`, ...).
-- **db.py** - `connect(db_path)`, the one way repositories open a connection (type converters, `sqlite3.Row` rows, foreign keys, commit or roll back, then close), the `SQLite` wrapper (one explicit transaction per `connect()`, for multi-statement work such as `import`), `init_db` (runs `schema.sql`) and `clear_market_data`.
+- **db.py** - `connect(db_path)`, the one way repositories open a connection (type converters, `sqlite3.Row` rows, foreign keys, commit or roll back, then close), the `SQLite` wrapper (one explicit transaction per `connect()`, for multi-statement work such as `import`), `upgrade_db` (the versioned upgrades, recorded in `PRAGMA user_version`, that change tables an older `schema.sql` created; the dashboard never reads `user_version`), `init_db` (upgrades, then runs `schema.sql`, which only creates missing tables) and `clear_market_data`.
 - **repositories/** - One repository per table, hand-written SQL.
 - **services/** - Logic over the repositories (`SectorService`).
 - **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py** - The work behind the `analyze`, `ticker-fetcher` and `ticker-sync` commands.
@@ -26,7 +26,7 @@ Under `app/`, wired together by a small dependency-injection container:
 - **container.py**, **wiring.py** - The container (`Value`, `Singleton`, `Factory` providers) and `build_container(config)`, which registers every repository, service and worker as a lazy provider. Classes take the container and pull what they need from it, so a command builds only what it reads.
 - **config.py** - `load_config(require=...)` reads `TIINGO_API_KEY` and `DB_NAME`, and raises `ConfigError` naming every required key that is missing. Importing it reads nothing, and it never changes the environment. Each key takes the first non-empty value from the environment, a `.env` piped on stdin (read only when stdin is not a terminal) and the `.env` file; when the environment already holds every required key, neither of the others is read. The container's key providers raise `ConfigError` if a command reads a key it did not list.
 
-Entry point: `main.py`, which sets up logging from `config/0-stdout.json`, registers the commands, parses the command line, loads the config keys the named command needs (a missing one stops it with one line on stderr naming the key, exit 2), builds the container and runs the command. It finds `config/` and `schema.sql` relative to its own files, so it runs from any directory.
+Entry point: `main.py`, which sets up logging from `config/0-stdout.json`, registers the commands, parses the command line, loads the config keys the named command needs (a missing one stops it with one line on stderr naming the key, exit 2), upgrades the database's schema if the command uses one, builds the container and runs the command. It finds `config/` and `schema.sql` relative to its own files, so it runs from any directory.
 
 ## Key Commands
 

@@ -15,7 +15,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 - Do edit: `app/**`, `tests/**`, `main.py`, `schema.sql`, `config/**`, `pyproject.toml`, `Dockerfile`, `.dockerignore`, `README.md`.
 - Change with care:
-  - `schema.sql` - the parent's tests use a verbatim copy (`internal/repo/testdata/screener_schema.sql`, checked by its `make schema:check`), and the dashboard's repositories read these tables. A schema change needs the matching change in the parent.
+  - `schema.sql` - the parent's tests use a verbatim copy (`internal/repo/testdata/screener_schema.sql`, checked by its `make schema:check`), and the dashboard's repositories read these tables. A schema change needs the matching change in the parent. `schema.sql` only creates missing tables, so a change to an existing table also needs an upgrade appended to `UPGRADES` in `app/db.py`, leaving an old table exactly as `schema.sql` now creates it; never edit an upgrade that has shipped.
   - `uv.lock` - change it only through `uv add`, `uv remove` or `uv lock`, never by hand.
 - Avoid editing (local data or build output, all gitignored):
   - `.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`

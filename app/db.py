@@ -1,8 +1,11 @@
 import datetime as _dt
+import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Convert TIMESTAMP <-> datetime and DATE <-> date via ISO 8601, for every connection opened with
 # detect_types=sqlite3.PARSE_DECLTYPES. Registered once here, at import, rather than per connection: every
@@ -82,9 +85,97 @@ SCHEMA_FILE = Path(__file__).resolve().parent.parent / 'schema.sql'
 
 
 def init_db(db_path: str):
+    """Brings the database up to the current schema: upgrades the tables it already has, then creates the rest."""
+    upgrade_db(db_path)
     schema = SCHEMA_FILE.read_text(encoding='utf-8')
     con = open_connection(db_path)
     try:
         con.executescript(schema)
+        # every table now matches schema.sql: the upgrade fixed the old ones, the script created the missing ones
+        con.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+    finally:
+        con.close()
+
+
+# Upgrades for databases created by an older schema.sql, which only creates missing tables and so never changes
+# one that exists. UPGRADES[n] takes a database from version n to n + 1, recorded in PRAGMA user_version; the
+# dashboard keeps its own migrations in its own table and never reads or writes user_version. To change an
+# existing table, change schema.sql and append an upgrade that leaves an old table exactly as schema.sql now
+# creates it. Never edit an upgrade that has shipped.
+
+PRICE_DATA_COLUMNS = 'id, subsector_id, ticker, date, close, volume'
+
+
+def _guard_price_data_date(con: sqlite3.Connection) -> None:
+    """Version 1: price_data.date is NOT NULL and a real YYYY-MM-DD date.
+
+    SQLite cannot add a constraint to a column, so the table is rebuilt: every row is copied with its id, and the
+    AUTOINCREMENT sequence is kept, so ids deleted rows used are never reused. A row the new CHECK refuses fails
+    the whole upgrade rather than being dropped.
+    """
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'price_data'").fetchone():
+        return  # schema.sql creates it with the guard
+    seq = con.execute("SELECT seq FROM sqlite_sequence WHERE name = 'price_data'").fetchone()
+    con.execute("""
+        CREATE TABLE price_data_new (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               subsector_id INTEGER,
+               ticker TEXT,
+               date TEXT NOT NULL CHECK (date(date) IS date),
+               close REAL,
+               volume INTEGER,
+               UNIQUE (ticker, date)
+        )""")
+    rows = con.execute(
+        f'INSERT INTO price_data_new ({PRICE_DATA_COLUMNS}) SELECT {PRICE_DATA_COLUMNS} FROM price_data'
+    ).rowcount
+    con.execute('DROP TABLE price_data')
+    con.execute('ALTER TABLE price_data_new RENAME TO price_data')
+    if seq is not None:
+        # the copy set the sequence to the highest id copied, which is below the old one if the top rows were deleted
+        con.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'price_data'", (seq[0],))
+        con.execute(
+            "INSERT INTO sqlite_sequence (name, seq) SELECT 'price_data', ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'price_data')",
+            (seq[0],),
+        )
+    logger.info('Rebuilt price_data with the date guard, keeping its %d rows', rows)
+
+
+UPGRADES = (_guard_price_data_date,)
+SCHEMA_VERSION = len(UPGRADES)
+
+
+def _user_version(con: sqlite3.Connection) -> int:
+    return con.execute('PRAGMA user_version').fetchone()[0]
+
+
+def upgrade_db(db_path: str) -> None:
+    """Applies the upgrades a database has not had yet, all in one transaction. A missing file is left alone.
+
+    Every command runs this before it opens the database, so the first one after a release upgrades it. Two
+    commands starting together queue for the write lock, and the second finds the work done.
+    """
+    if not Path(db_path).exists():
+        return
+    con = open_connection(db_path, isolation_level=None)  # autocommit mode; we BEGIN and COMMIT ourselves
+    try:
+        if _user_version(con) == SCHEMA_VERSION:
+            return  # the usual case, checked without taking the write lock
+        con.execute('BEGIN IMMEDIATE')
+        try:
+            version = _user_version(con)  # again under the lock: another command may have just upgraded it
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f'{db_path} is at schema version {version}, newer than this screener knows ({SCHEMA_VERSION})'
+                )
+            for upgrade in UPGRADES[version:]:
+                upgrade(con)
+            con.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+            con.execute('COMMIT')
+        except BaseException:  # as SQLite.connect does: never leave a transaction open
+            con.execute('ROLLBACK')
+            raise
+        logger.info('Upgraded %s from schema version %d to %d', db_path, version, SCHEMA_VERSION)
     finally:
         con.close()
