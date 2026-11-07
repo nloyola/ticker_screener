@@ -1,12 +1,8 @@
 import argparse
 
-from rich.console import Console
-
 from app.container import Container
 
 from .base_command import BaseCommand
-
-console = Console()
 
 
 class AnalyzerCommand(BaseCommand):

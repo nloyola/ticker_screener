@@ -1,13 +1,9 @@
 import argparse
 
-from rich.console import Console
-
 from app.config import DB_NAME, TIINGO_API_KEY
 from app.container import Container
 
 from .base_command import BaseCommand
-
-console = Console()
 
 
 class TickerSyncCmd(BaseCommand):

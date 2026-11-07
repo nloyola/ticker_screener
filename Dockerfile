@@ -41,15 +41,10 @@ COPY app ./app
 COPY config ./config
 
 # The container runs as whatever uid compose gives it, which has no home
-# directory, so point the libraries' caches at /tmp. `market-value` writes its
-# downloads to stock_data/ and its charts to public/ (main.py creates
-# stock_data/ on every start), so any uid may write to both; what lands there is
-# discarded with the container.
-RUN mkdir -p public stock_data && chmod 1777 public stock_data
+# directory, so point HOME, where libraries keep their caches, at /tmp.
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
-    HOME=/tmp \
-    MPLCONFIGDIR=/tmp/matplotlib
+    HOME=/tmp
 
 # Provenance: map the image back to the commit it was built from.
 ARG GIT_REVISION=unknown

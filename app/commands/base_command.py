@@ -1,11 +1,7 @@
 import argparse
 
-from rich.console import Console
-
 from app.config import DB_NAME
 from app.container import Container
-
-console = Console()
 
 
 class CLI_Interface:

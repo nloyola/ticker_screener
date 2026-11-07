@@ -8,10 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
-/stock_data/
 /*.json
 /*.xlsx
-/public/*.html
 /.mypy_cache/
 /data/
 # Environment: local development settings

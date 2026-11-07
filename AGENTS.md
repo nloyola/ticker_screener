@@ -5,7 +5,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 ## Project Overview
 
-- Stack: Python 3.12 (`.python-version`), uv (`pyproject.toml`, `uv.lock`), stdlib `sqlite3`, pandas, `ta` for the indicators, `requests` for the Tiingo REST API, yfinance for `market-value`, rich for console output.
+- Stack: Python 3.12 (`.python-version`), uv (`pyproject.toml`, `uv.lock`), stdlib `sqlite3`, pandas, `ta` for the indicators, `requests` for the Tiingo REST API, openpyxl for the `import` spreadsheet.
 - Data: the SQLite database named by `DB_NAME`, shared with the Go dashboard in [nloyola/stock_analyzer](https://github.com/nloyola/stock_analyzer), where this repo is the `screener/` submodule. The screener owns `schema.sql` and fills `ticker`, `price_data`, `stock_criteria` and `metadata`. The dashboard's admin pages own the contents of `sector` and `subsector`; `import` still replaces both from a spreadsheet. The dashboard's own tables (`admin_user`, `admin_session`, `analyzer_schema_migration`) live in the same file: never read, write, drop or empty them, and never add them to `schema.sql`. Only `clear_market_data` (`app/db.py`) empties tables, and only those in `MARKET_DATA_TABLES`.
 - Structure: see [CLAUDE.md § Architecture](CLAUDE.md#architecture).
 - Deployment: the `ticker-screener` image (`Dockerfile`, with `.dockerignore` as an allow-list), built and shipped by the parent repo's `make release:build` and `make release:push`, and run by hand on `tikitak-vps` in one-off containers (`docker compose -f compose.production.yaml run --rm screener analyze`). The runbook is the parent's `documentation/install.md`.
@@ -13,19 +13,19 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 ## Safe Areas To Edit
 
-- Do edit: `app/**`, `tests/**`, `main.py`, `schema.sql`, `config/**`, `templates/**`, `pyproject.toml`, `Dockerfile`, `.dockerignore`, `README.md`.
+- Do edit: `app/**`, `tests/**`, `main.py`, `schema.sql`, `config/**`, `pyproject.toml`, `Dockerfile`, `.dockerignore`, `README.md`.
 - Change with care:
   - `schema.sql` - the parent's tests use a verbatim copy (`internal/repo/testdata/screener_schema.sql`, checked by its `make schema:check`), and the dashboard's repositories read these tables. A schema change needs the matching change in the parent.
   - `uv.lock` - change it only through `uv add`, `uv remove` or `uv lock`, never by hand.
 - Avoid editing (local data or build output, all gitignored):
   - `.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`
-  - `data/`, `stock_data/`, `public/*.html`, `/*.json`, `/*.xlsx`
+  - `data/`, `/*.json`, `/*.xlsx`
 
 
 ## Environment & Tooling
 
 - Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
-- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command but `market-value`) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
+- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
 - Run `main.py` from the repo root: it reads `config/0-stdout.json` and `schema.sql` relative to the working directory.
 
 
@@ -34,7 +34,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 - `uv run ruff check .` and `uv run ruff format --check .` clean (`pyproject.toml`: 120 columns, single quotes, rules `E`, `F`, `I`, `UP`, `B`).
 - Keep the layering: commands parse arguments and call a service or worker class; repositories own all SQL; `models.py` has no I/O. A new table gets a repository in `app/repositories/`, registered in `build_container` (`app/wiring.py`).
 - A new subcommand subclasses `BaseCommand` in `app/commands/`, lists the config keys it needs in `REQUIRED_CONFIG`, takes its workers from the container in `handle` (never in `__init__`), and is registered in `main()`.
-- Log through `logging.getLogger(__name__)`; use rich only for interactive console output.
+- Log through `logging.getLogger(__name__)`; `print` only a command's own summary or prompt.
 - Do database work inside `SQLite.connect()`, which wraps it in one transaction and rolls back on error.
 
 

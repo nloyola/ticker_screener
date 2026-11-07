@@ -3,8 +3,6 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from rich.console import Console
-
 from app.config import DB_NAME, TIINGO_API_KEY
 from app.container import Container
 from app.services.sector_service import normalize_ticker
@@ -13,8 +11,6 @@ from .base_command import BaseCommand
 
 if TYPE_CHECKING:
     from app.ticker_fetcher import FetchStats, TickerFetcher
-
-console = Console()
 
 logger = logging.getLogger(__name__)
 

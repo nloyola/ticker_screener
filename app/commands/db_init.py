@@ -1,14 +1,10 @@
 import argparse
 from pathlib import Path
 
-from rich.console import Console
-
 from app.container import Container
 from app.db import MARKET_DATA_TABLES, clear_market_data, init_db
 
 from .base_command import BaseCommand
-
-console = Console()
 
 
 class DbInit(BaseCommand):

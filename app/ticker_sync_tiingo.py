@@ -1,14 +1,11 @@
 from datetime import UTC, datetime
 
 import requests
-from rich.console import Console
 
 from app.container import Container
 from app.models import Ticker
 
 TIINGO_IEX_URL = 'https://api.tiingo.com/iex'
-
-console = Console()
 
 
 class TickerSync:
