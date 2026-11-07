@@ -199,7 +199,7 @@ class TickerFetcher:
             sectors = [g for g in sectors if g.sector.lower() == sector_filter]
             logger.debug(f'fetching sector: {sector_filter}')
             if not sectors:
-                logger.error(f"[red]❌ sector not in DB:[/red] '{sector_filter}'")
+                logger.error(f"sector not in the database: '{sector_filter}'")
                 return self.stats
 
         subsectors = [(sector, subsector) for sector in sectors for subsector in sector.subsectors]

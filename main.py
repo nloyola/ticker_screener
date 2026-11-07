@@ -1,8 +1,6 @@
 import argparse
-import atexit
 import json
 import logging.config
-import logging.handlers
 import pathlib
 import sys
 
@@ -44,10 +42,12 @@ class ColorFormatter(logging.Formatter):
         return f'{color}{message}{RESET}'
 
 
+# config/ sits beside this file: found from here, so the commands run from any directory
+LOGGING_CONFIG = pathlib.Path(__file__).resolve().parent / 'config' / '0-stdout.json'
+
+
 def setup_logging():
-    config_file = pathlib.Path('config/0-stdout.json')
-    with open(config_file) as f_in:
-        config = json.load(f_in)
+    config = json.loads(LOGGING_CONFIG.read_text(encoding='utf-8'))
 
     logging.config.dictConfig(config)
 
@@ -57,11 +57,6 @@ def setup_logging():
         console_handler.setFormatter(
             ColorFormatter('%(levelname)s | %(module)s(%(lineno)d) | %(asctime)s | %(message)s')
         )
-
-    queue_handler = logging.getHandlerByName('queue_handler')
-    if queue_handler is not None:
-        queue_handler.listener.start()
-        atexit.register(queue_handler.listener.stop)
 
 
 class CommandLineInterface(CLI_Interface):
@@ -99,7 +94,6 @@ class CommandLineInterface(CLI_Interface):
 
 def main() -> None:
     setup_logging()
-    logging.basicConfig(level=logging.INFO)
 
     cli = CommandLineInterface()
     DbInit().add_to_cli(cli)

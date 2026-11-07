@@ -1,10 +1,8 @@
-import sqlite3
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
 from datetime import datetime
 
 from app.container import Container
-from app.db import open_connection, scoped
+from app.db import connect
 from app.models import Sector
 
 
@@ -12,13 +10,8 @@ class SectorRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
-        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
-        con.row_factory = sqlite3.Row
-        return scoped(con)
-
     def insert(self, sector: Sector) -> int | None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             cur = con.execute(
                 """
                 INSERT INTO sector (sector)
@@ -29,7 +22,7 @@ class SectorRepo:
             return cur.lastrowid
 
     def all(self) -> Iterable[Sector]:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             rows = con.execute(
                 """
                 SELECT id, sector, created_at
@@ -47,7 +40,7 @@ class SectorRepo:
                 )
 
     def find(self, sector_name: str) -> list[Sector]:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             rows = con.execute(
                 """
                 SELECT id, sector, created_at

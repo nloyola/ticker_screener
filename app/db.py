@@ -27,13 +27,18 @@ def open_connection(db_path: str, **kwargs) -> sqlite3.Connection:
 
 
 @contextmanager
-def scoped(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """Commits con on success, rolls it back on an exception, and closes it either way.
+def connect(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Opens a repository's connection, with the type converters, sqlite3.Row rows and foreign keys on.
 
-    A bare `with con:` only commits or rolls back; it leaves the connection open.
+    Commits on success, rolls back on an exception, and closes the connection either way: a bare `with con:` only
+    commits or rolls back, and leaves the connection open.
     """
-    with closing(con), con:
-        yield con
+    con = open_connection(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+    with closing(con):
+        con.row_factory = sqlite3.Row
+        con.execute('PRAGMA foreign_keys = ON')  # SQLite turns foreign keys on per connection, outside a transaction
+        with con:
+            yield con
 
 
 class SQLite:
@@ -52,7 +57,7 @@ class SQLite:
             con.execute('BEGIN')
             yield con
             con.execute('COMMIT')
-        except:  # noqa: E722
+        except BaseException:  # KeyboardInterrupt and SystemExit too: never leave a transaction open
             con.execute('ROLLBACK')
             raise
         finally:
@@ -71,8 +76,12 @@ def clear_market_data(con: sqlite3.Connection) -> None:
         con.execute(f'DELETE FROM {table}')
 
 
+# schema.sql sits at the repo root, beside app/: found from this file, so commands run from any directory
+SCHEMA_FILE = Path(__file__).resolve().parent.parent / 'schema.sql'
+
+
 def init_db(db_path: str):
-    schema = Path('schema.sql').read_text(encoding='utf-8')
+    schema = SCHEMA_FILE.read_text(encoding='utf-8')
     con = open_connection(db_path)
     try:
         con.executescript(schema)

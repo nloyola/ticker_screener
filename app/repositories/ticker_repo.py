@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Sequence
-from contextlib import AbstractContextManager
 
 from app.container import Container
-from app.db import open_connection, scoped
+from app.db import connect
 from app.models import Ticker
 
 
@@ -13,13 +11,8 @@ class TickerRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
-        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
-        con.row_factory = sqlite3.Row
-        return scoped(con)
-
     def upsert_many(self, tickers: list[Ticker]) -> None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             con.executemany(
                 """
                 INSERT INTO ticker (ticker, last, prev_close, volume, bid_price, ask_price, timestamp)
@@ -47,11 +40,11 @@ class TickerRepo:
             )
 
     def get(self, ticker: str) -> Ticker | None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             row = con.execute('SELECT * FROM ticker WHERE ticker = ?', (ticker,)).fetchone()
             return Ticker(**row) if row else None
 
     def all(self) -> Sequence[Ticker]:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             rows = con.execute('SELECT * FROM ticker ORDER BY ticker').fetchall()
             return [Ticker(**row) for row in rows]

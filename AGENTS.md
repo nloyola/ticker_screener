@@ -26,7 +26,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 - Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
 - Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
-- Run `main.py` from the repo root: it reads `config/0-stdout.json` and `schema.sql` relative to the working directory.
+- `main.py` runs from any directory: it finds `config/0-stdout.json` and `schema.sql` relative to its own files.
 
 
 ## Coding Standards
@@ -35,7 +35,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 - Keep the layering: commands parse arguments and call a service or worker class; repositories own all SQL; `models.py` has no I/O. A new table gets a repository in `app/repositories/`, registered in `build_container` (`app/wiring.py`).
 - A new subcommand subclasses `BaseCommand` in `app/commands/`, lists the config keys it needs in `REQUIRED_CONFIG`, takes its workers from the container in `handle` (never in `__init__`), and is registered in `main()`.
 - Log through `logging.getLogger(__name__)`; `print` only a command's own summary or prompt.
-- Do database work inside `SQLite.connect()`, which wraps it in one transaction and rolls back on error.
+- Repositories open every connection through `connect(db_path)` (`app/db.py`), never their own; it commits on success, rolls back on error and closes. Work spanning several statements outside a repository goes inside `SQLite.connect()`, which wraps it in one transaction.
 
 
 ## Testing

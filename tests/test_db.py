@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.db
 from app.db import BUSY_TIMEOUT_MS, SQLite, init_db, open_connection
 from app.models import PriceData, StockCriteria
 from app.repositories.metadata_repo import MetadataRepo
@@ -68,26 +69,69 @@ def test_write_waits_for_another_writer_instead_of_failing(db_path):
         release.join()
 
 
-@pytest.mark.parametrize(
-    'repo_class', [MetadataRepo, PriceDataRepo, SectorRepo, StockCriteriaRepo, SubsectorRepo, TickerRepo]
-)
-def test_repositories_close_their_connections(db_path, repo_class):
-    repo = repo_class(SimpleNamespace(db_path=db_path))
-    with repo._connect() as con:
-        con.execute('SELECT 1')
+# one call per repository that opens a connection, so the test sees every repository use the shared helper
+REPOSITORY_CALLS = {
+    MetadataRepo: lambda r: r.get('k'),
+    PriceDataRepo: lambda r: r.latest_for_ticker('XOM'),
+    SectorRepo: lambda r: r.find('Energy'),
+    StockCriteriaRepo: lambda r: r.bulk_insert([], date(2026, 11, 6)),
+    SubsectorRepo: lambda r: r.list_by_sector(1),
+    TickerRepo: lambda r: r.all(),
+}
+
+
+@pytest.mark.parametrize('repo_class', list(REPOSITORY_CALLS))
+def test_repositories_close_connections_opened_with_foreign_keys(db_path, repo_class, monkeypatch):
+    opened = []
+
+    def recording_open(*args, **kwargs):
+        con = open_connection(*args, **kwargs)
+        opened.append(con)
+        return con
+
+    monkeypatch.setattr(app.db, 'open_connection', recording_open)
+    REPOSITORY_CALLS[repo_class](repo_class(SimpleNamespace(db_path=db_path)))
+
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        opened[0].execute('SELECT 1')
+
+
+def test_connect_turns_foreign_keys_on_and_closes(db_path):
+    with app.db.connect(db_path) as con:
+        assert con.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+        assert isinstance(con.execute('SELECT 1 AS one').fetchone(), sqlite3.Row)
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         con.execute('SELECT 1')
 
 
-def test_repositories_commit_on_success_and_roll_back_on_error(db_path):
+def test_connect_commits_on_success_and_rolls_back_on_error(db_path):
     repo = MetadataRepo(SimpleNamespace(db_path=db_path))
     repo.set('kept', 'v')
     with pytest.raises(RuntimeError):
-        with repo._connect() as con:
+        with app.db.connect(db_path) as con:
             con.execute("INSERT INTO metadata (key, value) VALUES ('dropped', 'v')")
             raise RuntimeError
     assert repo.get('kept') == 'v'
     assert repo.get('dropped') is None
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        con.execute('SELECT 1')
+
+
+def test_sqlite_connect_rolls_back_on_keyboard_interrupt(db_path):
+    with pytest.raises(KeyboardInterrupt):
+        with SQLite(db_path).connect() as con:
+            con.execute("INSERT INTO metadata (key, value) VALUES ('dropped', 'v')")
+            raise KeyboardInterrupt
+    assert MetadataRepo(SimpleNamespace(db_path=db_path)).get('dropped') is None
+
+
+def test_init_db_runs_from_any_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = str(tmp_path / 'elsewhere.db')
+    init_db(path)
+    with app.db.connect(path) as con:
+        assert con.execute("SELECT count(*) FROM sqlite_master WHERE name = 'price_data'").fetchone()[0] == 1
 
 
 def test_dates_round_trip_on_every_connection(db_path):

@@ -1,29 +1,22 @@
 from __future__ import annotations
 
-import sqlite3
-from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 
 from app.container import Container
-from app.db import open_connection, scoped
+from app.db import connect
 
 
 class MetadataRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
-        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
-        con.row_factory = sqlite3.Row
-        return scoped(con)
-
     def get(self, key: str) -> str | None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             row = con.execute('SELECT value FROM metadata WHERE key = ?', (key,)).fetchone()
             return row['value'] if row else None
 
     def set(self, key: str, value: str) -> None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             con.execute(
                 """
                 INSERT INTO metadata (key, value)

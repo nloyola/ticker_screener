@@ -35,7 +35,7 @@ FROM python:${PYTHON_VERSION}-slim AS runtime
 
 WORKDIR /app
 COPY --from=deps /app/.venv /app/.venv
-# main.py reads config/ and schema.sql relative to the working directory.
+# main.py finds config/ and schema.sql relative to its own files.
 COPY main.py schema.sql ./
 COPY app ./app
 COPY config ./config

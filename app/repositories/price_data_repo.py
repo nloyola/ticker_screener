@@ -1,10 +1,9 @@
 import sqlite3
 from collections.abc import Iterable, Iterator
-from contextlib import AbstractContextManager
 from datetime import date
 
 from app.container import Container
-from app.db import open_connection, scoped
+from app.db import connect
 from app.models import PriceData
 
 
@@ -17,13 +16,8 @@ class PriceDataRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
-        con = open_connection(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES)
-        con.row_factory = sqlite3.Row
-        return scoped(con)
-
     def insert(self, price_data: PriceData) -> None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             con.execute(
                 """
                 INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume)
@@ -33,7 +27,7 @@ class PriceDataRepo:
             )
 
     def bulk_insert(self, items: Iterable[PriceData]) -> None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             con.executemany(
                 """
                 INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume)
@@ -48,7 +42,7 @@ class PriceDataRepo:
         others = {p.ticker for p in rows} - {ticker}
         if others:
             raise ValueError(f'rows for {sorted(others)} passed to replace the rows of {ticker}')
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             con.execute('DELETE FROM price_data WHERE ticker = ?', (ticker,))
             con.executemany(
                 """
@@ -59,7 +53,7 @@ class PriceDataRepo:
             )
 
     def get(self, ticker: str, d: date) -> PriceData | None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             row = con.execute(
                 """
                 SELECT id, subsector_id, ticker, date, close, volume
@@ -71,7 +65,7 @@ class PriceDataRepo:
             return _price_data(row) if row else None
 
     def all(self) -> Iterator[PriceData]:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             rows = con.execute("""
                 SELECT id, subsector_id, ticker, date, close, volume
                 FROM price_data
@@ -81,7 +75,7 @@ class PriceDataRepo:
                 yield _price_data(r)
 
     def all_for_ticker(self, ticker: str) -> Iterator[PriceData]:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             rows = con.execute(
                 """
                 SELECT id, subsector_id, ticker, date, close, volume
@@ -95,7 +89,7 @@ class PriceDataRepo:
                 yield _price_data(r)
 
     def latest_for_ticker(self, ticker: str) -> PriceData | None:
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             row = con.execute(
                 """
                 SELECT id, subsector_id, ticker, date, close, volume
@@ -113,11 +107,10 @@ class PriceDataRepo:
         Delete all price_data rows earlier than cutoff date.
         Returns the number of deleted rows.
         """
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             cur = con.cursor()
             cur.execute(
                 'DELETE FROM price_data WHERE date < ?',
                 (cutoff,),
             )
-            con.commit()
             return cur.rowcount

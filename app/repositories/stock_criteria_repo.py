@@ -1,10 +1,8 @@
-import sqlite3
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
 from datetime import date
 
 from app.container import Container
-from app.db import open_connection, scoped
+from app.db import connect
 from app.models import StockCriteria
 
 COLUMNS = (
@@ -89,11 +87,6 @@ class StockCriteriaRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
-        con = open_connection(self.db_path)
-        con.row_factory = sqlite3.Row
-        return scoped(con)
-
     def bulk_insert(self, items: Iterable[StockCriteria], date_created: date) -> None:
         sql = f"""
         INSERT INTO stock_criteria ({','.join(COLUMNS)})
@@ -102,5 +95,5 @@ class StockCriteriaRepo:
         {','.join(f'{c}=excluded.{c}' for c in COLUMNS if c != 'ticker')}
         """
         values = [_row_values(sc, date_created) for sc in items]
-        with self._connect() as con:
+        with connect(self.db_path) as con:
             con.executemany(sql, values)
