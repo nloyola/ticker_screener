@@ -4,7 +4,7 @@ Fetches stock price data from Tiingo or EODHD, computes the screening criteria a
 
 ## Refreshing the database
 
-`run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since both APIs restate past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and the API's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. Both kinds, and every stale ticker below, are also reported on a `FLAGGED` line (see [Flagged tickers](#flagged-tickers)). `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one in its market keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary.
+`run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since both APIs restate past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and the API's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. Both kinds, and every stale or frozen ticker below, are also reported on a `FLAGGED` line (see [Flagged tickers](#flagged-tickers)). `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one in its market keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary. So does a frozen ticker, whose last 10 trading days all have one close and zero volume: Tiingo keeps repeating the last close of a ticker that stopped trading, so its rows look current while its price is not.
 
 ## Price APIs and markets
 
@@ -18,7 +18,7 @@ The markets close on different holidays, so freshness is judged per market:
 - `run-refresh` scores only the markets its API fetched. The other market's tickers keep their previous `stock_criteria` rows and `date_created`, so their scores are never restamped as current. A standalone `analyze` scores every market.
 - The 120-day cleanup after a strict fetch deletes old rows only in the markets the API fetched: a Tiingo run leaves Canadian prices alone.
 
-`analyze` prints one summary line per market that has prices: `US: skipped 1 stale ticker (last price before 2026-11-06)` for a scored market, and `Canada: not scored, not fetched by this run (Tiingo)` for one a refresh left out.
+`analyze` prints one summary line per market that has prices: `US: skipped 1 stale ticker (last price before 2026-11-06) and 13 frozen tickers` for a scored market, and `Canada: not scored, not fetched by this run (Tiingo)` for one a refresh left out.
 
 Its exit code tells a caller what happened:
 
@@ -83,13 +83,15 @@ FLAGGED ticker=<ticker> reason=<reason> [last=<YYYY-MM-DD>]
 | `not_found` | `ticker-fetcher` | The price API answered the ticker's price request with a 404: it does not know the ticker. Printed with or without `--strict`. | The newest price date stored for the ticker before this run, if any. |
 | `no_prices` | `ticker-fetcher` | The download holds no trading day in the last 120 days (the "likely delisted" warning). | The newest price date stored for the ticker before this run, if any. It is read during the fetch, since the prune that follows a strict fetch may delete every row the ticker had. |
 | `stale` | `analyze` | Not scored, because its last price is older than the newest price date of its market. | That last price date. |
+| `frozen` | `analyze` | Not scored, because its last 10 trading days all have the same close and zero volume: the API repeats the last close of a ticker that stopped trading (Tiingo does). | The first day of that flat stretch, which may be more than 10 trading days back. |
 
-Each ticker is flagged at most once per run. A ticker listed in several subsectors is fetched, and so flagged, once. A ticker that fails its fetch keeps its stored rows, which `analyze` then finds stale, so `run-refresh` passes the tickers the fetch flagged to `analyze`, which still counts them in its stale summary but does not flag them again: the fetch's reason wins. A standalone `analyze` flags every stale ticker. Other failed downloads (a 401, a 5xx after its retries, a malformed answer) and tickers with an exchange suffix no market has are not flagged: they say nothing about whether the ticker still trades.
+Each ticker is flagged at most once per run. A ticker listed in several subsectors is fetched, and so flagged, once. A ticker that fails its fetch keeps its stored rows, which `analyze` then finds stale, so `run-refresh` passes the tickers the fetch flagged to `analyze`, which still counts them in its stale or frozen summary but does not flag them again: the fetch's reason wins. A ticker both stale and frozen is counted and flagged as stale. A standalone `analyze` flags every stale and frozen ticker. Other failed downloads (a 401, a 5xx after its retries, a malformed answer) and tickers with an exchange suffix no market has are not flagged: they say nothing about whether the ticker still trades.
 
-For example, a refresh where SMOP is unknown to the API, BLD has no recent prices and DINE is a day behind prints, among its log lines:
+For example, a refresh where SMOP is unknown to the API, BLD has no recent prices, DINE is a day behind and ANSS has repeated one close with no volume since 2026-07-17 prints, among its log lines:
 
 ```
 FLAGGED ticker=SMOP reason=not_found last=2026-10-31
 FLAGGED ticker=BLD reason=no_prices last=2026-07-02
 FLAGGED ticker=DINE reason=stale last=2026-11-05
+FLAGGED ticker=ANSS reason=frozen last=2026-07-17
 ```
