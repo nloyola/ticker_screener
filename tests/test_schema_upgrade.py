@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from app import db
 from app.db import SCHEMA_VERSION, init_db, open_connection, upgrade_db
 
 MAIN = Path(__file__).resolve().parent.parent / 'main.py'
@@ -45,6 +46,14 @@ def _query(db_path: str, sql: str) -> list[tuple]:
     con = open_connection(db_path)
     try:
         return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+def _dump(db_path: str) -> list[str]:
+    con = sqlite3.connect(db_path)
+    try:
+        return list(con.iterdump())
     finally:
         con.close()
 
@@ -134,23 +143,23 @@ def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):
 
 def test_second_upgrade_changes_nothing(old_db):
     upgrade_db(old_db)
-    before = list(sqlite3.connect(old_db).iterdump())
+    before = _dump(old_db)
     mtime = os.stat(old_db).st_mtime_ns
 
     upgrade_db(old_db)
 
-    assert list(sqlite3.connect(old_db).iterdump()) == before
+    assert _dump(old_db) == before
     assert os.stat(old_db).st_mtime_ns == mtime
 
 
 def test_upgrade_with_a_bad_date_fails_and_changes_nothing(old_db):
     _execute(old_db, "INSERT INTO price_data (ticker, date) VALUES ('BAD', '2026-11-05 00:00:00')")
-    before = list(sqlite3.connect(old_db).iterdump())
+    before = _dump(old_db)
 
     with pytest.raises(sqlite3.IntegrityError):
         upgrade_db(old_db)
 
-    assert list(sqlite3.connect(old_db).iterdump()) == before
+    assert _dump(old_db) == before
     assert _query(old_db, 'PRAGMA user_version') == [(0,)]
 
 
@@ -189,3 +198,16 @@ def test_every_command_upgrades_the_database_first(old_db):
     assert result.returncode == 0, result.stderr
     assert _query(old_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
     assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == OLD_ROWS
+
+
+def test_upgrade_reports_its_own_error_when_sqlite_already_rolled_back(old_db, monkeypatch):
+    """SQLite ends the transaction itself on some errors; the ROLLBACK after it must not replace the real error."""
+
+    def failing_upgrade(con):
+        con.execute('ROLLBACK')  # as SQLite does on a full disk or an I/O error
+        raise ValueError('the real error')
+
+    monkeypatch.setattr(db, 'UPGRADES', (failing_upgrade,))
+    with pytest.raises(ValueError, match='the real error'):
+        upgrade_db(old_db)
+    assert _query(old_db, 'PRAGMA user_version') == [(0,)]

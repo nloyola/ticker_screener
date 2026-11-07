@@ -62,7 +62,8 @@ class SQLite:
             yield con
             con.execute('COMMIT')
         except BaseException:  # KeyboardInterrupt and SystemExit too: never leave a transaction open
-            con.execute('ROLLBACK')
+            if con.in_transaction:  # SQLite may have rolled it back already, and ROLLBACK would hide the error
+                con.execute('ROLLBACK')
             raise
         finally:
             con.close()
@@ -103,8 +104,6 @@ def init_db(db_path: str):
 # existing table, change schema.sql and append an upgrade that leaves an old table exactly as schema.sql now
 # creates it. Never edit an upgrade that has shipped.
 
-PRICE_DATA_COLUMNS = 'id, subsector_id, ticker, date, close, volume'
-
 
 def _guard_price_data_date(con: sqlite3.Connection) -> None:
     """Version 1: price_data.date is NOT NULL and a real YYYY-MM-DD date.
@@ -126,8 +125,10 @@ def _guard_price_data_date(con: sqlite3.Connection) -> None:
                volume INTEGER,
                UNIQUE (ticker, date)
         )""")
+    # the column list is spelled out here, not shared, so that a later schema change cannot alter a shipped upgrade
     rows = con.execute(
-        f'INSERT INTO price_data_new ({PRICE_DATA_COLUMNS}) SELECT {PRICE_DATA_COLUMNS} FROM price_data'
+        'INSERT INTO price_data_new (id, subsector_id, ticker, date, close, volume) '
+        'SELECT id, subsector_id, ticker, date, close, volume FROM price_data'
     ).rowcount
     con.execute('DROP TABLE price_data')
     con.execute('ALTER TABLE price_data_new RENAME TO price_data')
@@ -174,7 +175,8 @@ def upgrade_db(db_path: str) -> None:
             con.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
             con.execute('COMMIT')
         except BaseException:  # as SQLite.connect does: never leave a transaction open
-            con.execute('ROLLBACK')
+            if con.in_transaction:  # SQLite may have rolled it back already, and ROLLBACK would hide the error
+                con.execute('ROLLBACK')
             raise
         logger.info('Upgraded %s from schema version %d to %d', db_path, version, SCHEMA_VERSION)
     finally:
