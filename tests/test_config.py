@@ -5,6 +5,7 @@ import io
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,8 @@ from app import config
 from app.commands.db_init import DbInit
 from app.config import Config, ConfigError, load_config
 from app.wiring import build_container
+
+MAIN = str(Path(__file__).resolve().parent.parent / 'main.py')
 
 
 @pytest.fixture
@@ -68,16 +71,19 @@ def test_an_unknown_key_is_a_programming_error(clean_env):
 
 
 def run_main(tmp_path, *argv: str, **env: str) -> subprocess.CompletedProcess:
-    """Runs main.py from the repo root with only 'env' as config, and an empty stdin."""
+    """Runs main.py with only 'env' as config, and an empty stdin.
+
+    It runs from tmp_path, where no .env is: from the repo root, a developer's own .env would supply the keys.
+    """
     base = {k: v for k, v in os.environ.items() if k not in config.KEYS}
     return subprocess.run(
-        [sys.executable, 'main.py', *argv],
+        [sys.executable, MAIN, *argv],
         env={**base, **env},
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=120,
-        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        cwd=tmp_path,
     )
 
 
