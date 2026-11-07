@@ -84,8 +84,11 @@ REPOSITORY_CALLS = {
 def test_repositories_close_connections_opened_with_foreign_keys(db_path, repo_class, monkeypatch):
     opened = []
 
+    statements = []
+
     def recording_open(*args, **kwargs):
         con = open_connection(*args, **kwargs)
+        con.set_trace_callback(statements.append)
         opened.append(con)
         return con
 
@@ -93,6 +96,7 @@ def test_repositories_close_connections_opened_with_foreign_keys(db_path, repo_c
     REPOSITORY_CALLS[repo_class](repo_class(SimpleNamespace(db_path=db_path)))
 
     assert len(opened) == 1
+    assert 'PRAGMA foreign_keys = ON' in statements
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         opened[0].execute('SELECT 1')
 
@@ -116,6 +120,11 @@ def test_connect_commits_on_success_and_rolls_back_on_error(db_path):
     assert repo.get('dropped') is None
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         con.execute('SELECT 1')
+
+
+def test_sqlite_connect_turns_foreign_keys_on(db_path):
+    with SQLite(db_path).connect() as con:
+        assert con.execute('PRAGMA foreign_keys').fetchone()[0] == 1
 
 
 def test_sqlite_connect_rolls_back_on_keyboard_interrupt(db_path):

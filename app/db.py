@@ -54,6 +54,7 @@ class SQLite:
         )
         con.row_factory = sqlite3.Row
         try:
+            con.execute('PRAGMA foreign_keys = ON')  # as connect() does; it has no effect inside a transaction
             con.execute('BEGIN')
             yield con
             con.execute('COMMIT')
