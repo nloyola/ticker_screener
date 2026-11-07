@@ -28,6 +28,9 @@ STALE = 'stale'
 FROZEN = 'frozen'
 FLAG_REASONS = (NOT_FOUND, NO_PRICES, STALE, FROZEN)
 
+# the longest ticker a flagged line carries: the dashboard drops a longer one, so it is logged instead
+MAX_FLAGGED_TICKER = 20
+
 
 def _line(word: str, pairs: list[tuple[str, str | int]]) -> str:
     for key, value in pairs:
@@ -51,6 +54,8 @@ def format_flagged(ticker: str, reason: str, last: date | None) -> str:
     """Returns 'FLAGGED ticker=<ticker> reason=<reason>', followed by 'last=<YYYY-MM-DD>' when 'last' is given."""
     if reason not in FLAG_REASONS:
         raise ValueError(f'unknown flag reason: {reason!r}')
+    if len(ticker) > MAX_FLAGGED_TICKER:
+        raise ValueError(f'ticker longer than {MAX_FLAGGED_TICKER} characters: {ticker!r}')
     pairs: list[tuple[str, str | int]] = [('ticker', ticker), ('reason', reason)]
     if last is not None:
         pairs.append(('last', last.isoformat()))

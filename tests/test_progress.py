@@ -53,7 +53,11 @@ def test_format_flagged(ticker, reason, last, line):
     assert FLAGGED_LINE.fullmatch(line)
 
 
-@pytest.mark.parametrize('ticker, reason', [('BRK B', 'stale'), ('A=B', 'stale'), ('CVX', 'gone')])
+def test_format_flagged_takes_a_ticker_of_the_longest_length():
+    assert format_flagged('A' * 20, 'stale', None) == f'FLAGGED ticker={"A" * 20} reason=stale'
+
+
+@pytest.mark.parametrize('ticker, reason', [('BRK B', 'stale'), ('A=B', 'stale'), ('CVX', 'gone'), ('A' * 21, 'stale')])
 def test_format_flagged_rejects_what_breaks_the_grammar(ticker, reason):
     with pytest.raises(ValueError):
         format_flagged(ticker, reason, None)
