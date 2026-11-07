@@ -20,11 +20,13 @@ logger = logging.getLogger(__name__)
 _TOKEN = re.compile(r'[A-Za-z0-9_./-]+')
 
 # why a ticker is flagged: the price API does not know it (a 404), its download holds no trading day in the window,
-# or analyze left it unscored because its last price is older than its market's newest date
+# or analyze left it unscored because its last price is older than its market's newest date, or because its price
+# has been frozen (one close with zero volume) for its last trading days
 NOT_FOUND = 'not_found'
 NO_PRICES = 'no_prices'
 STALE = 'stale'
-FLAG_REASONS = (NOT_FOUND, NO_PRICES, STALE)
+FROZEN = 'frozen'
+FLAG_REASONS = (NOT_FOUND, NO_PRICES, STALE, FROZEN)
 
 
 def _line(word: str, pairs: list[tuple[str, str | int]]) -> str:

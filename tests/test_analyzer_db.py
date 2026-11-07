@@ -1,10 +1,11 @@
 """
-Which tickers analyze scores, against a real database: a stale ticker keeps its previous stock_criteria row,
-date_created included, freshness is judged per market, and run-refresh scores only the markets it fetched.
+Which tickers analyze scores, against a real database: a stale or frozen ticker keeps its previous stock_criteria
+row, date_created included, freshness is judged per market, and run-refresh scores only the markets it fetched.
 """
 
 import argparse
 import sqlite3
+from dataclasses import replace
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -94,7 +95,7 @@ def test_stale_ticker_keeps_its_previous_row_and_date(path, container, capsys):
     assert criteria(path) == {'AAA': (200.0, TODAY.isoformat()), 'STALE': (199.0, LAST_RUN.isoformat())}
     out = capsys.readouterr().out
     # US-only data: one line, for the US, and nothing about Canada
-    assert summary_lines(out) == [f'US: skipped 1 stale ticker (last price before {TODAY})']
+    assert summary_lines(out) == [f'US: skipped 1 stale ticker (last price before {TODAY}) and 0 frozen tickers']
     assert flagged_lines(out) == [f'FLAGGED ticker=STALE reason=stale last={TODAY - timedelta(days=1)}']
 
 
@@ -109,8 +110,8 @@ def test_us_holiday_leaves_us_tickers_scored(path, container, capsys):
 
     assert criteria(path) == {'AAA': (199.0, TODAY.isoformat()), 'SHOP.TO': (199.0, TODAY.isoformat())}
     assert summary_lines(capsys.readouterr().out) == [
-        f'US: skipped 1 stale ticker (last price before {yesterday})',
-        f'Canada: skipped 0 stale tickers (last price before {TODAY})',
+        f'US: skipped 1 stale ticker (last price before {yesterday}) and 0 frozen tickers',
+        f'Canada: skipped 0 stale tickers (last price before {TODAY}) and 0 frozen tickers',
     ]
 
 
@@ -124,8 +125,8 @@ def test_standalone_analyze_scores_both_markets(path, container, capsys):
     assert set(criteria(path)) == {'AAA', 'SHOP.TO', 'ABC.V'}
     assert {date_created for _, date_created in criteria(path).values()} == {TODAY.isoformat()}
     assert summary_lines(capsys.readouterr().out) == [
-        f'US: skipped 0 stale tickers (last price before {TODAY})',
-        f'Canada: skipped 0 stale tickers (last price before {TODAY - timedelta(days=3)})',
+        f'US: skipped 0 stale tickers (last price before {TODAY}) and 0 frozen tickers',
+        f'Canada: skipped 0 stale tickers (last price before {TODAY - timedelta(days=3)}) and 0 frozen tickers',
     ]
 
 
@@ -178,7 +179,7 @@ def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path,
     assert rows_of(path, 'stock_criteria', 'SHOP.TO') == shop_criteria
     assert rows_of(path, 'price_data', 'SHOP.TO') == shop_prices
     assert summary_lines(capsys.readouterr().out) == [
-        f'US: skipped 0 stale tickers (last price before {TODAY})',
+        f'US: skipped 0 stale tickers (last price before {TODAY}) and 0 frozen tickers',
         'Canada: not scored, not fetched by this run (Tiingo)',
     ]
 
@@ -191,7 +192,7 @@ def test_stale_ticker_already_flagged_is_counted_but_not_flagged_again(path, con
     container.analyzer.analyze(already_flagged={'GONE'})
 
     out = capsys.readouterr().out
-    assert summary_lines(out) == [f'US: skipped 2 stale tickers (last price before {TODAY})']
+    assert summary_lines(out) == [f'US: skipped 2 stale tickers (last price before {TODAY}) and 0 frozen tickers']
     assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={TODAY - timedelta(days=1)}']
 
 
@@ -227,4 +228,96 @@ def test_run_refresh_flags_each_dead_or_stale_ticker_once(path, container, capsy
         f'FLAGGED ticker=GONE reason=not_found last={yesterday}',
         f'FLAGGED ticker=EMPTY reason=no_prices last={yesterday}',
     ]
-    assert summary_lines(out) == [f'US: skipped 2 stale tickers (last price before {TODAY})']
+    assert summary_lines(out) == [f'US: skipped 2 stale tickers (last price before {TODAY}) and 0 frozen tickers']
+
+
+def frozen_rows(ticker: str, flat: int, n: int = 100, volume_on: int | None = None) -> list[PriceData]:
+    """
+    n rows ending today whose last 'flat' days repeat one close with zero volume, as Tiingo answers for a ticker that
+    stopped trading; 'volume_on' gives that many days before today a volume of 500 instead.
+    """
+    rows = price_rows(ticker, TODAY, n)
+    close = rows[n - flat - 1].close
+    rows[n - flat :] = [replace(row, close=close, volume=0) for row in rows[n - flat :]]
+    if volume_on is not None:
+        rows[n - 1 - volume_on] = replace(rows[n - 1 - volume_on], volume=500)
+    return rows
+
+
+def first_flat_day(flat: int) -> date:
+    return TODAY - timedelta(days=flat - 1)
+
+
+def test_frozen_ticker_keeps_its_previous_row_and_is_flagged(path, container, capsys, caplog):
+    analyzer = container.analyzer
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('ANSS', TODAY - timedelta(days=1)))
+    score_all(analyzer, LAST_RUN)
+
+    # today's fetch got a new day for both, but ANSS's last 10 days are one close with no volume
+    container.price_data_repo.replace_for_ticker('AAA', price_rows('AAA', TODAY, n=101))
+    container.price_data_repo.replace_for_ticker('ANSS', frozen_rows('ANSS', flat=10))
+    with caplog.at_level('WARNING', logger='app.analyzer'):
+        analyzer.analyze()
+
+    assert criteria(path) == {'AAA': (200.0, TODAY.isoformat()), 'ANSS': (199.0, LAST_RUN.isoformat())}
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [f'US: skipped 0 stale tickers (last price before {TODAY}) and 1 frozen ticker']
+    assert flagged_lines(out) == [f'FLAGGED ticker=ANSS reason=frozen last={first_flat_day(10)}']
+    assert [r.getMessage() for r in caplog.records if r.levelname == 'WARNING'] == [
+        f'ANSS not scored: its price has been frozen, with no volume, since {first_flat_day(10)}'
+    ]
+
+
+def test_frozen_ticker_is_flagged_from_the_first_day_of_a_longer_flat_stretch(path, container, capsys):
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    container.price_data_repo.bulk_insert(frozen_rows('NKLA', flat=40))
+
+    container.analyzer.analyze()
+
+    assert set(criteria(path)) == {'AAA'}
+    assert flagged_lines(capsys.readouterr().out) == [f'FLAGGED ticker=NKLA reason=frozen last={first_flat_day(40)}']
+
+
+@pytest.mark.parametrize(
+    'rows',
+    [
+        pytest.param(frozen_rows('FL', flat=9), id='nine flat days'),
+        pytest.param(frozen_rows('FL', flat=10, volume_on=0), id='volume today'),
+        pytest.param(frozen_rows('FL', flat=10, volume_on=5), id='volume within the ten days'),
+    ],
+)
+def test_ticker_short_of_frozen_is_scored_as_before(path, container, capsys, rows):
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    container.price_data_repo.bulk_insert(rows)
+
+    container.analyzer.analyze()
+
+    assert set(criteria(path)) == {'AAA', 'FL'}
+    assert {date_created for _, date_created in criteria(path).values()} == {TODAY.isoformat()}
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [f'US: skipped 0 stale tickers (last price before {TODAY}) and 0 frozen tickers']
+    assert flagged_lines(out) == []
+
+
+def test_frozen_ticker_already_flagged_is_counted_but_not_flagged_again(path, container, capsys):
+    container.price_data_repo.bulk_insert(frozen_rows('GONE', flat=10))
+    container.price_data_repo.bulk_insert(frozen_rows('FL', flat=10))
+
+    container.analyzer.analyze(already_flagged={'GONE'})
+
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [f'US: skipped 0 stale tickers (last price before {TODAY}) and 2 frozen tickers']
+    assert flagged_lines(out) == [f'FLAGGED ticker=FL reason=frozen last={first_flat_day(10)}']
+
+
+def test_ticker_both_stale_and_frozen_is_flagged_once_as_stale(path, container, capsys):
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    yesterday = TODAY - timedelta(days=1)
+    container.price_data_repo.bulk_insert([r for r in frozen_rows('VERO', flat=11) if r.date <= yesterday])
+
+    container.analyzer.analyze()
+
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [f'US: skipped 1 stale ticker (last price before {TODAY}) and 0 frozen tickers']
+    assert flagged_lines(out) == [f'FLAGGED ticker=VERO reason=stale last={yesterday}']

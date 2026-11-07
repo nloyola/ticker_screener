@@ -10,7 +10,7 @@ from ta.trend import MACD
 from app.container import Container
 from app.markets import MARKETS, UnsupportedTicker, market_of
 from app.models import StockCriteria
-from app.progress import STALE, report_flagged, report_progress
+from app.progress import FROZEN, STALE, report_flagged, report_progress
 
 if TYPE_CHECKING:
     from app.price_apis import PriceApi
@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 # dma_50_rising compares today's 50-day average with the ones 14 and 24 days ago, so a ticker needs 50 + 24 rows
 # and today's to be scored fully. A ticker with fewer rows is not scored at all.
 MIN_ROWS = 75
+
+# A ticker whose last FROZEN_DAYS trading days all have one close and zero volume is frozen: a price API (Tiingo)
+# repeats the last close of a ticker that stopped trading, which would pass the stale check and be scored.
+FROZEN_DAYS = 10
+
+
+def frozen_since(df: pd.DataFrame) -> date | None:
+    """
+    Returns the first day of the flat stretch at the end of 'df' (one ticker's rows, oldest first): the trailing days
+    whose close equals the last close and whose volume is zero. Returns None when that stretch is shorter than
+    FROZEN_DAYS, including when the last day traded any volume or its volume is missing.
+    """
+    closes = df['close'].to_list()
+    volumes = df['volume'].to_list()
+    dates = df.index.get_level_values('date')
+    flat = 0
+    for close, volume in zip(reversed(closes), reversed(volumes), strict=True):
+        if pd.isna(close) or pd.isna(volume) or close != closes[-1] or volume != 0:
+            break
+        flat += 1
+    if flat < FROZEN_DAYS:
+        return None
+    return dates[len(dates) - flat]
 
 
 class Analyzer:
@@ -45,13 +68,15 @@ class Analyzer:
 
         A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with today's
         date_created, so a ticker whose last price is older than its market's newest keeps its previous stock_criteria
-        row instead. For the same reason, after a fetch only the markets the fetch's API covers are scored: a Tiingo
-        run leaves every Canadian ticker's row and date_created as they were. A standalone 'analyze' ('fetched_by'
-        None) scores every market.
+        row instead. So does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
+        its rows are current, but its price is not. For the same reason, after a fetch only the markets the fetch's
+        API covers are scored: a Tiingo run leaves every Canadian ticker's row and date_created as they were. A
+        standalone 'analyze' ('fetched_by' None) scores every market.
 
         Each stale ticker is reported with a 'FLAGGED ticker=<ticker> reason=stale last=<date>' line after its warning
-        (see app/progress.py), except one in 'already_flagged': the fetch reported it already, as not found or with no
-        prices, and kept the rows judged here.
+        (see app/progress.py), and each frozen one with 'reason=frozen last=<first flat day>', except one in
+        'already_flagged': the fetch reported it already, as not found or with no prices, and kept the rows judged
+        here. A ticker both stale and frozen is reported as stale.
 
         Prints one summary line per market that has prices.
         """
@@ -76,6 +101,7 @@ class Analyzer:
                 continue
             newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
             stale = 0
+            frozen = 0
             for ticker, group_df in groups:
                 last = group_df.index.get_level_values('date').max()
                 if last < newest:
@@ -87,8 +113,18 @@ class Analyzer:
                     if ticker not in already_flagged:
                         report_flagged(ticker, STALE, last)
                     continue
+                since = frozen_since(group_df)
+                if since is not None:
+                    logger.warning(f'{ticker} not scored: its price has been frozen, with no volume, since {since}')
+                    frozen += 1
+                    if ticker not in already_flagged:
+                        report_flagged(ticker, FROZEN, since)
+                    continue
                 results.append(self.analyze_ticker(ticker, group_df))
-            print(f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest})')
+            print(
+                f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest}) '
+                f'and {frozen} frozen ticker{"" if frozen == 1 else "s"}'
+            )
 
         # keep only real StockCriteria objects
         items: list[StockCriteria] = [sc for sc in results if sc is not None]

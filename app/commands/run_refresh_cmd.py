@@ -53,7 +53,7 @@ class RunRefreshCmd(BaseCommand):
                     sys.exit(1)
                 ticker_fetcher.prune()
                 # only the markets this run fetched: another market's scores would be restamped as current; and a
-                # ticker the fetch flagged is not flagged again as stale
+                # ticker the fetch flagged is not flagged again as stale or frozen
                 analyzer.analyze(fetched_by=ticker_fetcher.api, already_flagged=ticker_fetcher.flagged)
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)

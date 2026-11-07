@@ -35,7 +35,7 @@ def test_format_progress_rejects_tokens_that_break_the_grammar(stage, fields):
 
 # the grammar documented in README.md § Flagged tickers
 FLAGGED_LINE = re.compile(
-    r'FLAGGED ticker=[A-Za-z0-9_./-]+ reason=(not_found|no_prices|stale)( last=\d{4}-\d{2}-\d{2})?'
+    r'FLAGGED ticker=[A-Za-z0-9_./-]+ reason=(not_found|no_prices|stale|frozen)( last=\d{4}-\d{2}-\d{2})?'
 )
 
 
@@ -45,6 +45,7 @@ FLAGGED_LINE = re.compile(
         ('BLD', 'no_prices', date(2026, 7, 2), 'FLAGGED ticker=BLD reason=no_prices last=2026-07-02'),
         ('SMOP', 'not_found', None, 'FLAGGED ticker=SMOP reason=not_found'),
         ('RCI-B.TO', 'stale', date(2026, 11, 5), 'FLAGGED ticker=RCI-B.TO reason=stale last=2026-11-05'),
+        ('ANSS', 'frozen', date(2026, 7, 17), 'FLAGGED ticker=ANSS reason=frozen last=2026-07-17'),
     ],
 )
 def test_format_flagged(ticker, reason, last, line):
