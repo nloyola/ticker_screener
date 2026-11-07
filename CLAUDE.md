@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-The ticker screener: a **Python 3.12** command line program (managed with **uv**) that fetches stock price data from **Tiingo**, computes the screening criteria (RSI, MACD and the like) and writes everything to a **SQLite** database (stdlib `sqlite3`). Its schema is `schema.sql`.
+The ticker screener: a **Python 3.12** command line program (managed with **uv**) that fetches stock price data from **Tiingo** or **EODHD** (the `PRICE_API` setting), computes the screening criteria (RSI, MACD and the like) and writes everything to a **SQLite** database (stdlib `sqlite3`). Its schema is `schema.sql`.
 
 This repo is checked out as a git submodule at `screener/` in [nloyola/stock_analyzer](https://github.com/nloyola/stock_analyzer), a Go web app that reads the same database and renders the dashboard. The two programs share one `stock_data.db`:
 
@@ -23,7 +23,7 @@ Under `app/`, wired together by a small dependency-injection container:
 - **services/** - Logic over the repositories (`SectorService`).
 - **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py** - The work behind the `analyze`, `ticker-fetcher` and `ticker-sync` commands.
 - **price_apis/** - The price APIs behind one interface (`PriceApi`): `tiingo.py` (US tickers only) and `eodhd.py` (US and Canadian), with the HTTP retry and error helpers they share in `http.py`. Only `wiring.py` picks one, from `PRICE_API`, so either can be deleted cleanly.
-- **markets.py** - `market_of()`, the market rule: a bare ticker is US, `.TO` and `.V` are Canada, any other suffix is refused.
+- **markets.py** - `market_of()`, the market rule: a bare ticker is US, `.TO` and `.V` are Canada, any other suffix is refused; `market_sql()` is the same rule as an SQL expression, for the repositories. `analyze` judges each ticker's freshness against its own market's newest price date, `run-refresh` scores and prunes only the markets its API fetched, and a standalone `analyze` scores every market (README.md, "Price APIs and markets").
 - **redaction.py** - `redact()`, which masks the API keys and any `api_token=` value, applied to every log record by the `stdout` handler's filter and to a crash's traceback by `main.py`'s `sys.excepthook`.
 - **commands/** - One `BaseCommand` subclass per CLI subcommand: a name, its arguments, the config keys it needs (`REQUIRED_CONFIG`, `DB_NAME` by default) and `handle(args, container)`, which takes its workers from the container. Registering a command builds nothing.
 - **container.py**, **wiring.py** - The container (`Value`, `Singleton`, `Factory` providers) and `build_container(config)`, which registers every repository, service and worker as a lazy provider. Classes take the container and pull what they need from it, so a command builds only what it reads.
@@ -39,16 +39,16 @@ uv run python main.py --help                   # list the subcommands
 uv run python main.py db-init                  # create missing tables, empty the market data tables
 uv run python main.py import --excel FILE      # replace sectors, subsectors and tickers from a spreadsheet
 uv run python main.py ticker-sync              # fetch every ticker symbol from Tiingo
-uv run python main.py ticker-fetcher [--sector NAME] [--ticker SYMBOL]   # fetch price data
+uv run python main.py ticker-fetcher [--sector NAME] [--ticker SYMBOL]   # fetch price data from PRICE_API
 uv run python main.py ticker-fetcher --strict [--max-failure-rate 0.5]   # exit 1 when too many tickers fail
-uv run python main.py analyze                  # compute stock_criteria from price_data
+uv run python main.py analyze                  # compute stock_criteria from price_data, every market
 uv run python main.py run-refresh              # under screener.lock: ticker-fetcher --strict, then analyze
 uv run pytest                                  # tests
 uv run ruff check .                            # lint
 uv run ruff format .                           # format
 ```
 
-The tests in `tests/` cover what the parent's admin pages rely on, the `PROGRESS` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, and the core criteria `analyze` computes (`tests/test_analyzer.py`, made-up price series checked against hand-worked values).
+The tests in `tests/` cover what the parent's admin pages rely on, the `PROGRESS` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, the core criteria `analyze` computes (`tests/test_analyzer.py`, made-up price series checked against hand-worked values), and which tickers `analyze` and the cleanup touch in each market (`tests/test_analyzer_db.py`, `tests/test_ticker_fetcher.py`).
 
 ## Git Workflow
 

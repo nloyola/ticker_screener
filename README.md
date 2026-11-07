@@ -1,10 +1,24 @@
 # Ticker screener
 
-Fetches stock price data from Tiingo, computes the screening criteria and writes everything to the SQLite database that the [stock_analyzer](https://github.com/nloyola/stock_analyzer) dashboard reads. See [CLAUDE.md](CLAUDE.md) for the commands and the architecture.
+Fetches stock price data from Tiingo or EODHD, computes the screening criteria and writes everything to the SQLite database that the [stock_analyzer](https://github.com/nloyola/stock_analyzer) dashboard reads. See [CLAUDE.md](CLAUDE.md) for the commands and the architecture.
 
 ## Refreshing the database
 
-`run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since Tiingo restates past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and Tiingo's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one across all tickers keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary.
+`run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since both APIs restate past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and the API's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one in its market keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary.
+
+## Price APIs and markets
+
+The `PRICE_API` setting (`tiingo`, the default, or `eodhd`), read from the environment or `.env` like the keys, picks the API `ticker-fetcher` and `run-refresh` fetch from; only that API's key is needed. One run never mixes the two, and never falls back from one to the other.
+
+A ticker's market is read from the ticker itself (`app/markets.py`): a bare ticker (`AAPL`, `BRK-B`) is US, one ending in `.TO` (Toronto Stock Exchange) or `.V` (TSX Venture) is Canada, and any other suffix is refused. Canadian prices are stored in CAD, unconverted. EODHD covers both markets, asked for a bare ticker as `<TICKER>.US`. Tiingo covers only the US: a Tiingo run skips Canadian tickers, which keep their stored rows and count as neither attempted nor failed, and its fetch summary says how many it skipped (`ticker-fetcher: 1228 attempted, 2 failed (0%, threshold 50%), 15 skipped (not covered by Tiingo)`).
+
+The markets close on different holidays, so freshness is judged per market:
+
+- `analyze` compares each ticker with the newest price date of its own market, so a US holiday on which Canada traded leaves no US ticker unscored, and the reverse.
+- `run-refresh` scores only the markets its API fetched. The other market's tickers keep their previous `stock_criteria` rows and `date_created`, so their scores are never restamped as current. A standalone `analyze` scores every market.
+- The 120-day cleanup after a strict fetch deletes old rows only in the markets the API fetched: a Tiingo run leaves Canadian prices alone.
+
+`analyze` prints one summary line per market that has prices: `US: skipped 1 stale ticker (last price before 2026-11-06)` for a scored market, and `Canada: not scored, not fetched by this run (Tiingo)` for one a refresh left out.
 
 Its exit code tells a caller what happened:
 
