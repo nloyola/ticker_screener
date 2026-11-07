@@ -25,7 +25,7 @@ This guide is for human and AI coding agents contributing to the ticker screener
 ## Environment & Tooling
 
 - Tools: `uv` and `ruff` (on the `PATH` via Nix; `uv run ruff` also works from the dev group). `uv sync` creates `.venv` from `uv.lock`.
-- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command) and `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
+- Environment file: `.env` at the root, read by `load_config` (`app/config.py`) only when the environment does not already hold every key the command needs, after any `.env` piped on stdin and without overriding the environment. Keys: `DB_NAME` (the database path, needed by every command), `TIINGO_API_KEY` (needed by `ticker-fetcher`, `ticker-sync` and `run-refresh`) and `EODHD_API_KEY` (read, but needed by no command yet). A command missing a key it needs exits 2 with one line naming it. Never commit it, and never print it - list key names only (`grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env`).
 - `main.py` runs from any directory: it finds `config/0-stdout.json` and `schema.sql` relative to its own files.
 
 
@@ -59,4 +59,4 @@ Feature branches use the `dev-*` prefix and merge into `main`. Before merging:
 ## Security & Secrets
 
 - Never commit `.env`, databases or spreadsheets.
-- Never log or print `TIINGO_API_KEY`.
+- Never log or print `TIINGO_API_KEY` or `EODHD_API_KEY`. `app/redaction.py` is the guard: `redact()` masks both keys' values and any `api_token=` value, the `stdout` handler's filter (`config/0-stdout.json`) applies it to every log record, tracebacks included, and `main.py`'s `sys.excepthook` applies it to a crash's traceback. Keep new output going through logging, and run any message holding a URL or an error through `error_detail()` or `redact()`.

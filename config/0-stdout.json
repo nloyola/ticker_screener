@@ -7,10 +7,18 @@
       "datefmt": "%H:%M:%S"
     }
   },
+  "filters": {
+    "redact": {
+      "()": "app.redaction.RedactFilter"
+    }
+  },
   "handlers": {
     "stdout": {
       "class": "logging.StreamHandler",
       "formatter": "simple",
+      "filters": [
+        "redact"
+      ],
       "stream": "ext://sys.stdout"
     }
   },

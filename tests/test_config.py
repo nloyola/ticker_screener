@@ -130,7 +130,9 @@ class RecordingContainer:
 
 
 def test_db_init_builds_nothing_it_does_not_use(tmp_path):
-    container = RecordingContainer(build_container(Config(db_name=str(tmp_path / 'a.db'), tiingo_api_key=None)))
+    container = RecordingContainer(
+        build_container(Config(db_name=str(tmp_path / 'a.db'), tiingo_api_key=None, eodhd_api_key=None))
+    )
 
     DbInit().handle(argparse.Namespace(), container)
 
@@ -138,7 +140,7 @@ def test_db_init_builds_nothing_it_does_not_use(tmp_path):
 
 
 def test_reading_a_key_the_command_did_not_require_names_it():
-    container = build_container(Config(db_name='/data/a.db', tiingo_api_key=None))
+    container = build_container(Config(db_name='/data/a.db', tiingo_api_key=None, eodhd_api_key=None))
 
     with pytest.raises(ConfigError, match='TIINGO_API_KEY'):
         container.ticker_fetcher  # noqa: B018
@@ -182,3 +184,21 @@ def test_db_init_keeps_the_database_when_stdin_has_no_answer(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert 'Keeping existing database unchanged.' in result.stdout
+
+
+def test_eodhd_key_is_loaded_without_being_required(clean_env, monkeypatch):
+    monkeypatch.setenv('DB_NAME', '/data/a.db')
+    monkeypatch.setenv('EODHD_API_KEY', 'eodhd-key')
+
+    cfg = load_config(require=('DB_NAME',))
+
+    assert cfg.eodhd_api_key == 'eodhd-key'
+    assert cfg.tiingo_api_key is None
+
+
+def test_eodhd_key_is_loaded_from_the_env_file(clean_env):
+    (clean_env / '.env').write_text('DB_NAME=/file.db\nEODHD_API_KEY=file-eodhd\n')
+
+    cfg = load_config(require=('DB_NAME',))
+
+    assert cfg.eodhd_api_key == 'file-eodhd'

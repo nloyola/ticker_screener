@@ -13,6 +13,7 @@ from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.commands.ticker_sync_cmd import TickerSyncCmd
 from app.config import DB_NAME, ConfigError, load_config
 from app.db import upgrade_db
+from app.redaction import redacting_excepthook, register_secrets
 from app.wiring import build_container
 
 logger = logging.getLogger(__name__)
@@ -91,12 +92,15 @@ class CommandLineInterface(CLI_Interface):
         except ConfigError as err:
             print(f'{self.parser.prog} {args.command}: {err}', file=sys.stderr)
             sys.exit(2)
+        register_secrets((config.tiingo_api_key, config.eodhd_api_key))
         if DB_NAME in command.REQUIRED_CONFIG:
             upgrade_db(config.db_name)  # before the command opens the database, so it sees the current schema
         command.handle(args, build_container(config))
 
 
 def main() -> None:
+    # a traceback escaping main() reaches stderr outside logging, and the dashboard's runner shows it
+    sys.excepthook = redacting_excepthook
     setup_logging()
 
     cli = CommandLineInterface()

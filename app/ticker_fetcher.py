@@ -12,6 +12,7 @@ import requests
 from app.container import Container
 from app.models import PriceData
 from app.progress import report_progress
+from app.redaction import redact, redact_api_tokens
 from app.services.sector_service import normalize_ticker
 
 if TYPE_CHECKING:
@@ -90,8 +91,12 @@ def _response(error: Exception) -> requests.Response | None:
 def error_detail(error: Exception) -> str:
     """
     The error, followed by what Tiingo said in the body of an error answer (its JSON 'detail', or else the text),
-    shortened to ERROR_DETAIL_LIMIT characters.
+    shortened to ERROR_DETAIL_LIMIT characters. Every api_token= value is masked, wherever it appears.
     """
+    return redact_api_tokens(_error_detail(error))
+
+
+def _error_detail(error: Exception) -> str:
     response = _response(error)
     if response is None:
         return str(error)
@@ -278,5 +283,4 @@ class TickerFetcher:
 
     def _redact(self, error: Exception) -> str:
         # the key goes in a header, never in the URL, but never let it reach the log, even quoted back in a body
-        text = error_detail(error)
-        return text.replace(self.tiingo_api_key, '***') if self.tiingo_api_key else text
+        return redact(error_detail(error), self.tiingo_api_key)

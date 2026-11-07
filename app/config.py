@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from dotenv import dotenv_values
 
 TIINGO_API_KEY = 'TIINGO_API_KEY'
+EODHD_API_KEY = 'EODHD_API_KEY'
 DB_NAME = 'DB_NAME'
-KEYS = (TIINGO_API_KEY, DB_NAME)
+KEYS = (TIINGO_API_KEY, EODHD_API_KEY, DB_NAME)
 
 
 class ConfigError(Exception):
@@ -20,6 +21,7 @@ class Config:
 
     db_name: str | None
     tiingo_api_key: str | None
+    eodhd_api_key: str | None
 
 
 def load_config(require: Iterable[str]) -> Config:
@@ -50,4 +52,8 @@ def load_config(require: Iterable[str]) -> Config:
     if missing:
         raise ConfigError(f'missing required config: {", ".join(missing)} (set in the environment or in .env)')
 
-    return Config(db_name=values[DB_NAME], tiingo_api_key=values[TIINGO_API_KEY])
+    return Config(
+        db_name=values[DB_NAME],
+        tiingo_api_key=values[TIINGO_API_KEY],
+        eodhd_api_key=values[EODHD_API_KEY],
+    )
