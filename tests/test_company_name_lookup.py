@@ -251,6 +251,7 @@ def test_transient_lookup_error_is_retried(repo):  # noqa: F811
     client, adapter = tiingo(
         [
             tiingo_response(200, json.dumps([row]).encode()),
+            tiingo_response(200, json.dumps([row]).encode()),  # the benchmark
             tiingo_response(503),
             tiingo_response(200, TIINGO_CVX),
         ]
@@ -258,7 +259,7 @@ def test_transient_lookup_error_is_retried(repo):  # noqa: F811
 
     make_fetcher(repo, client, {1: ['CVX']}).fetch()
 
-    assert len(adapter.sent) == 3
+    assert len(adapter.sent) == 4
     assert names(repo) == {'CVX': ('Chevron Corp', 'tiingo')}
 
 
@@ -286,6 +287,8 @@ def test_eodhd_run_stores_its_names_as_eodhd_and_hides_the_key(repo, caplog):  #
             answer(200, {'apiRequests': 0, 'dailyRateLimit': 100, 'extraLimit': 0}, 'https://eodhd.com/api/user'),
             answer(200, eod),
             answer(200, eod),
+            answer(200, eod),  # the US benchmark
+            answer(200, eod),  # the Canadian benchmark
             answer(200, EODHD_SHOP_SEARCH),
             requests.ConnectionError(f'refused: https://eodhd.com/api/search/AAPL?api_token={EODHD_KEY}'),
             requests.ConnectionError(f'refused: https://eodhd.com/api/search/AAPL?api_token={EODHD_KEY}'),

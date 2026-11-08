@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from app.container import Container
-from app.markets import UnsupportedTicker, market_of
+from app.markets import BENCHMARKS, MARKETS, UnsupportedTicker, market_of
 from app.models import PriceData
 from app.price_apis import PriceApi
 from app.price_apis.http import RETRY_ATTEMPTS, error_detail, is_transient, response_of, retry_delay
@@ -15,6 +15,7 @@ from app.redaction import redact
 from app.services.sector_service import normalize_ticker
 
 if TYPE_CHECKING:
+    from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
     from app.repositories.company_name_repo import CompanyNameRepo
     from app.repositories.price_data_repo import PriceDataRepo
     from app.services.sector_service import SectorService
@@ -78,8 +79,15 @@ class TickerFetcher:
     A ticker whose download fails keeps its stored rows, and so does one whose download holds no trading day. A
     ticker listed in more than one subsector is downloaded once per run, for the first subsector that lists it.
 
-    Before the first price request, the API checks it can serve the run (PriceApi.check_quota), and raises
-    PriceApiStop when it cannot: then nothing is fetched.
+    After the tickers, it downloads the benchmark of each market with a ticker requested in this run (BENCHMARKS in
+    app/markets.py, SPY and XIU.TO), one request each, over the same window, and replaces its stored closes in
+    'benchmark_price', for the analyzer's relative strength: so a Tiingo run never requests the Canadian one. A
+    benchmark whose download fails, after the same retries as a ticker's, or holds no trading day, is logged as a
+    warning and keeps its stored closes: it never counts as attempted or failed, so it cannot fail a run, and the
+    analyzer leaves the market comparison empty where the benchmark lacks a date it needs.
+
+    Before the first price request, the API checks it can serve the run (PriceApi.check_quota), the tickers and the
+    benchmarks, and raises PriceApiStop when it cannot: then nothing is fetched.
 
     'fetch' never deletes the rows of a ticker it could not download. 'prune' deletes the rows older than the window of
     every ticker in a market the API covers; call it once per run, and only after a fetch that succeeded (run-refresh,
@@ -118,6 +126,7 @@ class TickerFetcher:
         self.api: PriceApi = container.price_api_client
         self.sector_service: SectorService = container.sector_service
         self.price_data_repo: PriceDataRepo = container.price_data_repo
+        self.benchmark_price_repo: BenchmarkPriceRepo = container.benchmark_price_repo
         self.company_name_repo: CompanyNameRepo = container.company_name_repo
 
         self.sleep: Callable[[float], None] = time.sleep
@@ -142,9 +151,11 @@ class TickerFetcher:
         if batches is None:
             return self.stats
 
-        needed = sum(len(batch.tickers) for batch in batches)
-        if needed:
-            self.api.check_quota(needed)
+        tickers = [ticker for batch in batches for ticker in batch.tickers]
+        # the benchmarks of the markets this run requests tickers of, in MARKETS' order
+        markets = [market for market in MARKETS if market in {market_of(ticker) for ticker in tickers}]
+        if tickers:
+            self.api.check_quota(len(tickers) + len(markets))
 
         total = len(batches)
         report_progress('fetch', subsector=f'0/{total}')
@@ -156,6 +167,8 @@ class TickerFetcher:
 
         if self.stats.skipped:
             logger.info(f'skipped {self.stats.skipped} tickers not covered by {self.api.name}, stored rows kept')
+        for market in markets:
+            self._fetch_benchmark(BENCHMARKS[market])
         self._look_up_names(self._stored)
         return self.stats
 
@@ -239,6 +252,26 @@ class TickerFetcher:
                     f'stored rows kept: {ticker}'
                 )
                 self._flag(ticker, NO_PRICES)
+
+    def _fetch_benchmark(self, ticker: str) -> None:
+        """Downloads the benchmark's window and replaces its stored closes; see the class docstring."""
+        end = date.today()
+        start = window_start(end)
+        try:
+            prices = self._retrying(ticker, lambda: self.api.daily_prices(ticker, start, end))
+        except Exception as e:
+            logger.warning(
+                f'⚠️ benchmark {ticker} not downloaded from {self.api.name}, stored closes kept: {self._redact(e)}'
+            )
+            return
+        if not prices:
+            logger.warning(
+                f'no prices for benchmark {ticker} from {self.api.name} in the last {HISTORY_DAYS} days, '
+                'stored closes kept'
+            )
+            return
+        self.benchmark_price_repo.replace(ticker, prices)
+        logger.info(f'benchmark {ticker}: {len(prices)} closes from {self.api.name}')
 
     def _flag(self, ticker: str, reason: str) -> None:
         """Prints the ticker's FLAGGED line, with the newest price date stored for it, if any."""

@@ -106,3 +106,15 @@ class StockCriteria:
     dist_high_20d_pct: float | None = None
     dist_high_60d_pct: float | None = None
     near_resistance: int | None = None
+    # the close's return over 21 and 63 trading days, in percent, and its differences, in percentage points, from the
+    # market benchmark's return over the same dates and from the median return of the subsector's scored tickers
+    return_1m_pct: float | None = None
+    return_3m_pct: float | None = None
+    rs_market_1m: float | None = None
+    rs_market_3m: float | None = None
+    rs_sector_1m: float | None = None
+    rs_sector_3m: float | None = None
+    outperforms_market_1m: int | None = None
+    outperforms_market_3m: int | None = None
+    outperforms_sector_1m: int | None = None
+    outperforms_sector_3m: int | None = None

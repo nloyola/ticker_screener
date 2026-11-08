@@ -1,5 +1,7 @@
 import logging
-from collections.abc import Callable, Collection
+import statistics
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
@@ -8,12 +10,21 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 from app.container import Container
-from app.markets import MARKET_CLOSES, MARKETS, PUBLISH_DELAY, UnsupportedTicker, last_complete_session, market_of
+from app.markets import (
+    BENCHMARKS,
+    MARKET_CLOSES,
+    MARKETS,
+    PUBLISH_DELAY,
+    UnsupportedTicker,
+    last_complete_session,
+    market_of,
+)
 from app.models import StockCriteria
 from app.progress import FROZEN, STALE, report_flagged, report_progress
 
 if TYPE_CHECKING:
     from app.price_apis import PriceApi
+    from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
     from app.repositories.price_data_repo import PriceDataRepo
     from app.repositories.stock_criteria_repo import StockCriteriaRepo
 
@@ -61,6 +72,14 @@ CONSOLIDATION_TIGHT_PCT = 10.0
 # Breakout proximity: the close at most PROXIMITY_PCT percent below the 20- or 60-day resistance (the highest high of
 # BREAKOUT_WINDOWS), and not above it.
 PROXIMITY_PCT = 5.0
+# Relative strength: the close's return over RS_1M_DAYS and RS_3M_DAYS trading days (about 1 and 3 months), each
+# compared with the return of the market's benchmark (BENCHMARKS in app/markets.py) between the same two dates, and
+# with the median return of the tickers scored in the same run in the ticker's subsector, itself included. The
+# subsector median needs SECTOR_MIN_TICKERS returns; with fewer it is left empty. The ticker outperforms when its
+# return is above the one it is compared with.
+RS_1M_DAYS = 21
+RS_3M_DAYS = 63
+SECTOR_MIN_TICKERS = 3
 
 # The history every core condition needs: SMA_DAYS rows ending SMA_RISING_DAYS days before the scored day, and the
 # longest breakout window before it. A ticker with fewer rows is not scored at all.
@@ -170,6 +189,67 @@ def _near(distances: list[float | None]) -> int | None:
     return int(any(0 <= d <= PROXIMITY_PCT for d in known))
 
 
+def _return_pct(closes: pd.Series, days: int) -> float | None:
+    """The last close's return over the close 'days' rows before it, in percent: None when too short or not positive."""
+    end, start = _at(closes), _at(closes, days)
+    if end is None or start is None or start <= 0:
+        return None
+    return (end / start - 1) * 100
+
+
+def _benchmark_return_pct(dates: pd.Index, days: int, benchmark: Mapping[date, float]) -> float | None:
+    """
+    The benchmark's return, in percent, between the dates of the row 'days' before the last and the last: None when
+    there are too few rows, or the benchmark has no positive close on either date.
+    """
+    if days >= len(dates):
+        return None
+    start, end = benchmark.get(dates[-1 - days]), benchmark.get(dates[-1])
+    if start is None or end is None or start <= 0:
+        return None
+    return (end / start - 1) * 100
+
+
+def _difference(value: float | None, other: float | None) -> float | None:
+    return None if value is None or other is None else value - other
+
+
+def _positive(value: float | None) -> int | None:
+    """1 when 'value' is above zero, 0 when not, None when it is missing."""
+    return None if value is None else int(value > 0)
+
+
+def with_sector_strength(items: list[StockCriteria]) -> list[StockCriteria]:
+    """
+    'items' with each one's 1- and 3-month returns compared with the median of those of the items in its subsector
+    (subsector_id), itself included; left empty where the subsector has fewer than SECTOR_MIN_TICKERS such returns.
+    """
+    medians: dict[tuple[int, str], float] = {}
+    for field in ('return_1m_pct', 'return_3m_pct'):
+        by_subsector: dict[int, list[float]] = {}
+        for sc in items:
+            value = getattr(sc, field)
+            if value is not None:
+                by_subsector.setdefault(sc.subsector_id, []).append(value)
+        for subsector_id, values in by_subsector.items():
+            if len(values) >= SECTOR_MIN_TICKERS:
+                medians[subsector_id, field] = statistics.median(values)
+    result = []
+    for sc in items:
+        rs_1m = _difference(sc.return_1m_pct, medians.get((sc.subsector_id, 'return_1m_pct')))
+        rs_3m = _difference(sc.return_3m_pct, medians.get((sc.subsector_id, 'return_3m_pct')))
+        result.append(
+            replace(
+                sc,
+                rs_sector_1m=rs_1m,
+                rs_sector_3m=rs_3m,
+                outperforms_sector_1m=_positive(rs_1m),
+                outperforms_sector_3m=_positive(rs_3m),
+            )
+        )
+    return result
+
+
 def _days_above(macd: pd.Series, signal: pd.Series) -> int:
     """How many sessions in a row, ending on the last, MACD has been above its signal line: 0 when it is not."""
     days = 0
@@ -188,6 +268,7 @@ class Analyzer:
     def __init__(self, container: Container, now: Callable[[], datetime] = utc_now) -> None:
         self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
         self.price_data_repo: PriceDataRepo = container.price_data_repo
+        self.benchmark_price_repo: BenchmarkPriceRepo = container.benchmark_price_repo
         # the clock a run's start is read from, timezone aware
         self.now = now
 
@@ -228,6 +309,10 @@ class Analyzer:
         'already_flagged': the fetch reported it already, as not found or with no prices, and kept the rows judged
         here. A ticker both stale and frozen is reported as stale.
 
+        Each scored ticker's returns are compared with its market's benchmark, as stored by the last fetch that
+        covered that market, and then with its subsector's median (with_sector_strength), over the tickers scored in
+        this run.
+
         Prints one summary line per market that has prices.
         """
         df = self.load_price_data()
@@ -252,6 +337,11 @@ class Analyzer:
             groups = self._complete_sessions(market, groups, started_at)
             if not groups:
                 continue
+            benchmark = self.benchmark_price_repo.closes(BENCHMARKS[market])
+            if not benchmark:
+                logger.info(
+                    f'{market}: no closes stored for benchmark {BENCHMARKS[market]}, market strength left empty'
+                )
             newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
             stale = 0
             frozen = 0
@@ -273,14 +363,14 @@ class Analyzer:
                     if ticker not in already_flagged:
                         report_flagged(ticker, FROZEN, since)
                     continue
-                results.append(self.analyze_ticker(ticker, group_df))
+                results.append(self.analyze_ticker(ticker, group_df, benchmark))
             print(
                 f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest}) '
                 f'and {frozen} frozen ticker{"" if frozen == 1 else "s"}'
             )
 
         # keep only real StockCriteria objects
-        items: list[StockCriteria] = [sc for sc in results if sc is not None]
+        items: list[StockCriteria] = with_sector_strength([sc for sc in results if sc is not None])
         date_created = datetime.now().date()
         self.save_to_repository(items, date_created)
 
@@ -342,7 +432,14 @@ class Analyzer:
         # Keep only what you need
         return df[['subsector_id', 'close', 'high', 'low', 'volume']]
 
-    def analyze_ticker(self, ticker: str, df: pd.DataFrame) -> StockCriteria | None:
+    def analyze_ticker(
+        self, ticker: str, df: pd.DataFrame, benchmark: Mapping[date, float] | None = None
+    ) -> StockCriteria | None:
+        """
+        The ticker's criteria from its rows, oldest first, or None when it has fewer than MIN_ROWS. 'benchmark' is
+        its market's benchmark closes by date; without it the market comparison is left empty. The subsector
+        comparison is left empty too: with_sector_strength fills it in once every ticker is scored.
+        """
         if len(df) < MIN_ROWS:
             return None
 
@@ -394,6 +491,13 @@ class Analyzer:
         close_position = _close_position(price, _at(df['high']), _at(df['low']))
         consolidation_range_pct, consolidation_vol_ratio = _consolidation(df)
         dist_20d, dist_60d = _distance_pct(price, high_20d), _distance_pct(price, high_60d)
+
+        # relative strength against the market: the benchmark's return between the same two dates
+        dates = df.index.get_level_values('date')
+        return_1m, return_3m = _return_pct(df['close'], RS_1M_DAYS), _return_pct(df['close'], RS_3M_DAYS)
+        benchmark = benchmark or {}
+        rs_market_1m = _difference(return_1m, _benchmark_return_pct(dates, RS_1M_DAYS, benchmark))
+        rs_market_3m = _difference(return_3m, _benchmark_return_pct(dates, RS_3M_DAYS, benchmark))
 
         breakout_20d = price > high_20d
         breakout_60d = price > high_60d
@@ -459,6 +563,13 @@ class Analyzer:
             dist_high_20d_pct=dist_20d,
             dist_high_60d_pct=dist_60d,
             near_resistance=_near([dist_20d, dist_60d]),
+            # unrounded, like volume_ratio; differences in percentage points
+            return_1m_pct=return_1m,
+            return_3m_pct=return_3m,
+            rs_market_1m=rs_market_1m,
+            rs_market_3m=rs_market_3m,
+            outperforms_market_1m=_positive(rs_market_1m),
+            outperforms_market_3m=_positive(rs_market_3m),
         )
 
     def save_to_repository(self, items: list[StockCriteria], date_created: date) -> None:

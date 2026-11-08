@@ -24,6 +24,10 @@ MARKET_CLOSES = {
     CANADA: (ZoneInfo('America/Toronto'), time(16)),
 }
 
+# each market's broad-market benchmark, an index fund every fetch downloads beside the tickers so the analyzer can
+# compare their returns with the market's (relative strength): SPDR S&P 500 for the US, iShares S&P/TSX 60 for Canada
+BENCHMARKS = {US: 'SPY', CANADA: 'XIU.TO'}
+
 # how long after a market's close the price APIs have published that day's final candle: EODHD updates NYSE and
 # NASDAQ about 15 minutes after the close and other exchanges, the TSX among them, 2 to 3 hours after it; Tiingo
 # states no time, its end-of-day jobs running after the close. Before then a row dated that day is not final.

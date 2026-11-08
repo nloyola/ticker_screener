@@ -332,6 +332,34 @@ def test_upgrade_adds_the_price_action_indicators_keeping_every_row(version_5_db
     ) == [(1, 'XOM', 4, 0.25, 98.5, None, None, None), (2, 'CVX', None, None, None, None, None, None)]
 
 
+@pytest.fixture
+def version_6_db(version_5_db) -> str:
+    """A database at version 6: the version 5 one with the price action indicators, without relative strength."""
+    con = open_connection(version_5_db)
+    try:
+        with con:
+            db.UPGRADES[5](con)
+            con.execute('DROP TABLE benchmark_price')
+            con.execute('PRAGMA user_version = 6')
+            con.execute("UPDATE stock_criteria SET close_position = 0.8, near_resistance = 1 WHERE ticker = 'XOM'")
+    finally:
+        con.close()
+    return version_5_db
+
+
+def test_upgrade_adds_benchmark_price_and_relative_strength_keeping_every_row(version_6_db, current_db):
+    upgrade_db(version_6_db)
+
+    assert _query(version_6_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_6_db, 'stock_criteria') == _table_sql(current_db, 'stock_criteria')
+    assert _table_sql(version_6_db, 'benchmark_price') == _table_sql(current_db, 'benchmark_price')
+    assert _query(
+        version_6_db,
+        'SELECT id, ticker, core_criteria_score, close_position, near_resistance, return_1m_pct, rs_market_3m, '
+        'outperforms_sector_1m FROM stock_criteria',
+    ) == [(1, 'XOM', 4, 0.8, 1, None, None, None), (2, 'CVX', None, None, None, None, None, None)]
+
+
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):
     _execute(old_db, 'DELETE FROM price_data')
     upgrade_db(old_db)

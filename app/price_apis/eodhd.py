@@ -175,6 +175,6 @@ class EodhdPrices:
         if left < needed:
             raise PriceApiStop(
                 f'EODHD has {left} calls left today ({usage.spent} of {usage.daily_limit} spent on {usage.day}, '
-                f'{usage.extra} extra), fewer than the {needed} tickers to fetch: no price was requested'
+                f'{usage.extra} extra), fewer than the {needed} calls the fetch needs: no price was requested'
             )
         logger.info(f'EODHD has {left} calls left today, {needed} needed')

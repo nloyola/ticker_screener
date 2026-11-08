@@ -13,7 +13,7 @@ from requests.adapters import HTTPAdapter
 
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.db import init_db
-from app.markets import CANADA, US
+from app.markets import BENCHMARKS, CANADA, US
 from app.models import PriceData
 from app.price_apis import DailyPrice
 from app.price_apis.http import (
@@ -26,6 +26,7 @@ from app.price_apis.http import (
     retry_delay,
 )
 from app.price_apis.tiingo import TiingoPrices
+from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
@@ -76,11 +77,18 @@ def tiingo_rows(rows: list[tuple[date, float]]) -> list[DailyPrice]:
     )
 
 
+# what the fakes answer for a benchmark with no response of its own: one close, yesterday
+BENCHMARK_ROWS = [(TODAY - timedelta(days=1), 500.0)]
+
+
 class FakeTiingo(FakeApi):
-    """Answers daily_prices from canned responses; a ticker with no response raises, as a failed request does."""
+    """
+    Answers daily_prices from canned responses; a ticker with no response raises, as a failed request does, and a
+    benchmark with none gets BENCHMARK_ROWS.
+    """
 
     def __init__(self, prices: dict[str, list[tuple[date, float]]]) -> None:
-        self.prices = prices
+        self.prices = {benchmark: BENCHMARK_ROWS for benchmark in BENCHMARKS.values()} | prices
         self.requests: list[tuple[str, str, str]] = []
 
     def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
@@ -108,10 +116,13 @@ def http_error(status: int, retry_after: str | None = None, body: bytes = b'') -
 
 
 class ScriptedTiingo(FakeApi):
-    """Answers each daily_prices call with the next item of the ticker's script: an exception to raise, or rows."""
+    """
+    Answers each daily_prices call with the next item of the ticker's script: an exception to raise, or rows. A
+    benchmark with no script gets BENCHMARK_ROWS.
+    """
 
     def __init__(self, scripts: dict[str, list]) -> None:
-        self.scripts = scripts
+        self.scripts = {benchmark: [BENCHMARK_ROWS] for benchmark in BENCHMARKS.values()} | scripts
         self.calls: list[str] = []
 
     def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
@@ -158,6 +169,7 @@ def make_fetcher(repo: PriceDataRepo, api, subsectors: dict[int, list[str]]) -> 
         price_api_client=api,
         sector_service=FakeSectorService(subsectors),
         price_data_repo=repo,
+        benchmark_price_repo=BenchmarkPriceRepo(SimpleNamespace(db_path=repo.db_path)),
         company_name_repo=CompanyNameRepo(SimpleNamespace(db_path=repo.db_path)),
     )
     fetcher = TickerFetcher(container)
@@ -186,7 +198,8 @@ def test_asks_for_the_whole_window_once_per_ticker(repo):
     stats = make_fetcher(repo, tiingo, {1: ['CVX', 'XOM'], 2: ['XOM']}).fetch()
 
     start, end = (TODAY - timedelta(days=HISTORY_DAYS)).isoformat(), TODAY.isoformat()
-    assert tiingo.requests == [('CVX', start, end), ('XOM', start, end)]
+    # then the US benchmark, over the same window
+    assert tiingo.requests == [('CVX', start, end), ('XOM', start, end), ('SPY', start, end)]
     assert (stats.attempted, stats.failed) == (2, 0)
     assert stored(repo, 'XOM') == [(1, days_ago(1), 2.0)]  # for the first subsector that lists it
 
@@ -243,7 +256,7 @@ def test_a_single_ticker_is_fetched_and_stored_normalized(repo):
 
     make_fetcher(repo, tiingo, {1: ['CVX'], 2: ['XOM']}).fetch(ticker_filter=' xom ')
 
-    assert [ticker for ticker, _, _ in tiingo.requests] == ['XOM']
+    assert [ticker for ticker, _, _ in tiingo.requests] == ['XOM', 'SPY']
     assert stored(repo, 'XOM') == [(2, days_ago(1), 2.0)]
 
 
@@ -345,7 +358,7 @@ def test_retries_a_429_and_stores_the_next_answer(repo):
 
     stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
 
-    assert tiingo.calls == ['CVX', 'CVX']
+    assert tiingo.calls == ['CVX', 'CVX', 'SPY']
     assert (stats.attempted, stats.failed) == (1, 0)
     assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]
 
@@ -356,7 +369,7 @@ def test_three_server_errors_fail_the_ticker_once(repo):
 
     stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
 
-    assert tiingo.calls == ['CVX'] * RETRY_ATTEMPTS
+    assert tiingo.calls == ['CVX'] * RETRY_ATTEMPTS + ['SPY']
     assert (stats.attempted, stats.failed) == (1, 1)
     assert stored(repo, 'CVX') == [(1, days_ago(2), 2.0)]
 
@@ -368,7 +381,7 @@ def test_connection_errors_are_retried(repo):
 
     stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
 
-    assert len(tiingo.calls) == 3
+    assert tiingo.calls == ['CVX', 'CVX', 'CVX', 'SPY']
     assert stats.failed == 0
 
 
@@ -378,7 +391,7 @@ def test_other_errors_fail_at_once(repo, error):
 
     stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch()
 
-    assert tiingo.calls == ['CVX']
+    assert tiingo.calls == ['CVX', 'SPY']
     assert stats.failed == 1
 
 
@@ -430,7 +443,7 @@ def test_malformed_row_fails_only_that_ticker(repo):
 
     stats = make_fetcher(repo, tiingo, {1: ['CVX', 'XOM']}).fetch()
 
-    assert tiingo.calls == ['CVX', 'XOM']  # not retried
+    assert tiingo.calls == ['CVX', 'XOM', 'SPY']  # not retried
     assert (stats.attempted, stats.failed) == (2, 1)
     assert stored(repo, 'XOM') == [(1, days_ago(1), 2.0)]
 
@@ -557,12 +570,13 @@ def test_timed_out_request_is_retried_and_then_succeeds(repo):
     row = {'date': f'{days_ago(1).isoformat()}T00:00:00.000Z', 'adjClose': 1.0, 'adjHigh': 1.0, 'adjLow': 1.0}
     body = json.dumps([{**row, 'adjVolume': 100}]).encode()
     meta = tiingo_response(200, b'{"ticker": "cvx", "name": "Chevron Corp"}')
-    client, adapter = tiingo_prices([requests.ReadTimeout('read timed out'), tiingo_response(200, body), meta])
+    answers = [requests.ReadTimeout('read timed out'), tiingo_response(200, body), tiingo_response(200, body), meta]
+    client, adapter = tiingo_prices(answers)
     fetcher = make_fetcher(repo, client, {1: ['CVX']})
 
     stats = fetcher.fetch()
 
-    assert len(adapter.sent) == 3  # the prices twice, then the company name
+    assert len(adapter.sent) == 4  # the prices twice, the benchmark, then the company name
     assert (stats.attempted, stats.failed) == (1, 0)
     assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]
 
@@ -640,3 +654,66 @@ def test_fetched_tickers_are_not_flagged(repo, capsys):
     fetcher.fetch(strict=True)
 
     assert flagged_lines(capsys.readouterr().out) == []
+
+
+# the benchmarks
+
+
+def benchmark_closes(repo: PriceDataRepo, ticker: str) -> dict[date, float]:
+    return BenchmarkPriceRepo(SimpleNamespace(db_path=repo.db_path)).closes(ticker)
+
+
+def test_benchmark_closes_replace_the_stored_ones(repo):
+    BenchmarkPriceRepo(SimpleNamespace(db_path=repo.db_path)).replace(
+        'SPY', tiingo_rows([(OLD_DAY, 400.0), (days_ago(1), 450.0)])
+    )
+
+    make_fetcher(repo, FakeTiingo({'CVX': [(days_ago(1), 1.0)]}), {1: ['CVX']}).fetch()
+
+    assert benchmark_closes(repo, 'SPY') == dict(BENCHMARK_ROWS)
+    assert stored(repo, 'SPY') == []  # never in price_data
+
+
+def test_failed_benchmark_keeps_its_closes_and_fails_no_ticker(repo, caplog, capsys):
+    BenchmarkPriceRepo(SimpleNamespace(db_path=repo.db_path)).replace('SPY', tiingo_rows([(days_ago(2), 450.0)]))
+    tiingo = ScriptedTiingo({'CVX': [[(days_ago(1), 1.0)]], 'SPY': [http_error(503)] * RETRY_ATTEMPTS})
+
+    stats = make_fetcher(repo, tiingo, {1: ['CVX']}).fetch(strict=True)
+
+    assert tiingo.calls == ['CVX'] + ['SPY'] * RETRY_ATTEMPTS  # retried as a ticker is
+    assert (stats.attempted, stats.failed) == (1, 0)
+    assert benchmark_closes(repo, 'SPY') == {days_ago(2): 450.0}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].startswith(
+        '⚠️ benchmark SPY not downloaded from Tiingo, stored closes kept'
+    )
+    assert flagged_lines(capsys.readouterr().out) == []
+
+
+def test_only_the_benchmarks_of_markets_with_tickers_to_fetch_are_requested(repo):
+    eodhd = FakeTiingo({'SHOP.TO': [(days_ago(1), 1.0)]})
+    eodhd.name, eodhd.markets = 'EODHD', frozenset({US, CANADA})
+
+    make_fetcher(repo, eodhd, {1: ['SHOP.TO']}).fetch()
+
+    assert [ticker for ticker, _, _ in eodhd.requests] == ['SHOP.TO', 'XIU.TO']
+    assert benchmark_closes(repo, 'XIU.TO') == dict(BENCHMARK_ROWS)
+
+
+def test_a_run_with_no_ticker_to_fetch_requests_no_benchmark(repo):
+    tiingo = FakeTiingo({})
+
+    make_fetcher(repo, tiingo, {1: ['SHOP.TO']}).fetch()  # Tiingo skips the Canadian ticker
+
+    assert tiingo.requests == []
+
+
+def test_the_quota_check_counts_the_benchmarks(repo):
+    eodhd = FakeTiingo({'AAPL': [(days_ago(1), 1.0)], 'MSFT': [(days_ago(1), 1.0)], 'SHOP.TO': [(days_ago(1), 1.0)]})
+    eodhd.name, eodhd.markets = 'EODHD', frozenset({US, CANADA})
+    needed = []
+    eodhd.check_quota = needed.append
+
+    make_fetcher(repo, eodhd, {1: ['AAPL', 'MSFT', 'SHOP.TO']}).fetch()
+
+    assert needed == [5]  # three tickers and two benchmarks

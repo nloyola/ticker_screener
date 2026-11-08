@@ -6,6 +6,7 @@ from app.db import SQLite
 from app.price_apis import PriceApi
 from app.price_apis.eodhd import EodhdPrices
 from app.price_apis.tiingo import TiingoPrices
+from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
@@ -34,6 +35,7 @@ def build_container(config: Config) -> Container:
     c.register('sector_repo', Singleton(lambda: SectorRepo(c)))
     c.register('subsector_repo', Singleton(lambda: SubsectorRepo(c)))
     c.register('price_data_repo', Singleton(lambda: PriceDataRepo(c)))
+    c.register('benchmark_price_repo', Singleton(lambda: BenchmarkPriceRepo(c)))
     c.register('stock_criteria_repo', Singleton(lambda: StockCriteriaRepo(c)))
     c.register('ticker_repo', Singleton(lambda: TickerRepo(c)))
     c.register('company_name_repo', Singleton(lambda: CompanyNameRepo(c)))

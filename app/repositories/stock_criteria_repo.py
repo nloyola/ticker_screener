@@ -59,6 +59,16 @@ COLUMNS = (
     'dist_high_20d_pct',
     'dist_high_60d_pct',
     'near_resistance',
+    'return_1m_pct',
+    'return_3m_pct',
+    'rs_market_1m',
+    'rs_market_3m',
+    'rs_sector_1m',
+    'rs_sector_3m',
+    'outperforms_market_1m',
+    'outperforms_market_3m',
+    'outperforms_sector_1m',
+    'outperforms_sector_3m',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -134,6 +144,16 @@ def _row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_float(sc.dist_high_20d_pct),
         _as_float(sc.dist_high_60d_pct),
         _as_int(sc.near_resistance),  # INTEGER
+        _as_float(sc.return_1m_pct),
+        _as_float(sc.return_3m_pct),
+        _as_float(sc.rs_market_1m),
+        _as_float(sc.rs_market_3m),
+        _as_float(sc.rs_sector_1m),
+        _as_float(sc.rs_sector_3m),
+        _as_int(sc.outperforms_market_1m),  # INTEGER
+        _as_int(sc.outperforms_market_3m),  # INTEGER
+        _as_int(sc.outperforms_sector_1m),  # INTEGER
+        _as_int(sc.outperforms_sector_3m),  # INTEGER
     )
 
 

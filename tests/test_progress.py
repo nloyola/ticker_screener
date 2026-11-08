@@ -83,10 +83,16 @@ class FakeSectorService:
 
 def make_fetcher(sectors: list[SectorAggregate]) -> TickerFetcher:
     container = SimpleNamespace(
-        price_api_client=SimpleNamespace(name='Tiingo', markets=frozenset({'US'}), check_quota=lambda needed: None),
+        price_api_client=SimpleNamespace(
+            name='Tiingo',
+            markets=frozenset({'US'}),
+            check_quota=lambda needed: None,
+            daily_prices=lambda ticker, start, end: [],
+        ),
         sector_service=FakeSectorService(sectors),
         price_data_repo=SimpleNamespace(replace_for_ticker=lambda ticker, rows: None, latest_for_ticker=lambda t: None),
         company_name_repo=SimpleNamespace(missing=lambda tickers: []),
+        benchmark_price_repo=SimpleNamespace(replace=lambda ticker, prices: None),
     )
     fetcher = TickerFetcher(container)
     fetcher._fetch_ticker_data = lambda subsector_id, ticker: []
@@ -142,7 +148,9 @@ def test_fetch_with_no_subsectors_reports_zero_total(capsys):
 
 
 def test_analyze_reports_start_and_done(capsys):
-    container = SimpleNamespace(stock_criteria_repo=None, price_data_repo=SimpleNamespace(all=lambda: []))
+    container = SimpleNamespace(
+        stock_criteria_repo=None, price_data_repo=SimpleNamespace(all=lambda: []), benchmark_price_repo=None
+    )
     Analyzer(container).analyze()
 
     assert progress_lines(capsys.readouterr().out) == [

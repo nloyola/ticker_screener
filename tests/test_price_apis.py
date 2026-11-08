@@ -111,6 +111,8 @@ def test_eodhd_run_stores_adjusted_close_and_volume_for_bare_and_suffixed_ticker
             usage_answer(),
             eod_answer([(days_ago(2), 150.5, 1000), (days_ago(1), 151.25, 1200)]),
             eod_answer([(days_ago(1), 98.75, 3400)]),
+            eod_answer([(days_ago(1), 600.0, 9)]),
+            eod_answer([(days_ago(1), 40.0, 9)]),
         ]
     )
 
@@ -123,6 +125,9 @@ def test_eodhd_run_stores_adjusted_close_and_volume_for_bare_and_suffixed_ticker
     assert urls[0].startswith('https://eodhd.com/api/user?')
     assert urls[1].startswith(f'https://eodhd.com/api/eod/AAPL.US?from={days_ago(HISTORY_DAYS).isoformat()}&to=')
     assert urls[2].startswith('https://eodhd.com/api/eod/SHOP.TO?')
+    # then each market's benchmark: EODHD covers both
+    assert urls[3].startswith('https://eodhd.com/api/eod/SPY.US?')
+    assert urls[4].startswith('https://eodhd.com/api/eod/XIU.TO?')
     assert all('fmt=json' in url and f'api_token={EODHD_KEY}' in url for url in urls)
     assert adapter.sent[0][1] == USAGE_TIMEOUT
 
@@ -149,7 +154,8 @@ def test_eodhd_run_with_too_few_calls_left_stops_before_any_price_request(repo, 
     assert exit_info.value.code == 1
     assert len(adapter.sent) == 1  # the usage check only
     assert 'EODHD has 1 calls left today' in caplog.text
-    assert 'fewer than the 2 tickers to fetch' in caplog.text
+    # the two tickers and their two markets' benchmarks
+    assert 'fewer than the 4 calls the fetch needs' in caplog.text
 
 
 def test_extra_calls_count_once_the_daily_limit_is_spent():
@@ -203,12 +209,13 @@ def test_run_refresh_stopped_by_eodhd_exits_1_without_pruning_or_analyzing(repo,
 def test_eodhd_usage_check_that_fails_otherwise_warns_and_carries_on(repo, caplog, failure):  # noqa: F811
     usage_failure = failure if isinstance(failure, Exception) else answer(500, {}, 'https://eodhd.com/api/user')
     search = answer(200, [{'Code': 'AAPL', 'Exchange': 'US', 'Name': 'Apple Inc'}], 'https://eodhd.com/api/search/AAPL')
-    client, adapter = eodhd([usage_failure, eod_answer([(days_ago(1), 10.0, 5)]), search])
+    prices = eod_answer([(days_ago(1), 10.0, 5)])
+    client, adapter = eodhd([usage_failure, prices, prices, search])
 
     stats = make_fetcher(repo, client, {1: ['AAPL']}).fetch(strict=True)
 
     assert (stats.attempted, stats.failed) == (1, 0)
-    assert len(adapter.sent) == 3  # the usage check, the prices and the company name
+    assert len(adapter.sent) == 4  # the usage check, the prices, the US benchmark and the company name
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and 'EODHD usage check failed, carrying on' in warnings[0]
     assert EODHD_KEY not in caplog.text
@@ -265,7 +272,8 @@ def test_tiingo_run_skips_suffixed_tickers_without_attempting_them(repo, caplog,
 
     run_fetch_cmd(fetcher, '--strict')
 
-    assert [ticker for ticker, _, _ in tiingo.requests] == ['AAPL']
+    # and the US benchmark, never the Canadian one
+    assert [ticker for ticker, _, _ in tiingo.requests] == ['AAPL', 'SPY']
     assert (fetcher.stats.attempted, fetcher.stats.failed, fetcher.stats.skipped) == (1, 0, 2)
     assert capsys.readouterr().out.splitlines()[-1] == (
         'ticker-fetcher: 1 attempted, 0 failed (0%, threshold 50%), 2 skipped (not covered by Tiingo)'
@@ -291,7 +299,7 @@ def test_ticker_with_an_unsupported_suffix_fails_without_a_request(repo, caplog)
 
     stats = make_fetcher(repo, tiingo, {1: ['AAPL', 'VOD.L']}).fetch(strict=True)
 
-    assert [ticker for ticker, _, _ in tiingo.requests] == ['AAPL']
+    assert [ticker for ticker, _, _ in tiingo.requests] == ['AAPL', 'SPY']
     assert (stats.attempted, stats.failed, stats.skipped) == (2, 1, 0)
     assert 'unsupported exchange suffix: VOD.L' in caplog.text
 

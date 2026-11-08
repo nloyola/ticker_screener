@@ -20,6 +20,7 @@ from app.db import init_db
 from app.markets import US
 from app.models import PriceData
 from app.price_apis import DailyPrice
+from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
@@ -67,6 +68,7 @@ def path(tmp_path) -> str:
 def container(path) -> SimpleNamespace:
     container = SimpleNamespace(db_path=path)
     container.price_data_repo = PriceDataRepo(container)
+    container.benchmark_price_repo = BenchmarkPriceRepo(container)
     container.company_name_repo = CompanyNameRepo(container)
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
@@ -477,3 +479,54 @@ def test_analyze_stores_every_price_action_indicator(path, container):
         }
     )
     assert row['core_criteria_score'] == 3  # no breakout: the close only equals the prior high
+
+
+RELATIVE_STRENGTH_COLUMNS = (
+    'return_1m_pct',
+    'return_3m_pct',
+    'rs_market_1m',
+    'rs_market_3m',
+    'rs_sector_1m',
+    'rs_sector_3m',
+    'outperforms_market_1m',
+    'outperforms_market_3m',
+    'outperforms_sector_1m',
+    'outperforms_sector_3m',
+)
+
+
+def test_analyze_stores_every_relative_strength_value(path, container):
+    # three tickers of one subsector, their closes rising by 1, 2 and 0.5 a day from 100, and the US benchmark
+    # rising by 1 from 200, on the same 100 days ending today
+    for ticker, step in (('AAA', 1.0), ('BBB', 2.0), ('CCC', 0.5)):
+        rows = [replace(row, close=100.0 + step * i) for i, row in enumerate(price_rows(ticker, TODAY))]
+        container.price_data_repo.bulk_insert(rows)
+    container.benchmark_price_repo.replace(
+        'SPY', [DailyPrice(TODAY - timedelta(days=99 - i), 200.0 + i, 1, 200.0 + i, 200.0 + i) for i in range(100)]
+    )
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            f'SELECT core_criteria_score, {", ".join(RELATIVE_STRENGTH_COLUMNS)} FROM stock_criteria '
+            "WHERE ticker = 'BBB'"
+        ).fetchone()
+    # BBB closes at 298, 256 21 rows earlier and 172 63 rows earlier; the benchmark at 299, 278 and 236; AAA's
+    # returns, 199/178 and 199/136, are the subsector's medians
+    assert {column: row[column] for column in RELATIVE_STRENGTH_COLUMNS} == pytest.approx(
+        {
+            'return_1m_pct': (298 / 256 - 1) * 100,
+            'return_3m_pct': (298 / 172 - 1) * 100,
+            'rs_market_1m': (298 / 256 - 299 / 278) * 100,
+            'rs_market_3m': (298 / 172 - 299 / 236) * 100,
+            'rs_sector_1m': (298 / 256 - 199 / 178) * 100,
+            'rs_sector_3m': (298 / 172 - 199 / 136) * 100,
+            'outperforms_market_1m': 1,
+            'outperforms_market_3m': 1,
+            'outperforms_sector_1m': 1,
+            'outperforms_sector_3m': 1,
+        }
+    )
+    assert row['core_criteria_score'] == 4

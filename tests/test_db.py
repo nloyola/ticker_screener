@@ -11,6 +11,7 @@ import pytest
 import app.db
 from app.db import BUSY_TIMEOUT_MS, SQLite, init_db, open_connection
 from app.models import PriceData, StockCriteria
+from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
@@ -72,6 +73,7 @@ def test_write_waits_for_another_writer_instead_of_failing(db_path):
 
 # one call per repository that opens a connection, so the test sees every repository use the shared helper
 REPOSITORY_CALLS = {
+    BenchmarkPriceRepo: lambda r: r.closes('SPY'),
     CompanyNameRepo: lambda r: r.missing(['XOM']),
     MetadataRepo: lambda r: r.get('k'),
     PriceDataRepo: lambda r: r.latest_for_ticker('XOM'),

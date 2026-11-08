@@ -37,6 +37,16 @@ class FakePriceDataRepo:
         return iter(self.rows)
 
 
+class FakeBenchmarkPriceRepo:
+    """Each benchmark's closes by date, none for a benchmark not in 'closes'."""
+
+    def __init__(self, closes: dict[str, dict[date, float]] | None = None) -> None:
+        self.closes_by_ticker = closes or {}
+
+    def closes(self, ticker: str) -> dict[date, float]:
+        return self.closes_by_ticker.get(ticker, {})
+
+
 class FakeStockCriteriaRepo:
     def __init__(self) -> None:
         self.saved: list[tuple[list[StockCriteria], date]] = []
@@ -73,9 +83,15 @@ def price_rows(
     ]
 
 
-def make_analyzer(rows: list[PriceData]) -> tuple[Analyzer, FakeStockCriteriaRepo]:
+def make_analyzer(
+    rows: list[PriceData], benchmarks: dict[str, dict[date, float]] | None = None
+) -> tuple[Analyzer, FakeStockCriteriaRepo]:
     criteria_repo = FakeStockCriteriaRepo()
-    container = SimpleNamespace(price_data_repo=FakePriceDataRepo(rows), stock_criteria_repo=criteria_repo)
+    container = SimpleNamespace(
+        price_data_repo=FakePriceDataRepo(rows),
+        stock_criteria_repo=criteria_repo,
+        benchmark_price_repo=FakeBenchmarkPriceRepo(benchmarks),
+    )
     return Analyzer(container), criteria_repo
 
 
@@ -84,12 +100,13 @@ def analyze(
     volumes: list[int] | None = None,
     highs: list[float | None] | None = None,
     lows: list[float | None] | None = None,
+    benchmark: dict[date, float] | None = None,
 ) -> StockCriteria | None:
     """Runs analyze_ticker on one ticker's rows, grouped as Analyzer._analyze groups them."""
     analyzer, _ = make_analyzer(price_rows('TEST', closes, volumes, highs, lows))
     df = analyzer.load_price_data()
     ((ticker, group_df),) = list(df.groupby(level='ticker'))
-    return analyzer.analyze_ticker(ticker, group_df)
+    return analyzer.analyze_ticker(ticker, group_df, benchmark)
 
 
 def rising(n: int, start: float = 100.0, step: float = 1.0) -> list[float]:
@@ -781,6 +798,96 @@ def test_the_price_action_indicators_never_change_the_core_score():
     assert (tight_strong.consolidation_tight, tight_strong.close_upper_quarter) == (1, 1)
     assert (loose_weak.consolidation_tight, loose_weak.close_upper_quarter) == (0, 0)
     assert tight_strong.core_criteria_score == loose_weak.core_criteria_score == 4
+
+
+# --- Relative strength --------------------------------------------------------
+#
+# rising(100) closes at 199 on day 99, 178 on day 78 (21 rows earlier) and 136 on day 36 (63 rows earlier).
+
+
+def day(i: int) -> date:
+    """The date of row i of price_rows."""
+    return date(2026, 1, 1) + timedelta(days=i)
+
+
+def benchmark_closes(closes: list[float]) -> dict[date, float]:
+    """A benchmark with one close a day on the same dates as price_rows."""
+    return {day(i): close for i, close in enumerate(closes)}
+
+
+def test_returns_are_compared_with_the_benchmark_over_the_same_dates():
+    # the benchmark closes at 299 on day 99, 278 on day 78 and 236 on day 36
+    sc = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark_closes(rising(100, start=200.0)))
+
+    assert sc.return_1m_pct == pytest.approx((199 / 178 - 1) * 100)  # 11.80
+    assert sc.return_3m_pct == pytest.approx((199 / 136 - 1) * 100)  # 46.32
+    assert sc.rs_market_1m == pytest.approx((199 / 178 - 299 / 278) * 100)  # 11.80 - 7.55
+    assert sc.rs_market_3m == pytest.approx((199 / 136 - 299 / 236) * 100)  # 46.32 - 26.69
+    assert (sc.outperforms_market_1m, sc.outperforms_market_3m) == (1, 1)
+
+
+def test_a_ticker_rising_slower_than_its_benchmark_does_not_outperform():
+    # the benchmark closes at 298 on day 99, 256 on day 78 and 172 on day 36
+    sc = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark_closes(rising(100, step=2.0)))
+
+    assert sc.rs_market_1m == pytest.approx((199 / 178 - 298 / 256) * 100)  # 11.80 - 16.41
+    assert sc.rs_market_3m == pytest.approx((199 / 136 - 298 / 172) * 100)  # 46.32 - 73.26
+    assert (sc.outperforms_market_1m, sc.outperforms_market_3m) == (0, 0)
+
+
+def test_market_strength_is_empty_without_the_benchmark_and_never_changes_the_core_score():
+    with_benchmark = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark_closes(rising(100)))
+    without = analyze(rising(100), volumes_with_last(100, 2000))
+
+    assert without.return_1m_pct == with_benchmark.return_1m_pct
+    assert (without.rs_market_1m, without.rs_market_3m) == (None, None)
+    assert (without.outperforms_market_1m, without.outperforms_market_3m) == (None, None)
+    # the analyzer leaves the subsector comparison to with_sector_strength
+    assert (with_benchmark.rs_sector_1m, with_benchmark.outperforms_sector_1m) == (None, None)
+    assert with_benchmark.core_criteria_score == without.core_criteria_score == 4
+
+
+def test_market_strength_is_empty_where_the_benchmark_lacks_a_date():
+    # the benchmark has no close on day 36, the 3-month comparison's start, and one on every other day
+    benchmark = benchmark_closes(rising(100))
+    del benchmark[day(36)]
+
+    sc = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark)
+
+    assert sc.rs_market_1m == pytest.approx(0.0)
+    assert (sc.rs_market_3m, sc.outperforms_market_3m) == (None, None)
+
+
+def run_subsector(tickers: dict[str, list[float]]) -> dict[str, StockCriteria]:
+    """Analyzes the tickers as one run, every one in SUBSECTOR_ID, and returns what it saved by ticker."""
+    rows = [row for ticker, closes in tickers.items() for row in price_rows(ticker, closes)]
+    analyzer, criteria_repo = make_analyzer(rows)
+    analyzer.analyze()
+    ((items, _),) = criteria_repo.saved
+    return {sc.ticker: sc for sc in items}
+
+
+def test_returns_are_compared_with_the_subsector_median():
+    # 1-month returns: AAA 199/178, BBB 298/256 (16.41%), CCC 149.5/139 (7.55%); the median is AAA's
+    by_ticker = run_subsector({'AAA': rising(100), 'BBB': rising(100, step=2.0), 'CCC': rising(100, step=0.5)})
+
+    median_1m = (199 / 178 - 1) * 100
+    median_3m = (199 / 136 - 1) * 100
+    assert by_ticker['AAA'].rs_sector_1m == pytest.approx(0.0)
+    assert by_ticker['BBB'].rs_sector_1m == pytest.approx((298 / 256 - 1) * 100 - median_1m)
+    assert by_ticker['CCC'].rs_sector_1m == pytest.approx((149.5 / 139 - 1) * 100 - median_1m)
+    assert by_ticker['BBB'].rs_sector_3m == pytest.approx((298 / 172 - 1) * 100 - median_3m)
+    # on the median is not above it
+    assert {t: sc.outperforms_sector_1m for t, sc in by_ticker.items()} == {'AAA': 0, 'BBB': 1, 'CCC': 0}
+    assert {t: sc.outperforms_sector_3m for t, sc in by_ticker.items()} == {'AAA': 0, 'BBB': 1, 'CCC': 0}
+
+
+def test_a_subsector_with_fewer_than_three_returns_has_no_median():
+    by_ticker = run_subsector({'AAA': rising(100), 'BBB': rising(100, step=2.0), 'YOUNG': rising(64)})
+
+    # YOUNG has too few rows to be scored, so only two returns remain
+    assert sorted(by_ticker) == ['AAA', 'BBB']
+    assert all(sc.rs_sector_1m is None and sc.outperforms_sector_3m is None for sc in by_ticker.values())
 
 
 # --- How much history is needed ---------------------------------------------

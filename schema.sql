@@ -69,8 +69,8 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- volume_ratio is the day's volume over avg_vol_20d. The upgrades in app/db.py bring databases created before them
 -- to this table: the fourth drops the columns of the core rules the breakout strategy removed (max_vol_10d, ema_10,
 -- dma_50_25d_ago, price_gt_10ema) and adds volume_ratio, the fifth renames rsi_50_75 and macd_bullish and adds the
--- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, where ALTER
--- TABLE places them; change both together.
+-- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, and the
+-- seventh the relative strength columns after those, where ALTER TABLE places them; change both together.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -126,7 +126,28 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        dist_high_20d_pct REAL,
        dist_high_60d_pct REAL,
        near_resistance INTEGER,
+       return_1m_pct REAL,
+       return_3m_pct REAL,
+       rs_market_1m REAL,
+       rs_market_3m REAL,
+       rs_sector_1m REAL,
+       rs_sector_3m REAL,
+       outperforms_market_1m INTEGER,
+       outperforms_market_3m INTEGER,
+       outperforms_sector_1m INTEGER,
+       outperforms_sector_3m INTEGER,
        UNIQUE (ticker)
+);
+
+-- The daily adjusted closes of each market's benchmark (BENCHMARKS in app/markets.py) over the window price_data
+-- keeps, replaced by every fetch that covers its market. Apart from price_data, so the dashboard's ticker removals,
+-- which delete a ticker's price_data rows, never touch it, even for a benchmark also listed as a ticker. The upgrade
+-- in app/db.py creates it in databases from before it; change both together.
+CREATE TABLE IF NOT EXISTS benchmark_price (
+       ticker TEXT NOT NULL,
+       date TEXT NOT NULL CHECK (date(date) IS date),
+       close REAL NOT NULL,
+       PRIMARY KEY (ticker, date)
 );
 
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
