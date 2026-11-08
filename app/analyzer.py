@@ -126,6 +126,24 @@ MIN_ROWS = max(SMA_DAYS + SMA_RISING_DAYS, max(BREAKOUT_WINDOWS) + 1)
 # repeats the last close of a ticker that stopped trading, which would pass the stale check and be scored.
 FROZEN_DAYS = 10
 
+# A ticker that traded on each of the PADDED_WINDOW days before a flat stretch of at least PADDED_MIN_DAYS, repeating
+# the close of its last trade, has stopped trading: Tiingo pads such a ticker's rows with its last close. Thinly
+# traded tickers also have flat zero-volume runs, but in a year of the sectors page's prices none of 2 days or more
+# followed more than 20 traded days, while a liquid ticker can show a single flat day mid-run (SUPN, CVR), hence
+# the 2-day minimum. A longer flat stretch after thin trading is left to the FROZEN_DAYS rule.
+PADDED_WINDOW = 30
+PADDED_MIN_DAYS = 2
+
+
+def _flat_days(closes: list, volumes: list) -> int:
+    """The number of trailing days whose close equals the last close and whose volume is zero."""
+    flat = 0
+    for close, volume in zip(reversed(closes), reversed(volumes), strict=True):
+        if pd.isna(close) or pd.isna(volume) or close != closes[-1] or volume != 0:
+            break
+        flat += 1
+    return flat
+
 
 def frozen_since(df: pd.DataFrame) -> date | None:
     """
@@ -133,17 +151,30 @@ def frozen_since(df: pd.DataFrame) -> date | None:
     whose close equals the last close and whose volume is zero. Returns None when that stretch is shorter than
     FROZEN_DAYS, including when the last day traded any volume or its volume is missing.
     """
-    closes = df['close'].to_list()
-    volumes = df['volume'].to_list()
     dates = df.index.get_level_values('date')
-    flat = 0
-    for close, volume in zip(reversed(closes), reversed(volumes), strict=True):
-        if pd.isna(close) or pd.isna(volume) or close != closes[-1] or volume != 0:
-            break
-        flat += 1
+    flat = _flat_days(df['close'].to_list(), df['volume'].to_list())
     if flat < FROZEN_DAYS:
         return None
     return dates[len(dates) - flat]
+
+
+def padded_stop(df: pd.DataFrame) -> date | None:
+    """
+    Returns the last traded day of a ticker whose rows ('df', oldest first) end in a padded stop: a flat stretch of
+    at least PADDED_MIN_DAYS (as frozen_since measures it) whose close is that of the day before it, which is the
+    last of PADDED_WINDOW days that all traded volume. Returns None otherwise, including when 'df' holds fewer than
+    PADDED_WINDOW rows before the stretch.
+    """
+    closes = df['close'].to_list()
+    volumes = df['volume'].to_list()
+    flat = _flat_days(closes, volumes)
+    last_trade = len(closes) - flat - 1
+    if flat < PADDED_MIN_DAYS or last_trade + 1 < PADDED_WINDOW or closes[last_trade] != closes[-1]:
+        return None
+    window = volumes[last_trade + 1 - PADDED_WINDOW : last_trade + 1]
+    if any(pd.isna(volume) or volume <= 0 for volume in window):
+        return None
+    return df.index.get_level_values('date')[last_trade]
 
 
 def ema(closes: pd.Series, span: int = EMA_SPAN) -> pd.Series:
@@ -348,14 +379,17 @@ class Analyzer:
         A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with today's
         date_created, so a ticker whose last price is older than its market's newest keeps its previous stock_criteria
         row instead. So does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
-        its rows are current, but its price is not. For the same reason, after a fetch only the markets the fetch's
-        API covers are scored: a Tiingo run leaves every Canadian ticker's row and date_created as they were. A
-        standalone 'analyze' ('fetched_by' None) scores every market.
+        its rows are current, but its price is not. A padded stop (see padded_stop), a ticker that traded every day
+        until its API began repeating its last close, counts as stale from its second flat day, dated by its last
+        trade, so both price APIs reach the same verdict on a ticker that stopped trading. For the same reason, after
+        a fetch only the markets the fetch's API covers are scored: a Tiingo run leaves every Canadian ticker's row
+        and date_created as they were. A standalone 'analyze' ('fetched_by' None) scores every market.
 
         Each stale ticker is reported with a 'FLAGGED ticker=<ticker> reason=stale last=<date>' line after its warning
-        (see app/progress.py), and each frozen one with 'reason=frozen last=<first flat day>', except one in
-        'already_flagged': the fetch reported it already, as not found or with no prices, and kept the rows judged
-        here. A ticker both stale and frozen is reported as stale.
+        (see app/progress.py), dated by its last traded day when its rows end in a padded stop, even one that is
+        also stale, and each frozen one with 'reason=frozen last=<first flat day>', except one in 'already_flagged':
+        the fetch reported it already, as not found or with no prices, and kept the rows judged here. A ticker both
+        stale and frozen is reported as stale.
 
         Each scored ticker's returns are compared with its market's benchmark, as stored by the last fetch that
         covered that market, and then with its subsector's median (with_sector_strength), over the tickers scored in
@@ -396,6 +430,7 @@ class Analyzer:
             frozen = 0
             for ticker, group_df in groups:
                 last = group_df.index.get_level_values('date').max()
+                last_trade = padded_stop(group_df)
                 if last < newest:
                     logger.warning(
                         f'{ticker} not scored: its last price is from {last}, '
@@ -403,7 +438,16 @@ class Analyzer:
                     )
                     stale += 1
                     if ticker not in already_flagged:
-                        report_flagged(ticker, STALE, last)
+                        report_flagged(ticker, STALE, last_trade or last)
+                    continue
+                if last_trade is not None:
+                    logger.warning(
+                        f'{ticker} not scored: it last traded on {last_trade}, and its price has been repeated '
+                        f'since with no volume'
+                    )
+                    stale += 1
+                    if ticker not in already_flagged:
+                        report_flagged(ticker, STALE, last_trade)
                     continue
                 since = frozen_since(group_df)
                 if since is not None:

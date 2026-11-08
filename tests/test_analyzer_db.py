@@ -249,10 +249,12 @@ def test_run_refresh_flags_each_dead_or_stale_ticker_once(path, container, capsy
 
 def frozen_rows(ticker: str, flat: int, n: int = 100, volume_on: int | None = None) -> list[PriceData]:
     """
-    n rows ending today whose last 'flat' days repeat one close with zero volume, as Tiingo answers for a ticker that
-    stopped trading; 'volume_on' gives that many days before today a volume of 500 instead.
+    n rows ending today of a thinly traded ticker, with no volume every 7th day, whose last 'flat' days repeat one
+    close with zero volume, as Tiingo answers for a ticker that stopped trading; 'volume_on' gives that many days
+    before today a volume of 500 instead. The thin trading keeps it from being a padded stop.
     """
     rows = price_rows(ticker, TODAY, n)
+    rows[: n - flat - 1] = [replace(row, volume=0) if i % 7 == 3 else row for i, row in enumerate(rows[: n - flat - 1])]
     close = rows[n - flat - 1].close
     rows[n - flat :] = [replace(row, close=close, volume=0) for row in rows[n - flat :]]
     if volume_on is not None:
@@ -553,3 +555,111 @@ def test_analyze_stores_each_tickers_status(path, container):
         'NEAR': (2, 0, 'pre_breakout'),
         'FALL': (1, 0, None),
     }
+
+
+# Friday 2026-11-06 in the evening, once the US market has published that day's rows
+NOV_6_EVENING = datetime(2026, 11, 6, 20, tzinfo=NEW_YORK)
+LXP_LAST_TRADE = date(2026, 10, 30)
+
+
+def trading_days(last_day: date, n: int) -> list[date]:
+    """The n weekdays ending on last_day, oldest first."""
+    days: list[date] = []
+    day = last_day
+    while len(days) < n:
+        if day.weekday() < 5:
+            days.append(day)
+        day -= timedelta(days=1)
+    return days[::-1]
+
+
+def daily_rows(ticker: str, days: list[date], volumes: list[int], closes: list[float] | None = None) -> list[PriceData]:
+    closes = closes or [50.0 + i * 0.1 for i in range(len(days))]
+    return [
+        PriceData(id=0, subsector_id=1, ticker=ticker, date=d, close=c, volume=v)
+        for d, c, v in zip(days, closes, volumes, strict=True)
+    ]
+
+
+def lxp_rows(padded: bool) -> list[PriceData]:
+    """
+    LXP's rows as each price API answered on 2026-11-08: traded every day until 2026-10-30, then, from Tiingo only,
+    four rows for 2026-11-03 to 2026-11-06 repeating that close at zero volume.
+    """
+    days = trading_days(LXP_LAST_TRADE, 100)
+    closes = [55.0 + i * 0.06 for i in range(99)] + [61.18]
+    rows = daily_rows('LXP', days, [1_000_000] * 100, closes)
+    if padded:
+        rows += daily_rows('LXP', [date(2026, 11, d) for d in (3, 4, 5, 6)], [0] * 4, [61.18] * 4)
+    return rows
+
+
+def thin_rows(ticker: str) -> list[PriceData]:
+    """
+    100 days of a thinly traded ticker like THNCF: short runs of traded days between flat zero-volume runs of 1 to
+    11 days, ending in a run of 3 flat days.
+    """
+    days = trading_days(NOV_6_EVENING.date(), 100)
+    runs = [(3, 2), (2, 11), (4, 1), (3, 5), (5, 3), (2, 4), (3, 1), (4, 8), (2, 2), (5, 3)]
+    closes: list[float] = []
+    volumes: list[int] = []
+    close = 0.5
+    while len(closes) < 97:
+        for traded, flat in runs:
+            for _ in range(traded):
+                close += 0.01
+                closes.append(close)
+                volumes.append(4000)
+            closes += [close] * flat
+            volumes += [0] * flat
+    closes = closes[:97] + [closes[96]] * 3
+    volumes = volumes[:96] + [4000] + [0] * 3
+    return daily_rows(ticker, days, volumes, closes)
+
+
+@pytest.mark.parametrize('padded', [True, False], ids=['Tiingo', 'EODHD'])
+def test_ticker_that_stopped_trading_is_stale_on_its_last_trade_on_either_api(path, container, capsys, padded):
+    container.price_data_repo.bulk_insert(daily_rows('AAA', trading_days(NOV_6_EVENING.date(), 100), [1000] * 100))
+    container.price_data_repo.bulk_insert(lxp_rows(padded))
+
+    Analyzer(container, now=lambda: NOV_6_EVENING).analyze()
+
+    assert set(criteria(path)) == {'AAA'}
+    out = capsys.readouterr().out
+    assert summary_lines(out) == ['US: skipped 1 stale ticker (last price before 2026-11-06) and 0 frozen tickers']
+    assert flagged_lines(out) == [f'FLAGGED ticker=LXP reason=stale last={LXP_LAST_TRADE}']
+
+
+def test_stale_ticker_ending_in_a_padded_stop_is_dated_by_its_last_trade(container, capsys):
+    # DINE's EODHD rows: traded until 2026-10-30, then padded at zero volume until 2026-11-05, a day short
+    container.price_data_repo.bulk_insert(daily_rows('AAA', trading_days(NOV_6_EVENING.date(), 100), [1000] * 100))
+    days = trading_days(date(2026, 11, 5), 100)
+    container.price_data_repo.bulk_insert(daily_rows('DINE', days, [500] * 96 + [0] * 4, [24.0] * 100))
+
+    Analyzer(container, now=lambda: NOV_6_EVENING).analyze()
+
+    out = capsys.readouterr().out
+    assert summary_lines(out) == ['US: skipped 1 stale ticker (last price before 2026-11-06) and 0 frozen tickers']
+    assert flagged_lines(out) == ['FLAGGED ticker=DINE reason=stale last=2026-10-30']
+
+
+def test_padded_stop_is_logged_with_its_last_trade(container, caplog):
+    container.price_data_repo.bulk_insert(lxp_rows(padded=True))
+
+    with caplog.at_level('WARNING', logger='app.analyzer'):
+        Analyzer(container, now=lambda: NOV_6_EVENING).analyze()
+
+    assert [r.getMessage() for r in caplog.records if r.levelname == 'WARNING'] == [
+        f'LXP not scored: it last traded on {LXP_LAST_TRADE}, and its price has been repeated since with no volume'
+    ]
+
+
+def test_thinly_traded_ticker_ending_in_a_flat_run_is_scored(path, container, capsys):
+    container.price_data_repo.bulk_insert(thin_rows('THNCF'))
+
+    Analyzer(container, now=lambda: NOV_6_EVENING).analyze()
+
+    assert set(criteria(path)) == {'THNCF'}
+    out = capsys.readouterr().out
+    assert summary_lines(out) == ['US: skipped 0 stale tickers (last price before 2026-11-06) and 0 frozen tickers']
+    assert flagged_lines(out) == []
