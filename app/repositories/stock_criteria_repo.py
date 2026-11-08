@@ -180,3 +180,8 @@ class StockCriteriaRepo:
         """Clears the status of each of 'tickers' rows, leaving its date_created and every other value as it was."""
         with connect(self.db_path) as con:
             con.executemany('UPDATE stock_criteria SET status = NULL WHERE ticker = ?', [(t,) for t in tickers])
+
+    def tickers_with_status(self) -> list[str]:
+        """The tickers whose row has a status."""
+        with connect(self.db_path) as con:
+            return [t for (t,) in con.execute('SELECT ticker FROM stock_criteria WHERE status IS NOT NULL')]

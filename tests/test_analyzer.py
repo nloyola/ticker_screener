@@ -55,6 +55,9 @@ class FakeStockCriteriaRepo:
     def bulk_insert(self, items, date_created) -> None:
         self.saved.append((list(items), date_created))
 
+    def tickers_with_status(self) -> list[str]:
+        return []
+
     def clear_status(self, tickers) -> None:
         self.cleared = list(tickers)
 

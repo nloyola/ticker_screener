@@ -378,13 +378,16 @@ class Analyzer:
 
         A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with today's
         date_created, so a ticker whose last price is older than its market's newest keeps its previous stock_criteria
-        row instead, with its date and values but without its status, which its stored prices no longer support. So
-        does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
+        row instead. So does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
         its rows are current, but its price is not. A padded stop (see padded_stop), a ticker that traded every day
         until its API began repeating its last close, counts as stale from its second flat day, dated by its last
         trade, so both price APIs reach the same verdict on a ticker that stopped trading. For the same reason, after
         a fetch only the markets the fetch's API covers are scored: a Tiingo run leaves every Canadian ticker's row
         and date_created as they were. A standalone 'analyze' ('fetched_by' None) scores every market.
+
+        In the markets it scores, the run clears the status of every stock_criteria row it did not write, keeping its
+        date and values: a stale or frozen ticker, one with fewer than MIN_ROWS rows, or one with no rows left. No row
+        keeps a status its stored prices no longer support.
 
         Each stale ticker is reported with a 'FLAGGED ticker=<ticker> reason=stale last=<date>' line after its warning
         (see app/progress.py), dated by its last traded day when its rows end in a padded stop, even one that is
@@ -412,7 +415,6 @@ class Analyzer:
                 logger.warning(f'{ticker} not scored: {err}')
 
         results: list[StockCriteria | None] = []
-        skipped: list[str] = []
         for market, groups in by_market.items():
             if not groups:
                 continue
@@ -439,7 +441,6 @@ class Analyzer:
                         f'before the newest {market} market date {newest}'
                     )
                     stale += 1
-                    skipped.append(ticker)
                     if ticker not in already_flagged:
                         report_flagged(ticker, STALE, last_trade or last)
                     continue
@@ -449,7 +450,6 @@ class Analyzer:
                         f'since with no volume'
                     )
                     stale += 1
-                    skipped.append(ticker)
                     if ticker not in already_flagged:
                         report_flagged(ticker, STALE, last_trade)
                     continue
@@ -457,13 +457,13 @@ class Analyzer:
                 if since is not None:
                     logger.warning(f'{ticker} not scored: its price has been frozen, with no volume, since {since}')
                     frozen += 1
-                    skipped.append(ticker)
                     if ticker not in already_flagged:
                         report_flagged(ticker, FROZEN, since)
                     continue
                 results.append(self.analyze_ticker(ticker, group_df, benchmark))
             print(
-                f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} (last price before {newest}) '
+                f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} '
+                f'(stopped trading, or last price before {newest}) '
                 f'and {frozen} frozen ticker{"" if frozen == 1 else "s"}'
             )
 
@@ -471,7 +471,21 @@ class Analyzer:
         items = [with_status(sc) for sc in with_sector_strength([sc for sc in results if sc is not None])]
         date_created = datetime.now().date()
         self.save_to_repository(items, date_created)
-        self.stock_criteria_repo.clear_status(skipped)
+        judged = fetched_by.markets if fetched_by is not None else MARKETS
+        self._clear_unscored_statuses(judged, {sc.ticker for sc in items})
+
+    def _clear_unscored_statuses(self, markets: Collection[str], scored: Collection[str]) -> None:
+        """Clears the status of every stock_criteria row of 'markets' whose ticker is not in 'scored'."""
+
+        def judged(ticker: str) -> bool:
+            try:
+                return market_of(ticker) in markets
+            except UnsupportedTicker:
+                return False
+
+        self.stock_criteria_repo.clear_status(
+            t for t in self.stock_criteria_repo.tickers_with_status() if t not in scored and judged(t)
+        )
 
     @staticmethod
     def _complete_sessions(
