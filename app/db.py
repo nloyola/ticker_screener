@@ -186,11 +186,53 @@ def _rework_stock_criteria_core_columns(con: sqlite3.Connection) -> None:
         con.execute('ALTER TABLE stock_criteria ADD COLUMN volume_ratio REAL')
 
 
+def _add_stock_criteria_secondary_columns(con: sqlite3.Connection) -> None:
+    """
+    Version 5: stock_criteria renames rsi_50_75 to rsi_50_70, the strategy's RSI band, and macd_bullish to
+    macd_above_signal, one of the three MACD conditions now stored, and gains the secondary indicators' columns,
+    left NULL in the rows already stored until the next analyze replaces them. Renames and adds only what the table
+    has and lacks, so a table schema.sql created this way is left as it is.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('stock_criteria')")}
+    if not columns:
+        return  # no table: schema.sql creates it this way
+    # spelled out here, not shared with the repository, so that a later schema change cannot alter a shipped upgrade
+    for old, new in (('rsi_50_75', 'rsi_50_70'), ('macd_bullish', 'macd_above_signal')):
+        if old in columns and new not in columns:
+            con.execute(f'ALTER TABLE stock_criteria RENAME COLUMN {old} TO {new}')
+    for column, kind in (
+        ('macd_hist', 'REAL'),
+        ('macd_hist_prev', 'REAL'),
+        ('macd_days_above', 'INTEGER'),
+        ('macd_crossover', 'INTEGER'),
+        ('macd_hist_rising', 'INTEGER'),
+        ('dma_20', 'REAL'),
+        ('dma_20_prev_15d', 'REAL'),
+        ('dma_200', 'REAL'),
+        ('dma_200_prev_15d', 'REAL'),
+        ('price_gt_20dma', 'INTEGER'),
+        ('dma_20_rising', 'INTEGER'),
+        ('price_gt_200dma', 'INTEGER'),
+        ('dma_200_rising', 'INTEGER'),
+        ('ema_21', 'REAL'),
+        ('ema_21_prev_5d', 'REAL'),
+        ('price_gt_21ema', 'INTEGER'),
+        ('ema_21_rising', 'INTEGER'),
+        ('ema_21w', 'REAL'),
+        ('ema_21w_prev_1w', 'REAL'),
+        ('price_gt_21wema', 'INTEGER'),
+        ('ema_21w_rising', 'INTEGER'),
+    ):
+        if column not in columns:
+            con.execute(f'ALTER TABLE stock_criteria ADD COLUMN {column} {kind}')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
     _add_price_data_high_low,
     _rework_stock_criteria_core_columns,
+    _add_stock_criteria_secondary_columns,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

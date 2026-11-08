@@ -1,4 +1,4 @@
-"""The core criteria Analyzer.analyze_ticker computes.
+"""The core criteria and secondary indicators Analyzer.analyze_ticker computes.
 
 Each test builds a made-up price series, loads it through Analyzer.load_price_data exactly as a run does, and
 checks the stored values against numbers worked out by hand. Close prices are linear or zigzag so the averages,
@@ -9,6 +9,12 @@ highs and indicators have closed forms. Each day's high equals its close unless 
 - RSI uses Wilder's smoothing (alpha = 1/14). For closes alternating +2 and -1, the smoothed gain just after an up
   day settles at 2a / (1 - (1 - a)^2) = 28/27 and the smoothed loss at (1 - a)a / (1 - (1 - a)^2) = 13/27, so
   RSI = 100 * 28 / 41 = 68.29. A close that never falls has RSI 100.
+- An n-day SMA of a close rising by s a day lags it by (n - 1)s / 2. A 21-period EMA, started at the first close,
+  lags such a close by 10s once the start has decayed, the start's share after k more values being 10s * (10/11)^k.
+- The rows' dates are consecutive calendar days from Thursday 1 January 2026, so the weekly closes are the Sundays'
+  closes and the scored day's own, 7 days of a daily rise apart.
+- Where no closed form is at hand (the MACD's crossovers and histogram), the tests compare with reference_ema and
+  reference_macd below, written out from the definitions rather than with the library the analyzer uses.
 """
 
 from datetime import date, timedelta
@@ -350,21 +356,52 @@ def test_the_price_under_the_50_day_average_fixture_is_worked_out_right():
     assert sc.dma_50_prev_15d == 228.0  # (15 * 100 + 29 * 300 + 6 * 200) / 50
 
 
-# --- RSI and MACD, which are stored but not core criteria -------------------
+# --- Secondary indicators, which are stored but never counted in the score --
 
 
-def test_rsi_inside_50_to_75():
+def reference_ema(values: list[float], span: int) -> list[float]:
+    """The exponential moving average with alpha = 2 / (span + 1), started at the first value."""
+    alpha = 2 / (span + 1)
+    averages = [values[0]]
+    for value in values[1:]:
+        averages.append(alpha * value + (1 - alpha) * averages[-1])
+    return averages
+
+
+def reference_macd(closes: list[float]) -> tuple[list[float], list[float]]:
+    """
+    MACD (the 12-day EMA minus the 26-day EMA) and its signal line (the 9-day EMA of MACD, started at its first
+    value), from the 26th close on, where the 26-day EMA has 26 values; the signal line counts from its 9th value.
+    """
+    macd = [fast - slow for fast, slow in zip(reference_ema(closes, 12), reference_ema(closes, 26), strict=True)][25:]
+    return macd, reference_ema(macd, 9)
+
+
+def lagging_ema(last: float, step: float, values: int) -> float:
+    """A 21-period EMA of 'values' values rising by 'step' each, ending at 'last' (see the module docstring)."""
+    return last - 10 * step + 10 * step * (10 / 11) ** (values - 1)
+
+
+def test_rsi_inside_50_to_70():
     sc = analyze(zigzag(200), volumes_with_last(200, 2000))
 
     assert sc.rsi == pytest.approx(68.29, abs=0.01)
-    assert sc.rsi_50_75 == 1
+    assert sc.rsi_50_70 == 1
 
 
-def test_rsi_above_75():
+def test_rsi_between_70_and_75_is_outside_the_band():
+    # alternating +2.5 and -1: RSI = 100 * 2.5 / (2.5 + 13/14) = 72.92
+    sc = analyze(zigzag(200, up=2.5), volumes_with_last(200, 2000))
+
+    assert sc.rsi == pytest.approx(72.92, abs=0.01)
+    assert sc.rsi_50_70 == 0
+
+
+def test_rsi_above_70():
     sc = analyze(rising(100), volumes_with_last(100, 2000))
 
     assert sc.rsi == 100.0
-    assert sc.rsi_50_75 == 0
+    assert sc.rsi_50_70 == 0
     # RSI is not a core criterion
     assert sc.core_criteria_met is True
 
@@ -374,15 +411,50 @@ def test_rsi_below_50():
     sc = analyze(zigzag(200, start=500.0, up=1.0, down=2.0), volumes_with_last(200, 2000))
 
     assert sc.rsi == pytest.approx(35.0, abs=0.01)
-    assert sc.rsi_50_75 == 0
+    assert sc.rsi_50_70 == 0
 
 
-def test_macd_above_its_signal_line_when_the_rise_speeds_up():
+def recovery(days_up: int, step: float) -> list[float]:
+    """100 for 60 days, down 1 a day for 10 days, then up 'step' a day for 'days_up' days."""
+    return [100.0] * 60 + rising(10, start=100.0, step=-1.0) + rising(days_up, start=91.0 + step, step=step)
+
+
+@pytest.mark.parametrize(
+    ('closes', 'days_above', 'crossover'),
+    [(recovery(5, 3.0), 3, 1), (recovery(8, 2.0), 5, 1), (recovery(8, 3.0), 6, 0)],
+    ids=['3 days ago', '5 days ago', '6 days ago'],
+)
+def test_macd_crossover_counts_the_last_5_sessions(closes, days_above, crossover):
+    sc = analyze(closes, volumes_with_last(len(closes), 2000))
+    macd, signal = reference_macd(closes)
+
+    assert sc.macd == pytest.approx(macd[-1], abs=0.005)
+    assert sc.signal == pytest.approx(signal[-1], abs=0.005)
+    assert sc.macd_hist == pytest.approx(macd[-1] - signal[-1], abs=0.005)
+    assert sc.macd_hist_prev == pytest.approx(macd[-2] - signal[-2], abs=0.005)
+    # the crossover: MACD above its signal line on the last 'days_above' sessions, and not on the one before them
+    assert all(m > s for m, s in zip(macd[-days_above:], signal[-days_above:], strict=True))
+    assert macd[-1 - days_above] <= signal[-1 - days_above]
+    assert sc.macd_days_above == days_above
+    assert sc.macd_crossover == crossover
+    assert sc.macd_above_signal == 1
+    # the histogram is still widening after the turn
+    assert 0 < macd[-2] - signal[-2] < macd[-1] - signal[-1]
+    assert sc.macd_hist_rising == 1
+
+
+def test_macd_long_above_its_signal_line_with_a_narrowing_histogram():
+    # a rise that sped up 20 days ago: MACD has been above its signal line since well before, and the gap is closing
     closes = rising(80) + rising(20, start=181.0, step=3.0)
     sc = analyze(closes, volumes_with_last(100, 2000))
+    macd, signal = reference_macd(closes)
 
     assert sc.macd > sc.signal
-    assert sc.macd_bullish == 1
+    assert sc.macd_above_signal == 1
+    assert sc.macd_days_above == sum(1 for m, s in zip(macd[8:], signal[8:], strict=True) if m > s) == 67
+    assert sc.macd_crossover == 0
+    assert 0 < macd[-1] - signal[-1] < macd[-2] - signal[-2]
+    assert sc.macd_hist_rising == 0
 
 
 def test_macd_below_its_signal_line_when_the_rise_turns():
@@ -390,8 +462,145 @@ def test_macd_below_its_signal_line_when_the_rise_turns():
     sc = analyze(closes, volumes_with_last(100, 2000))
 
     assert sc.macd < sc.signal
-    assert sc.macd_bullish == 0
-    assert sc.rsi_50_75 == 0  # still near the top of a long rise, so not below 50
+    assert sc.macd_above_signal == 0
+    assert sc.macd_days_above == 0
+    assert sc.macd_crossover == 0
+    assert sc.macd_hist < 0
+    assert sc.macd_hist_rising == 0
+    assert sc.rsi_50_70 == 0  # still near the top of a long rise, so not below 50
+
+
+# 368 rows end on Sunday 3 January 2027, closing 467: 53 weekly closes, from 103 on Sunday 4 January 2026 up by 7 a week
+YEAR = rising(368)
+
+
+def test_moving_average_alignment_of_a_steady_rise():
+    sc = analyze(YEAR, volumes_with_last(368, 2000))
+
+    assert sc.price == 467.0
+    assert (sc.dma_20, sc.dma_20_prev_15d) == (457.5, 442.5)  # mean of 448..467, and of 433..452
+    assert (sc.dma_200, sc.dma_200_prev_15d) == (367.5, 352.5)  # mean of 268..467, and of 253..452
+    assert (sc.price_gt_20dma, sc.dma_20_rising) == (1, 1)
+    assert (sc.price_gt_50dma, sc.dma_50_rising) == (1, 1)
+    assert (sc.price_gt_200dma, sc.dma_200_rising) == (1, 1)
+
+
+def test_21_day_and_21_week_emas_of_a_steady_rise():
+    sc = analyze(YEAR, volumes_with_last(368, 2000))
+
+    assert sc.ema_21 == round(lagging_ema(467.0, 1.0, 368), 2) == 457.0
+    assert sc.ema_21_prev_5d == round(lagging_ema(462.0, 1.0, 363), 2) == 452.0
+    assert (sc.price_gt_21ema, sc.ema_21_rising) == (1, 1)
+    # 53 weekly closes, the first week's start not yet decayed away
+    assert sc.ema_21w == round(lagging_ema(467.0, 7.0, 53), 2) == 397.49
+    assert sc.ema_21w_prev_1w == round(lagging_ema(460.0, 7.0, 52), 2) == 390.54
+    assert (sc.price_gt_21wema, sc.ema_21w_rising) == (1, 1)
+
+
+def test_the_21_week_ema_ends_on_the_scored_days_close_mid_week():
+    # 365 rows end on Thursday 31 December 2026: 52 Sundays' closes (103, 110, .., 460), then the Thursday's 464
+    sc = analyze(rising(365), volumes_with_last(365, 2000))
+    weekly = reference_ema([100.0 + day for day in range(3, 364, 7)] + [464.0], 21)
+
+    assert sc.ema_21w == round(weekly[-1], 2) == 397.22
+    assert sc.ema_21w_prev_1w == round(weekly[-2], 2) == 390.54  # last Sunday's, as in the steady rise
+    assert sc.ema_21w_rising == 1
+
+
+def test_averages_and_emas_of_a_steady_fall():
+    # closes 500 down to 133: below every average, and every one falling
+    sc = analyze(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2000))
+
+    assert (sc.dma_20, sc.dma_20_prev_15d) == (142.5, 157.5)
+    assert (sc.dma_200, sc.dma_200_prev_15d) == (232.5, 247.5)
+    assert sc.ema_21 == round(lagging_ema(133.0, -1.0, 368), 2) == 143.0
+    assert sc.ema_21w == round(lagging_ema(133.0, -7.0, 53), 2) == 202.51
+    for flag in SECONDARY_FLAGS[4:]:
+        assert getattr(sc, flag) == 0, flag
+
+
+def test_a_ticker_without_the_history_for_the_long_averages_leaves_them_empty():
+    sc = analyze(rising(100), volumes_with_last(100, 2000))
+
+    assert (sc.dma_200, sc.dma_200_prev_15d, sc.price_gt_200dma, sc.dma_200_rising) == (None, None, None, None)
+    # 100 days are 15 weekly closes, short of the 50 a 21-week EMA needs
+    assert (sc.ema_21w, sc.ema_21w_prev_1w, sc.price_gt_21wema, sc.ema_21w_rising) == (None, None, None, None)
+    # the short ones are there, and the ticker is scored
+    assert sc.dma_20 is not None
+    assert sc.ema_21 is not None
+    assert sc.core_criteria_score == 4
+
+
+@pytest.mark.parametrize(
+    ('rows', 'dma_200', 'dma_200_rising'),
+    [(199, None, None), (200, 199.5, None), (214, 213.5, None), (215, 214.5, 1)],
+)
+def test_the_200_day_average_needs_200_rows_and_15_more_to_rise(rows, dma_200, dma_200_rising):
+    sc = analyze(rising(rows), volumes_with_last(rows, 2000))
+
+    assert sc.dma_200 == dma_200
+    assert sc.dma_200_rising == dma_200_rising
+    assert sc.price_gt_200dma == (None if dma_200 is None else 1)
+
+
+@pytest.mark.parametrize(
+    ('rows', 'weekly_closes', 'has_ema', 'has_prior'),
+    [(340, 49, False, False), (346, 50, True, False), (347, 50, True, False), (348, 51, True, True)],
+)
+def test_the_21_week_ema_needs_50_weekly_closes(rows, weekly_closes, has_ema, has_prior):
+    # 340 rows end on the 49th Sunday; 346 on the following Saturday, mid-week 50; 347 on its Sunday; 348 on a Monday
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(rows)]
+    assert len({day.isocalendar()[:2] for day in days}) == weekly_closes
+    sc = analyze(rising(rows), volumes_with_last(rows, 2000))
+
+    assert (sc.ema_21w is not None, sc.ema_21w_prev_1w is not None) == (has_ema, has_prior)
+    assert sc.ema_21w_rising == (1 if has_prior else None)
+
+
+SECONDARY_FLAGS = (
+    'rsi_50_70',
+    'macd_above_signal',
+    'macd_crossover',
+    'macd_hist_rising',
+    'price_gt_20dma',
+    'dma_20_rising',
+    'price_gt_200dma',
+    'dma_200_rising',
+    'price_gt_21ema',
+    'ema_21_rising',
+    'price_gt_21wema',
+    'ema_21w_rising',
+)
+
+
+@pytest.mark.parametrize(
+    ('closes', 'volumes'),
+    [
+        (YEAR, volumes_with_last(368, 2000)),
+        (rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2000)),
+        (recovery(5, 3.0), volumes_with_last(75, 2000)),
+        *SINGLE_FAILURES.values(),
+    ],
+    ids=['steady rise', 'steady fall', 'recovery', *SINGLE_FAILURES],
+)
+def test_the_core_score_counts_only_the_core_conditions(closes, volumes):
+    sc = analyze(closes, volumes)
+
+    core = [sc.breakout_20d or sc.breakout_60d, sc.breakout_confirmed, sc.price_gt_50dma, sc.dma_50_rising]
+    assert sc.core_criteria_score == sum(core)
+    assert sc.core_criteria_met is all(core)
+
+
+def test_the_secondary_indicators_never_change_the_core_score():
+    # both pass the four core conditions; the zigzag also passes every secondary indicator, the steady rise fails
+    # the RSI band (100), the MACD crossover and the widening histogram
+    rise = analyze(YEAR, volumes_with_last(368, 2000))
+    zig = analyze(zigzag(368), volumes_with_last(368, 2000))
+
+    assert {flag: getattr(zig, flag) for flag in SECONDARY_FLAGS} == dict.fromkeys(SECONDARY_FLAGS, 1)
+    assert (rise.rsi_50_70, rise.macd_crossover, rise.macd_hist_rising) == (0, 0, 0)
+    assert rise.core_criteria_score == zig.core_criteria_score == 4
+    assert rise.core_criteria_met is zig.core_criteria_met is True
 
 
 # --- How much history is needed ---------------------------------------------

@@ -66,5 +66,30 @@ class StockCriteria:
     breakout_confirmed: int | None = None
     price_gt_50dma: int | None = None
     dma_50_rising: int | None = None
-    rsi_50_75: int | None = None
-    macd_bullish: int | None = None
+    # the secondary indicators: never counted in core_criteria_score, None where the ticker has too few rows
+    rsi_50_70: int | None = None
+    macd_above_signal: int | None = None
+    # MACD minus its signal line, today and the day before
+    macd_hist: float | None = None
+    macd_hist_prev: float | None = None
+    # sessions in a row, ending today, with MACD above its signal line
+    macd_days_above: int | None = None
+    macd_crossover: int | None = None
+    macd_hist_rising: int | None = None
+    dma_20: float | None = None
+    dma_20_prev_15d: float | None = None
+    dma_200: float | None = None
+    dma_200_prev_15d: float | None = None
+    price_gt_20dma: int | None = None
+    dma_20_rising: int | None = None
+    price_gt_200dma: int | None = None
+    dma_200_rising: int | None = None
+    ema_21: float | None = None
+    ema_21_prev_5d: float | None = None
+    price_gt_21ema: int | None = None
+    ema_21_rising: int | None = None
+    # the 21-week EMA of the weekly closes, this week's and last week's
+    ema_21w: float | None = None
+    ema_21w_prev_1w: float | None = None
+    price_gt_21wema: int | None = None
+    ema_21w_rising: int | None = None

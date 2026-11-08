@@ -66,9 +66,10 @@ CREATE TABLE IF NOT EXISTS price_data (
        UNIQUE (ticker, date)
 );
 
--- volume_ratio is the day's volume over avg_vol_20d. The upgrade in app/db.py drops the columns of the core rules
--- the breakout strategy removed (max_vol_10d, ema_10, dma_50_25d_ago, price_gt_10ema) from databases created
--- before it, and adds volume_ratio, after date_created as ALTER TABLE places it; change both together.
+-- volume_ratio is the day's volume over avg_vol_20d. The upgrades in app/db.py bring databases created before them
+-- to this table: the fourth drops the columns of the core rules the breakout strategy removed (max_vol_10d, ema_10,
+-- dma_50_25d_ago, price_gt_10ema) and adds volume_ratio, the fifth renames rsi_50_75 and macd_bullish and adds the
+-- secondary indicators' columns after it, where ALTER TABLE places them; change both together.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -90,10 +91,31 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        breakout_confirmed INTEGER,
        price_gt_50dma INTEGER,
        dma_50_rising INTEGER,
-       rsi_50_75 INTEGER,
-       macd_bullish INTEGER,
+       rsi_50_70 INTEGER,
+       macd_above_signal INTEGER,
        date_created DATE NOT NULL DEFAULT (date('now')),
        volume_ratio REAL,
+       macd_hist REAL,
+       macd_hist_prev REAL,
+       macd_days_above INTEGER,
+       macd_crossover INTEGER,
+       macd_hist_rising INTEGER,
+       dma_20 REAL,
+       dma_20_prev_15d REAL,
+       dma_200 REAL,
+       dma_200_prev_15d REAL,
+       price_gt_20dma INTEGER,
+       dma_20_rising INTEGER,
+       price_gt_200dma INTEGER,
+       dma_200_rising INTEGER,
+       ema_21 REAL,
+       ema_21_prev_5d REAL,
+       price_gt_21ema INTEGER,
+       ema_21_rising INTEGER,
+       ema_21w REAL,
+       ema_21w_prev_1w REAL,
+       price_gt_21wema INTEGER,
+       ema_21w_rising INTEGER,
        UNIQUE (ticker)
 );
 

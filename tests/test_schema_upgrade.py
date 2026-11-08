@@ -1,6 +1,7 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
-stock_criteria has the breakout strategy's columns, and older databases are upgraded to all three.
+stock_criteria has the breakout strategy's columns, core and secondary, and older databases are upgraded to all
+three.
 """
 
 import os
@@ -241,6 +242,68 @@ def test_upgrade_reworks_stock_criteria_keeping_every_row(version_3_db, current_
     assert _query(
         version_3_db, 'SELECT id, ticker, price, core_criteria_score, dma_50_prev_15d, volume_ratio FROM stock_criteria'
     ) == [(1, 'XOM', 110.5, 5, 101.0, None), (2, 'CVX', 150.0, None, None, None)]
+
+
+# stock_criteria as schema.sql created it with the four core criteria (version 4), before the secondary indicators
+CORE_4_STOCK_CRITERIA = """
+CREATE TABLE stock_criteria (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       subsector_id INTEGER,
+       ticker TEXT NOT NULL,
+       price REAL,
+       core_criteria_met BOOLEAN,
+       core_criteria_score INTEGER,
+       high_20d REAL,
+       high_60d REAL,
+       volume INTEGER,
+       avg_vol_20d INTEGER,
+       dma_50 REAL,
+       dma_50_prev_15d REAL,
+       rsi REAL,
+       macd REAL,
+       signal REAL,
+       breakout_20d INTEGER,
+       breakout_60d INTEGER,
+       breakout_confirmed INTEGER,
+       price_gt_50dma INTEGER,
+       dma_50_rising INTEGER,
+       rsi_50_75 INTEGER,
+       macd_bullish INTEGER,
+       date_created DATE NOT NULL DEFAULT (date('now')),
+       volume_ratio REAL,
+       UNIQUE (ticker)
+)"""
+
+
+@pytest.fixture
+def version_4_db(tmp_path) -> str:
+    """A database at version 4: today's schema with stock_criteria holding no secondary indicators, two rows."""
+    path = str(tmp_path / 'v4.db')
+    init_db(path)
+    _execute(
+        path,
+        'DROP TABLE stock_criteria',
+        CORE_4_STOCK_CRITERIA,
+        'PRAGMA user_version = 4',
+        'INSERT INTO stock_criteria (id, subsector_id, ticker, price, core_criteria_score, rsi, rsi_50_75, '
+        "macd_bullish, volume_ratio, date_created) VALUES (1, 10, 'XOM', 110.5, 4, 72.5, 1, 0, 1.8, '2026-11-06')",
+        "INSERT INTO stock_criteria (id, subsector_id, ticker, price, date_created) VALUES (2, 10, 'CVX', 150.0, "
+        "'2026-11-06')",
+    )
+    return path
+
+
+def test_upgrade_adds_the_secondary_indicators_keeping_every_row(version_4_db, current_db):
+    upgrade_db(version_4_db)
+
+    assert _query(version_4_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_4_db, 'stock_criteria') == _table_sql(current_db, 'stock_criteria')
+    # the renamed flags keep their stored values, judged on the old RSI band until the next analyze replaces them
+    assert _query(
+        version_4_db,
+        'SELECT id, ticker, core_criteria_score, rsi_50_70, macd_above_signal, volume_ratio, macd_hist, dma_200, '
+        'ema_21w_rising FROM stock_criteria',
+    ) == [(1, 'XOM', 4, 1, 0, 1.8, None, None, None), (2, 'CVX', None, None, None, None, None, None, None)]
 
 
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):

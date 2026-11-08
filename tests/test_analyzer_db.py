@@ -390,3 +390,51 @@ def test_run_refresh_judges_completeness_by_when_it_started(path, container):
 
     # TiingoStub's closes run from 100.0 to 200.0 on TODAY; 199.0 is the day before's
     assert criteria(path) == {'AAA': (199.0, TODAY.isoformat())}
+
+
+SECONDARY_COLUMNS = (
+    'rsi_50_70',
+    'macd_above_signal',
+    'macd_hist',
+    'macd_hist_prev',
+    'macd_days_above',
+    'macd_crossover',
+    'macd_hist_rising',
+    'dma_20',
+    'dma_20_prev_15d',
+    'dma_200',
+    'dma_200_prev_15d',
+    'price_gt_20dma',
+    'dma_20_rising',
+    'price_gt_200dma',
+    'dma_200_rising',
+    'ema_21',
+    'ema_21_prev_5d',
+    'price_gt_21ema',
+    'ema_21_rising',
+    'ema_21w',
+    'ema_21w_prev_1w',
+    'price_gt_21wema',
+    'ema_21w_rising',
+)
+
+
+def test_analyze_stores_every_secondary_indicator(path, container):
+    # a year of closes rising by 1 to 467: long enough for the 200-day average and the 21-week EMA
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY, n=368))
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        (row,) = con.execute(f'SELECT core_criteria_score, {", ".join(SECONDARY_COLUMNS)} FROM stock_criteria')
+    expected = container.analyzer.analyze_ticker(
+        'AAA', next(g for _, g in container.analyzer.load_price_data().groupby(level='ticker'))
+    )
+    assert {column: row[column] for column in SECONDARY_COLUMNS} == {
+        column: getattr(expected, column) for column in SECONDARY_COLUMNS
+    }
+    assert all(row[column] is not None for column in SECONDARY_COLUMNS)
+    # the n-day averages of a close rising by 1 lag it by (n - 1) / 2, the 21-day EMA by 10
+    assert (row['dma_20'], row['dma_200'], row['ema_21']) == (457.5, 367.5, 457.0)
+    assert row['core_criteria_score'] == 4

@@ -31,6 +31,26 @@ VOLUME_RATIO_MIN = 1.5
 SMA_DAYS = 50
 SMA_RISING_DAYS = 15
 
+# The secondary indicators (GLOSSARY.md, "Secondary indicators"): stored with their flags, never counted in the core
+# criteria score. An indicator a ticker has too few rows for is left empty, and so are the flags that need it.
+# Momentum: the 14-day RSI inside RSI_BAND, ends included.
+RSI_BAND = (50.0, 70.0)
+# MACD crossover: MACD crossed above its signal line within the last MACD_CROSSOVER_DAYS sessions, the scored day
+# included, and has stayed above it since.
+MACD_CROSSOVER_DAYS = 5
+# Moving-average alignment: the close above the 20-, 50- and 200-day simple moving averages, each rising over
+# SMA_RISING_DAYS like the 50-day one (SMA_DAYS, a core condition).
+SHORT_SMA_DAYS = 20
+LONG_SMA_DAYS = 200
+# The 21-period EMAs, of the daily closes and of the weekly closes (each week's last close, the scored day's week
+# ending on the scored day). The daily one is rising when above its value EMA_RISING_DAYS trading days earlier, the
+# weekly one when above last week's.
+EMA_SPAN = 21
+EMA_RISING_DAYS = 5
+# An EMA starts from the first close, whose weight in it falls below 1% only after 50 values (alpha = 2 / 22): one
+# with fewer is left empty.
+EMA_MIN_PERIODS = 50
+
 # The history every core condition needs: SMA_DAYS rows ending SMA_RISING_DAYS days before the scored day, and the
 # longest breakout window before it. A ticker with fewer rows is not scored at all.
 MIN_ROWS = max(SMA_DAYS + SMA_RISING_DAYS, max(BREAKOUT_WINDOWS) + 1)
@@ -57,6 +77,49 @@ def frozen_since(df: pd.DataFrame) -> date | None:
     if flat < FROZEN_DAYS:
         return None
     return dates[len(dates) - flat]
+
+
+def ema(closes: pd.Series, span: int = EMA_SPAN) -> pd.Series:
+    """The exponential moving average of 'closes', as charts draw it, NaN until it has EMA_MIN_PERIODS values."""
+    values = closes.ewm(span=span, adjust=False).mean()
+    values.iloc[: EMA_MIN_PERIODS - 1] = float('nan')
+    return values
+
+
+def weekly_closes(df: pd.DataFrame) -> pd.Series:
+    """The last close of each calendar week (Monday to Sunday) of one ticker's rows, oldest first."""
+    dates = pd.DatetimeIndex(pd.to_datetime(df.index.get_level_values('date')))
+    closes = pd.Series(df['close'].to_numpy(), index=dates)
+    return closes.groupby(dates.to_period('W')).last()
+
+
+def _at(series: pd.Series, back: int = 0) -> float | None:
+    """The value 'back' rows before the last one, None when the series is that short or the value is missing."""
+    if back >= len(series):
+        return None
+    value = series.iloc[-1 - back]
+    return None if pd.isna(value) else float(value)
+
+
+def _round(value: float | None) -> float | None:
+    return None if value is None else round(value, 2)
+
+
+def _above(value: float | None, level: float | None) -> int | None:
+    """1 when 'value' is above 'level', 0 when not, None when either is missing."""
+    if value is None or level is None:
+        return None
+    return int(value > level)
+
+
+def _days_above(macd: pd.Series, signal: pd.Series) -> int:
+    """How many sessions in a row, ending on the last, MACD has been above its signal line: 0 when it is not."""
+    days = 0
+    for above in reversed((macd > signal).to_list()):
+        if not above:
+            break
+        days += 1
+    return days
 
 
 def utc_now() -> datetime:
@@ -237,6 +300,7 @@ class Analyzer:
         macd_calc = MACD(close=close_series)
         macd_line = macd_calc.macd()
         signal_line = macd_calc.macd_signal()
+        macd_hist = macd_calc.macd_diff()
 
         price = df['close'].iloc[-1].item()
         volume = df['volume'].iloc[-1].item()
@@ -250,14 +314,28 @@ class Analyzer:
         rsi_val = rsi.iloc[-1].item()
         macd_val = macd_line.iloc[-1].item()
         signal_val = signal_line.iloc[-1].item()
+        hist_val = _at(macd_hist)
+        hist_prior = _at(macd_hist, 1)
+        days_above = _days_above(macd_line, signal_line)
+        # a strengthening positive histogram: above zero and above the day before
+        hist_rising = None if hist_val is None or hist_prior is None else int(0 < hist_val and hist_prior < hist_val)
+
+        # moving-average alignment beside the core 50-day average: the 200-day needs 200 rows, and SMA_RISING_DAYS
+        # more to say whether it is rising
+        sma_short = df['close'].rolling(window=SHORT_SMA_DAYS).mean()
+        dma_20, dma_20_prior = _at(sma_short), _at(sma_short, SMA_RISING_DAYS)
+        sma_long = df['close'].rolling(window=LONG_SMA_DAYS).mean()
+        dma_200, dma_200_prior = _at(sma_long), _at(sma_long, SMA_RISING_DAYS)
+        ema_daily = ema(df['close'])
+        ema_21, ema_21_prior = _at(ema_daily), _at(ema_daily, EMA_RISING_DAYS)
+        ema_weekly = ema(weekly_closes(df))
+        ema_21w, ema_21w_prior = _at(ema_weekly), _at(ema_weekly, 1)
 
         breakout_20d = price > high_20d
         breakout_60d = price > high_60d
         breakout_confirmed = volume_ratio is not None and volume_ratio >= VOLUME_RATIO_MIN
         price_above_50dma = price > dma_50
         dma_slope_up = dma_50 > dma_50_prior
-        rsi_filter = 50 < rsi_val < 75
-        macd_bullish = macd_val > signal_val
 
         core = [breakout_20d or breakout_60d, breakout_confirmed, price_above_50dma, dma_slope_up]
 
@@ -284,8 +362,29 @@ class Analyzer:
             breakout_confirmed=int(breakout_confirmed),
             price_gt_50dma=int(price_above_50dma),
             dma_50_rising=int(dma_slope_up),
-            rsi_50_75=int(rsi_filter),
-            macd_bullish=int(macd_bullish),
+            rsi_50_70=int(RSI_BAND[0] <= rsi_val <= RSI_BAND[1]),
+            macd_above_signal=int(macd_val > signal_val),
+            macd_hist=_round(hist_val),
+            macd_hist_prev=_round(hist_prior),
+            macd_days_above=days_above,
+            macd_crossover=int(1 <= days_above <= MACD_CROSSOVER_DAYS),
+            macd_hist_rising=hist_rising,
+            dma_20=_round(dma_20),
+            dma_20_prev_15d=_round(dma_20_prior),
+            dma_200=_round(dma_200),
+            dma_200_prev_15d=_round(dma_200_prior),
+            price_gt_20dma=_above(price, dma_20),
+            dma_20_rising=_above(dma_20, dma_20_prior),
+            price_gt_200dma=_above(price, dma_200),
+            dma_200_rising=_above(dma_200, dma_200_prior),
+            ema_21=_round(ema_21),
+            ema_21_prev_5d=_round(ema_21_prior),
+            price_gt_21ema=_above(price, ema_21),
+            ema_21_rising=_above(ema_21, ema_21_prior),
+            ema_21w=_round(ema_21w),
+            ema_21w_prev_1w=_round(ema_21w_prior),
+            price_gt_21wema=_above(price, ema_21w),
+            ema_21w_rising=_above(ema_21w, ema_21w_prior),
         )
 
     def save_to_repository(self, items: list[StockCriteria], date_created: date) -> None:

@@ -26,9 +26,30 @@ COLUMNS = (
     'breakout_confirmed',
     'price_gt_50dma',
     'dma_50_rising',
-    'rsi_50_75',
-    'macd_bullish',
+    'rsi_50_70',
+    'macd_above_signal',
     'date_created',
+    'macd_hist',
+    'macd_hist_prev',
+    'macd_days_above',
+    'macd_crossover',
+    'macd_hist_rising',
+    'dma_20',
+    'dma_20_prev_15d',
+    'dma_200',
+    'dma_200_prev_15d',
+    'price_gt_20dma',
+    'dma_20_rising',
+    'price_gt_200dma',
+    'dma_200_rising',
+    'ema_21',
+    'ema_21_prev_5d',
+    'price_gt_21ema',
+    'ema_21_rising',
+    'ema_21w',
+    'ema_21w_prev_1w',
+    'price_gt_21wema',
+    'ema_21w_rising',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -71,9 +92,30 @@ def _row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_int(sc.breakout_confirmed),  # INTEGER
         _as_int(sc.price_gt_50dma),  # INTEGER
         _as_int(sc.dma_50_rising),  # INTEGER
-        _as_int(sc.rsi_50_75),  # INTEGER
-        _as_int(sc.macd_bullish),  # INTEGER
+        _as_int(sc.rsi_50_70),  # INTEGER
+        _as_int(sc.macd_above_signal),  # INTEGER
         date_created,
+        _as_float(sc.macd_hist),
+        _as_float(sc.macd_hist_prev),
+        _as_int(sc.macd_days_above),  # INTEGER
+        _as_int(sc.macd_crossover),  # INTEGER
+        _as_int(sc.macd_hist_rising),  # INTEGER
+        _as_float(sc.dma_20),
+        _as_float(sc.dma_20_prev_15d),
+        _as_float(sc.dma_200),
+        _as_float(sc.dma_200_prev_15d),
+        _as_int(sc.price_gt_20dma),  # INTEGER
+        _as_int(sc.dma_20_rising),  # INTEGER
+        _as_int(sc.price_gt_200dma),  # INTEGER
+        _as_int(sc.dma_200_rising),  # INTEGER
+        _as_float(sc.ema_21),
+        _as_float(sc.ema_21_prev_5d),
+        _as_int(sc.price_gt_21ema),  # INTEGER
+        _as_int(sc.ema_21_rising),  # INTEGER
+        _as_float(sc.ema_21w),
+        _as_float(sc.ema_21w_prev_1w),
+        _as_int(sc.price_gt_21wema),  # INTEGER
+        _as_int(sc.ema_21w_rising),  # INTEGER
     )
 
 
