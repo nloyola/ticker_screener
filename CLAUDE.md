@@ -6,7 +6,7 @@ The ticker screener: a **Python 3.12** command line program (managed with **uv**
 
 This repo is checked out as a git submodule at `screener/` in [nloyola/stock_analyzer](https://github.com/nloyola/stock_analyzer), a Go web app that reads the same database and renders the dashboard. The two programs share one `stock_data.db`:
 
-- The screener owns the schema and fills the market data tables: `ticker`, `price_data`, `stock_criteria` and `metadata` (`MARKET_DATA_TABLES` in `app/db.py`).
+- The screener owns the schema and fills the market data tables: `ticker`, `price_data`, `stock_criteria` and `metadata` (`MARKET_DATA_TABLES` in `app/db.py`). It also owns `company_name`, each ticker's company name, which is not market data: `db-init` keeps it.
 - The Go app's admin pages are the source of truth for `sector` and `subsector`, the sectors, subsectors and tickers the screener fetches. The `import` command still deletes and rebuilds both tables from a spreadsheet, undoing every admin edit, until it is retired or made to merge.
 - The Go app also keeps its own tables (`admin_user`, `admin_session`, `analyzer_schema_migration`) in the same file. The screener must never touch them, and `db-init` must never drop or empty them.
 - The Go app's tests use a verbatim copy of `schema.sql` (`internal/repo/testdata/screener_schema.sql` in the parent, checked by its `make schema:check`), so a schema change here needs a matching change there.
@@ -18,7 +18,7 @@ In production the screener runs as the `ticker-screener` Docker image (`Dockerfi
 Under `app/`, wired together by a small dependency-injection container:
 
 - **models.py** - Plain data types (`Ticker`, `PriceData`, `StockCriteria`, ...).
-- **db.py** - `connect(db_path)`, the one way repositories open a connection (type converters, `sqlite3.Row` rows, foreign keys, commit or roll back, then close), the `SQLite` wrapper (one explicit transaction per `connect()`, for multi-statement work such as `import`), `upgrade_db` (the versioned upgrades, recorded in `PRAGMA user_version`, that change tables an older `schema.sql` created; the dashboard never reads `user_version`), `init_db` (upgrades, then runs `schema.sql`, which only creates missing tables) and `clear_market_data`.
+- **db.py** - `connect(db_path)`, the one way repositories open a connection (type converters, `sqlite3.Row` rows, foreign keys, commit or roll back, then close), the `SQLite` wrapper (one explicit transaction per `connect()`, for multi-statement work such as `import`), `upgrade_db` (the versioned upgrades, recorded in `PRAGMA user_version`, that change tables an older `schema.sql` created, or create tables added since, since only `db-init` runs `schema.sql`; the dashboard never reads `user_version`), `init_db` (upgrades, then runs `schema.sql`, which only creates missing tables) and `clear_market_data`.
 - **repositories/** - One repository per table, hand-written SQL.
 - **services/** - Logic over the repositories (`SectorService`).
 - **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py** - The work behind the `analyze`, `ticker-fetcher` and `ticker-sync` commands.
