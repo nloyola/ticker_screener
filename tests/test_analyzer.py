@@ -2,10 +2,10 @@
 
 Each test builds a made-up price series, loads it through Analyzer.load_price_data exactly as a run does, and
 checks the stored values against numbers worked out by hand. Close prices are linear or zigzag so the averages,
-highs and indicators have closed forms:
+highs and indicators have closed forms. Each day's high equals its close unless a test says otherwise.
 
-- A close rising by s a day has a 10-day EMA lagging it by s * (10 - 1) / 2 = 4.5s once the start has decayed,
-  a 12-day EMA by 5.5s and a 26-day EMA by 12.5s, so MACD = 7s and its 9-day signal line is also 7s.
+- A close rising by s a day has a 12-day EMA lagging it by 5.5s once the start has decayed and a 26-day EMA by
+  12.5s, so MACD = 7s and its 9-day signal line is also 7s.
 - RSI uses Wilder's smoothing (alpha = 1/14). For closes alternating +2 and -1, the smoothed gain just after an up
   day settles at 2a / (1 - (1 - a)^2) = 28/27 and the smoothed loss at (1 - a)a / (1 - (1 - a)^2) = 13/27, so
   RSI = 100 * 28 / 41 = 68.29. A close that never falls has RSI 100.
@@ -39,9 +39,11 @@ class FakeStockCriteriaRepo:
         self.saved.append((list(items), date_created))
 
 
-def price_rows(ticker: str, closes: list[float], volumes: list[int] | None = None) -> list[PriceData]:
+def price_rows(
+    ticker: str, closes: list[float], volumes: list[int] | None = None, highs: list[float | None] | None = None
+) -> list[PriceData]:
     volumes = volumes if volumes is not None else [BASE_VOLUME] * len(closes)
-    assert len(volumes) == len(closes)
+    highs = highs if highs is not None else closes
     start = date(2026, 1, 1)
     return [
         PriceData(
@@ -51,8 +53,10 @@ def price_rows(ticker: str, closes: list[float], volumes: list[int] | None = Non
             date=start + timedelta(days=i),
             close=close,
             volume=volume,
+            high=high,
+            low=None if high is None else min(close, high) - 1,
         )
-        for i, (close, volume) in enumerate(zip(closes, volumes, strict=True))
+        for i, (close, volume, high) in enumerate(zip(closes, volumes, highs, strict=True))
     ]
 
 
@@ -62,9 +66,11 @@ def make_analyzer(rows: list[PriceData]) -> tuple[Analyzer, FakeStockCriteriaRep
     return Analyzer(container), criteria_repo
 
 
-def analyze(closes: list[float], volumes: list[int] | None = None) -> StockCriteria | None:
+def analyze(
+    closes: list[float], volumes: list[int] | None = None, highs: list[float | None] | None = None
+) -> StockCriteria | None:
     """Runs analyze_ticker on one ticker's rows, grouped as Analyzer._analyze groups them."""
-    analyzer, _ = make_analyzer(price_rows('TEST', closes, volumes))
+    analyzer, _ = make_analyzer(price_rows('TEST', closes, volumes, highs))
     df = analyzer.load_price_data()
     ((ticker, group_df),) = list(df.groupby(level='ticker'))
     return analyzer.analyze_ticker(ticker, group_df)
@@ -97,7 +103,6 @@ def core_flags(sc: StockCriteria) -> dict[str, int]:
         'breakout_60d': sc.breakout_60d,
         'breakout_confirmed': sc.breakout_confirmed,
         'price_gt_50dma': sc.price_gt_50dma,
-        'price_gt_10ema': sc.price_gt_10ema,
         'dma_50_rising': sc.dma_50_rising,
     }
 
@@ -112,18 +117,16 @@ def test_clean_breakout_meets_every_core_criterion():
     assert sc.ticker == 'TEST'
     assert sc.subsector_id == SUBSECTOR_ID
     assert sc.price == 199.0
-    assert sc.high_20d == 198.0  # the highest close of the 20 days before today
+    assert sc.high_20d == 198.0  # the highest high of the 20 days before today
     assert sc.high_60d == 198.0
     assert sc.dma_50 == 174.5  # mean of 150..199
-    assert sc.dma_50_prev_15d == 160.5  # 14 days earlier: mean of 136..185
-    assert sc.dma_50_25d_ago == 150.5  # 24 days earlier: mean of 126..175
-    assert sc.ema_10 == 194.5  # 199 - 4.5
+    assert sc.dma_50_prev_15d == 159.5  # 15 trading days earlier: mean of 135..184
     assert sc.volume == 2000
     assert sc.avg_vol_20d == 1000  # the 20 days before today, not including its 2000
-    assert sc.max_vol_10d == 1000  # the 10 days before today
+    assert sc.volume_ratio == 2.0
 
     assert core_flags(sc) == dict.fromkeys(core_flags(sc), 1)
-    assert sc.core_criteria_score == 5
+    assert sc.core_criteria_score == 4
     assert sc.core_criteria_met is True
 
 
@@ -140,7 +143,9 @@ def test_values_are_rounded_to_two_places():
     assert sc.price == 199.12
     assert sc.high_20d == 198.12
     assert sc.dma_50 == 174.62
-    assert sc.ema_10 == 194.62
+
+
+# --- The price breakout -----------------------------------------------------
 
 
 def test_20_day_breakout_without_a_60_day_breakout():
@@ -153,10 +158,9 @@ def test_20_day_breakout_without_a_60_day_breakout():
     assert sc.breakout_20d == 1
     assert sc.breakout_60d == 0
     assert sc.dma_50 == 163.2  # (151..179 + 20 * 160 + 175) / 50
-    assert sc.dma_50_prev_15d == 158.28  # (137..179 + 7 * 160) / 50
-    assert sc.dma_50_25d_ago == 151.5  # mean of 127..176
+    assert sc.dma_50_prev_15d == 157.8  # (136..179 + 6 * 160) / 50
     # either breakout is enough
-    assert sc.core_criteria_score == 5
+    assert sc.core_criteria_score == 4
     assert sc.core_criteria_met is True
 
 
@@ -169,7 +173,50 @@ def test_no_breakout_at_the_previous_high():
     assert sc.breakout_20d == 0
     assert sc.breakout_60d == 0
     assert sc.core_criteria_met is False
-    assert sc.core_criteria_score == 4
+    assert sc.core_criteria_score == 3
+
+
+def test_the_breakout_is_measured_against_the_highs_not_the_closes():
+    # five days ago the price reached 250 during the day but closed at 194: today's 199 close is above every close
+    # before it, yet below that high
+    closes = rising(100)
+    highs = closes[:-6] + [250.0] + closes[-5:]
+    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+
+    assert sc.high_20d == 250.0
+    assert sc.high_60d == 250.0
+    assert sc.breakout_20d == 0
+    assert sc.breakout_60d == 0
+
+
+@pytest.mark.parametrize(('high_at', 'breakout_20d'), [(-21, 0), (-22, 1)])
+def test_the_20_day_high_covers_the_20_days_before_today(high_at, breakout_20d):
+    # a 250 high 20 days before today is in the window; 21 days before is not
+    closes = rising(100)
+    highs = list(closes)
+    highs[high_at] = 250.0
+    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+
+    assert sc.breakout_20d == breakout_20d
+    assert sc.breakout_60d == 0
+
+
+def test_todays_own_high_does_not_raise_the_bar():
+    closes = rising(100)
+    highs = closes[:-1] + [300.0]
+    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+
+    assert sc.high_20d == 198.0
+    assert sc.breakout_20d == 1
+
+
+def test_a_row_without_a_high_counts_its_close():
+    # rows stored before the screener kept highs have none until the next fetch
+    sc = analyze(rising(100), volumes_with_last(100, 2000), [None] * 100)
+
+    assert sc.high_20d == 198.0
+    assert sc.high_60d == 198.0
+    assert sc.core_criteria_met is True
 
 
 # --- Volume confirmation ----------------------------------------------------
@@ -180,8 +227,9 @@ def test_breakout_on_low_volume_is_unconfirmed():
     sc = analyze(rising(100), volumes_with_last(100, 1499))
 
     assert sc.avg_vol_20d == 1000
+    assert sc.volume_ratio == pytest.approx(1.499)  # stored unrounded, so it never reads as 1.5
     assert sc.breakout_confirmed == 0
-    assert sc.core_criteria_score == 4
+    assert sc.core_criteria_score == 3
     assert sc.core_criteria_met is False
 
 
@@ -190,41 +238,39 @@ def test_the_breakout_days_own_volume_does_not_raise_the_average():
     sc = analyze(rising(100), volumes_with_last(100, 1500))
 
     assert sc.avg_vol_20d == 1000
+    assert sc.volume_ratio == 1.5
     assert sc.breakout_confirmed == 1
     assert sc.core_criteria_met is True
 
 
-def test_breakout_below_a_recent_volume_spike_is_unconfirmed():
-    # 2000 >= 1.5 * the 20-day average of 1200, but below the 5000 of five days ago
+def test_a_recent_volume_spike_raises_the_average_but_does_not_block_the_breakout():
+    # 2000 >= 1.5 * the 20-day average of 1200, though below the 5000 of five days ago
     sc = analyze(rising(100), volumes_with_last(100, 2000, spikes={-6: 5000}))
 
     assert sc.avg_vol_20d == 1200  # (19 * 1000 + 5000) / 20
-    assert sc.max_vol_10d == 5000
-    assert sc.breakout_confirmed == 0
-    assert sc.core_criteria_met is False
-
-
-@pytest.mark.parametrize(('spike_at', 'confirmed'), [(-11, 0), (-12, 1)])
-def test_the_10_day_volume_high_covers_the_10_days_before_today(spike_at, confirmed):
-    # a 5000 spike 10 days before today is in the window; 11 days before is not
-    sc = analyze(rising(100), volumes_with_last(100, 2000, spikes={spike_at: 5000}))
-
-    assert sc.max_vol_10d == (5000 if confirmed == 0 else 1000)
-    assert sc.breakout_confirmed == confirmed
-
-
-def test_volume_exactly_at_both_thresholds_confirms():
-    # 1500 is exactly 1.5 * the 20-day average of (18 * 1000 + 500 + 1500) / 20 = 1000,
-    # and equal to yesterday's 1500, the 10-day high
-    volumes = volumes_with_last(100, 1500, spikes={-2: 1500, -3: 500})
-    sc = analyze(rising(100), volumes)
-
-    assert sc.avg_vol_20d == 1000
-    assert sc.max_vol_10d == 1500
+    assert sc.volume_ratio == pytest.approx(2000 / 1200)
     assert sc.breakout_confirmed == 1
 
 
-# --- The 50-day and 10-day averages -----------------------------------------
+@pytest.mark.parametrize(('spike_at', 'confirmed'), [(-21, 0), (-22, 1)])
+def test_the_average_volume_covers_the_20_days_before_today(spike_at, confirmed):
+    # an 11000 spike 20 days before today raises the average to 1500, above 2000 / 1.5; 21 days before it is out
+    sc = analyze(rising(100), volumes_with_last(100, 2000, spikes={spike_at: 11000}))
+
+    assert sc.avg_vol_20d == (1500 if confirmed == 0 else 1000)
+    assert sc.breakout_confirmed == confirmed
+
+
+def test_no_volume_before_today_has_no_ratio():
+    volumes = [0] * 99 + [2000]
+    sc = analyze(rising(100), volumes)
+
+    assert sc.avg_vol_20d == 0
+    assert sc.volume_ratio is None
+    assert sc.breakout_confirmed == 0
+
+
+# --- The 50-day average -----------------------------------------------------
 
 
 def test_close_under_the_50_day_average():
@@ -234,7 +280,6 @@ def test_close_under_the_50_day_average():
 
     assert sc.dma_50 == 173.52  # (sum of 150..198 + 150) / 50 = (49 * 174 + 150) / 50
     assert sc.price_gt_50dma == 0
-    assert sc.price_gt_10ema == 0
     assert sc.breakout_20d == 0
     assert sc.breakout_60d == 0
     assert sc.breakout_confirmed == 1
@@ -251,63 +296,58 @@ def test_falling_50_day_average():
     assert sc.high_20d == 121.0  # 200 - 79
     assert sc.high_60d == 161.0  # 200 - 39
     assert sc.dma_50 == 126.88  # (49 * 126 + 170) / 50
-    assert sc.dma_50_prev_15d == 139.5  # mean of 200 - 36 .. 200 - 85
-    assert sc.dma_50_25d_ago == 149.5
-    assert sc.dma_50_rising == 0
-    assert {k: v for k, v in core_flags(sc).items() if k != 'dma_50_rising'} == {
-        'breakout_20d': 1,
-        'breakout_60d': 1,
-        'breakout_confirmed': 1,
-        'price_gt_50dma': 1,
-        'price_gt_10ema': 1,
-    }
-    assert sc.core_criteria_score == 4
-    assert sc.core_criteria_met is False
-
-
-def test_50_day_average_rising_lately_but_not_before():
-    # falling for 70 days then rising for 30: today's average is above 14 days ago, which is below 24 days ago
-    closes = rising(70, start=200.0, step=-1.0) + rising(30, start=132.0, step=2.0)
-    sc = analyze(closes, volumes_with_last(100, 2000))
-
-    assert sc.dma_50 > sc.dma_50_prev_15d
-    assert sc.dma_50_prev_15d < sc.dma_50_25d_ago
+    assert sc.dma_50_prev_15d == 140.5  # mean of 200 - 35 .. 200 - 84
     assert sc.dma_50_rising == 0
 
 
 def test_50_day_average_rising_before_but_not_lately():
-    # rising for 86 days then falling for 14: 14 days ago is above 24 days ago, but today is below 14 days ago
+    # rising for 86 days then falling for 14: today's average is below the one 15 trading days earlier
     closes = rising(86) + rising(14, start=180.0, step=-10.0)
     sc = analyze(closes, volumes_with_last(100, 2000))
 
     assert sc.dma_50 == 152.8  # (150..185 + 180, 170, .., 50) / 50
-    assert sc.dma_50_prev_15d == 160.5
-    assert sc.dma_50_25d_ago == 150.5
+    assert sc.dma_50_prev_15d == 159.5
     assert sc.dma_50_rising == 0
 
 
-def test_ema_10_is_the_trading_ema_seeded_with_the_first_close():
-    # One huge first close makes the start of the series visible in today's EMA. The trading EMA (pandas'
-    # adjust=False) starts at the first close and then moves a = 2 / 11 of the way to each new close, so after n - 1
-    # closes of 100 the first close's excess has decayed by (1 - a)^(n - 1). pandas' default adjust=True would
-    # weigh every close over the sum of the weights instead, giving 100.65 here.
-    closes = [10_000_000.0] + [100.0] * 74
-    n, a = len(closes), 2 / 11
-    expected = 100.0 + (closes[0] - 100.0) * (1 - a) ** (n - 1)
-    sc = analyze(closes, volumes_with_last(n, 2000))
+# --- Exactly the four mandatory conditions ----------------------------------
 
-    assert round(expected, 2) == 103.56
-    assert sc.ema_10 == 103.56
+# Each fixture fails one mandatory condition and passes the other three: the core criteria count the four
+# conditions alone, so it scores 3 and is not core criteria met.
+SINGLE_FAILURES = {
+    # today's close equals the 20-day high
+    'breakout': (rising(99) + [198.0], volumes_with_last(100, 2000)),
+    'breakout_confirmed': (rising(100), volumes_with_last(100, 1499)),
+    # 100 for 50 days, 300 for 29, 200 for 20, then 210: above the 20-day high of 200, below the 50-day average of
+    # (29 * 300 + 20 * 200 + 210) / 50 = 258.2, which is above the 228 of 15 days earlier
+    'price_gt_50dma': ([100.0] * 50 + [300.0] * 29 + [200.0] * 20 + [210.0], volumes_with_last(100, 2000)),
+    # closes 200 down to 102, then a jump to 170
+    'dma_50_rising': (rising(99, start=200.0, step=-1.0) + [170.0], volumes_with_last(100, 2000)),
+}
 
 
-def test_close_above_the_50_day_average_but_under_the_10_day_ema():
-    # closes 100..194, then five days at 185: under the 10-day EMA, still above the 50-day average
-    closes = rising(95) + [185.0] * 5
-    sc = analyze(closes, volumes_with_last(100, 2000))
+@pytest.mark.parametrize('failing', SINGLE_FAILURES)
+def test_failing_any_single_condition_is_not_core_criteria_met(failing):
+    closes, volumes = SINGLE_FAILURES[failing]
+    sc = analyze(closes, volumes)
 
-    assert sc.dma_50 < 185.0 < sc.ema_10
-    assert sc.price_gt_50dma == 1
-    assert sc.price_gt_10ema == 0
+    passed = {
+        'breakout': bool(sc.breakout_20d or sc.breakout_60d),
+        'breakout_confirmed': bool(sc.breakout_confirmed),
+        'price_gt_50dma': bool(sc.price_gt_50dma),
+        'dma_50_rising': bool(sc.dma_50_rising),
+    }
+    assert passed == {condition: condition != failing for condition in passed}
+    assert sc.core_criteria_score == 3
+    assert sc.core_criteria_met is False
+
+
+def test_the_price_under_the_50_day_average_fixture_is_worked_out_right():
+    sc = analyze(*SINGLE_FAILURES['price_gt_50dma'])
+
+    assert sc.high_20d == 200.0
+    assert sc.dma_50 == 258.2
+    assert sc.dma_50_prev_15d == 228.0  # (15 * 100 + 29 * 300 + 6 * 200) / 50
 
 
 # --- RSI and MACD, which are stored but not core criteria -------------------
@@ -357,9 +397,9 @@ def test_macd_below_its_signal_line_when_the_rise_turns():
 # --- How much history is needed ---------------------------------------------
 
 
-@pytest.mark.parametrize('rows', [59, 60, 74])
-def test_fewer_than_75_rows_is_not_scored(rows):
-    # dma_50_rising compares today's 50-day average with the ones 14 and 24 days ago, which needs 75 rows
+@pytest.mark.parametrize('rows', [59, 61, 64])
+def test_fewer_than_65_rows_is_not_scored(rows):
+    # dma_50_rising compares today's 50-day average with the one 15 trading days earlier, which needs 65 rows
     assert analyze(rising(rows), volumes_with_last(rows, 2000)) is None
 
 
@@ -368,13 +408,13 @@ def test_no_rows_is_not_scored():
     assert analyzer.load_price_data() is None
 
 
-def test_75_rows_is_enough_to_score_fully():
-    sc = analyze(rising(75), volumes_with_last(75, 2000))
+def test_65_rows_is_enough_to_score_fully():
+    sc = analyze(rising(65), volumes_with_last(65, 2000))
 
-    assert sc.dma_50_prev_15d is not None
-    assert sc.dma_50_25d_ago is not None
+    assert sc.high_60d == 163.0  # the highest high of rows 4..63
+    assert sc.dma_50_prev_15d == 124.5  # mean of 100..149, the first 50 rows
     assert sc.dma_50_rising == 1
-    assert sc.core_criteria_score == 5
+    assert sc.core_criteria_score == 4
     assert sc.core_criteria_met is True
 
 
@@ -385,7 +425,7 @@ def test_analyze_saves_one_row_per_ticker_with_enough_history():
     rows = (
         price_rows('AAA', rising(100), volumes_with_last(100, 2000))
         + price_rows('BBB', rising(100), volumes_with_last(100, 1499))
-        + price_rows('CCC', rising(74))
+        + price_rows('CCC', rising(64))
     )
     analyzer, criteria_repo = make_analyzer(rows)
 

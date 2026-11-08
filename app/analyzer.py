@@ -19,9 +19,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# dma_50_rising compares today's 50-day average with the ones 14 and 24 days ago, so a ticker needs 50 + 24 rows
-# and today's to be scored fully. A ticker with fewer rows is not scored at all.
-MIN_ROWS = 75
+# The four mandatory conditions of the breakout strategy (GLOSSARY.md, "Core criteria"), scored on the last row.
+# The breakout compares the close with the highest high of the BREAKOUT_WINDOWS trading days before it.
+BREAKOUT_WINDOWS = (20, 60)
+# Volume confirmation: the day's volume is at least VOLUME_RATIO_MIN times the average of the VOLUME_AVG_DAYS days
+# before it. The strategy calls 2 times or more stronger; the ratio is stored so the app can show it.
+VOLUME_AVG_DAYS = 20
+VOLUME_RATIO_MIN = 1.5
+# Trend confirmation: the close is above the SMA_DAYS-day simple moving average, which is rising when it is above
+# its value SMA_RISING_DAYS trading days earlier (the strategy's window is 10-20 days).
+SMA_DAYS = 50
+SMA_RISING_DAYS = 15
+
+# The history every core condition needs: SMA_DAYS rows ending SMA_RISING_DAYS days before the scored day, and the
+# longest breakout window before it. A ticker with fewer rows is not scored at all.
+MIN_ROWS = max(SMA_DAYS + SMA_RISING_DAYS, max(BREAKOUT_WINDOWS) + 1)
 
 # A ticker whose last FROZEN_DAYS trading days all have one close and zero volume is frozen: a price API (Tiingo)
 # repeats the last close of a ticker that stopped trading, which would pass the stale check and be scored.
@@ -190,6 +202,8 @@ class Analyzer:
                     'ticker': r.ticker,
                     'date': r.date,
                     'close': r.close,
+                    'high': r.high,
+                    'low': r.low,
                     'volume': r.volume,
                 }
                 for r in rows
@@ -200,11 +214,12 @@ class Analyzer:
 
         # Ensure dtypes
         df['subsector_id'] = pd.to_numeric(df['subsector_id'], errors='coerce')
-        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        for column in ('close', 'high', 'low'):
+            df[column] = pd.to_numeric(df[column], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce').astype('Int64')
 
         # Keep only what you need
-        return df[['subsector_id', 'close', 'volume']]
+        return df[['subsector_id', 'close', 'high', 'low', 'volume']]
 
     def analyze_ticker(self, ticker: str, df: pd.DataFrame) -> StockCriteria | None:
         if len(df) < MIN_ROWS:
@@ -212,14 +227,10 @@ class Analyzer:
 
         logger.info(f'generating criteria for {ticker}')
 
-        # Technical indicators
-        df['50dma'] = df['close'].rolling(window=50).mean()
-        df['10ema'] = df['close'].ewm(span=10, adjust=False).mean()
-        # the 20 days before the scored day: the breakout day's own volume must not raise its baseline
-        df['volume_avg_20'] = df['volume'].rolling(window=20).mean().shift(1)
-        df['max_20d'] = df['close'].rolling(window=20).max()
-        df['max_60d'] = df['close'].rolling(window=60).max()
-        df['max_vol_10d'] = df['volume'].rolling(window=10).max()
+        # A row stored before the screener kept highs (upgrade 3) has none until the next fetch replaces it: its
+        # close stands in, the highest price known for that day.
+        highs = df['high'].fillna(df['close'])
+        sma = df['close'].rolling(window=SMA_DAYS).mean()
 
         close_series = df['close'].squeeze()
         rsi = RSIIndicator(close=close_series).rsi()
@@ -229,65 +240,42 @@ class Analyzer:
 
         price = df['close'].iloc[-1].item()
         volume = df['volume'].iloc[-1].item()
-        avg_vol = df['volume_avg_20'].iloc[-1].item()
-        dma_50 = df['50dma'].iloc[-1].item()
+        # every lookback excludes the scored day: its own high and volume must not raise the bar it is measured by
+        high_20d, high_60d = (highs.iloc[-1 - days : -1].max().item() for days in BREAKOUT_WINDOWS)
+        avg_vol = df['volume'].iloc[-1 - VOLUME_AVG_DAYS : -1].mean().item()
+        volume_ratio = volume / avg_vol if avg_vol > 0 else None
+        dma_50 = sma.iloc[-1].item()
+        dma_50_prior = sma.iloc[-1 - SMA_RISING_DAYS].item()
 
-        dma_50_prev = df['50dma'].iloc[-15].item()
-        dma_50_early = df['50dma'].iloc[-25].item()
-
-        ema_10 = df['10ema'].iloc[-1].item()
-        high_20d = df['max_20d'].iloc[-2].item()
-        high_60d = df['max_60d'].iloc[-2].item()
-        high_vol_10d = df['max_vol_10d'].iloc[-2].item()
         rsi_val = rsi.iloc[-1].item()
         macd_val = macd_line.iloc[-1].item()
         signal_val = signal_line.iloc[-1].item()
 
         breakout_20d = price > high_20d
         breakout_60d = price > high_60d
-        breakout_confirmed = volume >= 1.5 * avg_vol and volume >= high_vol_10d
+        breakout_confirmed = volume_ratio is not None and volume_ratio >= VOLUME_RATIO_MIN
         price_above_50dma = price > dma_50
-        price_above_10ema = price > ema_10
-        dma_slope_up = dma_50 > dma_50_prev and dma_50_prev > dma_50_early
+        dma_slope_up = dma_50 > dma_50_prior
         rsi_filter = 50 < rsi_val < 75
         macd_bullish = macd_val > signal_val
 
-        core_conditions_met = all(
-            [
-                breakout_20d or breakout_60d,
-                breakout_confirmed,
-                price_above_50dma,
-                price_above_10ema,
-                dma_slope_up,
-            ]
-        )
-
-        core_criteria_count = sum(
-            [
-                breakout_20d or breakout_60d,
-                breakout_confirmed,
-                price_above_50dma,
-                price_above_10ema,
-                dma_slope_up,
-            ]
-        )
+        core = [breakout_20d or breakout_60d, breakout_confirmed, price_above_50dma, dma_slope_up]
 
         return StockCriteria(
             id=0,
             subsector_id=df['subsector_id'].iloc[-1].item(),
             ticker=ticker,
             price=round(price, 2),
-            core_criteria_met=core_conditions_met,
-            core_criteria_score=core_criteria_count,
+            core_criteria_met=all(core),
+            core_criteria_score=sum(core),
             high_20d=round(high_20d, 2),
             high_60d=round(high_60d, 2),
             volume=int(volume),
             avg_vol_20d=int(avg_vol),
-            max_vol_10d=int(high_vol_10d),
+            # unrounded, so a ratio just under the threshold never reads as on it
+            volume_ratio=volume_ratio,
             dma_50=round(dma_50, 2),
-            ema_10=round(ema_10, 2),
-            dma_50_prev_15d=round(dma_50_prev, 2),
-            dma_50_25d_ago=round(dma_50_early, 2),
+            dma_50_prev_15d=round(dma_50_prior, 2),
             rsi=round(rsi_val, 2),
             macd=round(macd_val, 2),
             signal=round(signal_val, 2),
@@ -295,7 +283,6 @@ class Analyzer:
             breakout_60d=int(breakout_60d),
             breakout_confirmed=int(breakout_confirmed),
             price_gt_50dma=int(price_above_50dma),
-            price_gt_10ema=int(price_above_10ema),
             dma_50_rising=int(dma_slope_up),
             rsi_50_75=int(rsi_filter),
             macd_bullish=int(macd_bullish),

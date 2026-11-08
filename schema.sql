@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS price_data (
        UNIQUE (ticker, date)
 );
 
+-- volume_ratio is the day's volume over avg_vol_20d. The upgrade in app/db.py drops the columns of the core rules
+-- the breakout strategy removed (max_vol_10d, ema_10, dma_50_25d_ago, price_gt_10ema) from databases created
+-- before it, and adds volume_ratio, after date_created as ALTER TABLE places it; change both together.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -77,11 +80,8 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        high_60d REAL,
        volume INTEGER,
        avg_vol_20d INTEGER,
-       max_vol_10d INTEGER,
        dma_50 REAL,
-       ema_10 REAL,
        dma_50_prev_15d REAL,
-       dma_50_25d_ago REAL,
        rsi REAL,
        macd REAL,
        signal REAL,
@@ -89,11 +89,11 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        breakout_60d INTEGER,
        breakout_confirmed INTEGER,
        price_gt_50dma INTEGER,
-       price_gt_10ema INTEGER,
        dma_50_rising INTEGER,
        rsi_50_75 INTEGER,
        macd_bullish INTEGER,
        date_created DATE NOT NULL DEFAULT (date('now')),
+       volume_ratio REAL,
        UNIQUE (ticker)
 );
 

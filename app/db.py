@@ -168,7 +168,30 @@ def _add_price_data_high_low(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE price_data ADD COLUMN {column} REAL')
 
 
-UPGRADES = (_guard_price_data_date, _add_company_name, _add_price_data_high_low)
+def _rework_stock_criteria_core_columns(con: sqlite3.Connection) -> None:
+    """
+    Version 4: stock_criteria loses the columns of the core rules the breakout strategy dropped (the 10-day max
+    volume, the 10-day EMA, the 50-day SMA 25 days earlier and the close above the 10-day EMA) and gains
+    volume_ratio, left NULL in the rows already stored until the next analyze replaces them. Drops and adds only
+    what the table has and lacks, so a table schema.sql created this way is left as it is.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('stock_criteria')")}
+    if not columns:
+        return  # no table: schema.sql creates it this way
+    # spelled out here, not shared with the repository, so that a later schema change cannot alter a shipped upgrade
+    for column in ('max_vol_10d', 'ema_10', 'dma_50_25d_ago', 'price_gt_10ema'):
+        if column in columns:
+            con.execute(f'ALTER TABLE stock_criteria DROP COLUMN {column}')
+    if 'volume_ratio' not in columns:
+        con.execute('ALTER TABLE stock_criteria ADD COLUMN volume_ratio REAL')
+
+
+UPGRADES = (
+    _guard_price_data_date,
+    _add_company_name,
+    _add_price_data_high_low,
+    _rework_stock_criteria_core_columns,
+)
 SCHEMA_VERSION = len(UPGRADES)
 
 

@@ -1,6 +1,6 @@
 """
-price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low, and older
-databases are upgraded to both.
+price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
+stock_criteria has the breakout strategy's columns, and older databases are upgraded to all three.
 """
 
 import os
@@ -59,10 +59,10 @@ def _execute(db_path: str, *statements: str) -> None:
         con.close()
 
 
-def _query(db_path: str, sql: str) -> list[tuple]:
+def _query(db_path: str, sql: str, *params) -> list[tuple]:
     con = open_connection(db_path)
     try:
-        return con.execute(sql).fetchall()
+        return con.execute(sql, params).fetchall()
     finally:
         con.close()
 
@@ -84,9 +84,9 @@ def _insert_price(db_path: str, ticker: str, day) -> None:
         con.close()
 
 
-def _table_sql(db_path: str) -> str:
+def _table_sql(db_path: str, table: str = 'price_data') -> str:
     # a renamed table's stored CREATE statement quotes its new name; the upgrade's indentation differs too
-    sql = _query(db_path, "SELECT sql FROM sqlite_master WHERE name = 'price_data'")[0][0]
+    sql = _query(db_path, 'SELECT sql FROM sqlite_master WHERE name = ?', table)[0][0]
     return ' '.join(sql.replace('"', '').replace('(', ' ( ').replace(')', ' ) ').split())
 
 
@@ -178,6 +178,69 @@ def test_upgrade_adds_high_and_low_keeping_every_row(version_2_db, current_db):
         "INSERT INTO price_data (ticker, date, close, volume, high, low) VALUES ('XOM', '2026-11-06', 2, 3, 2.5, 1.5)",
     )
     assert _query(version_2_db, "SELECT high, low FROM price_data WHERE date = '2026-11-06'") == [(2.5, 1.5)]
+
+
+# stock_criteria as schema.sql created it before the breakout strategy's core criteria (version 4)
+CORE_5_STOCK_CRITERIA = """
+CREATE TABLE stock_criteria (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       subsector_id INTEGER,
+       ticker TEXT NOT NULL,
+       price REAL,
+       core_criteria_met BOOLEAN,
+       core_criteria_score INTEGER,
+       high_20d REAL,
+       high_60d REAL,
+       volume INTEGER,
+       avg_vol_20d INTEGER,
+       max_vol_10d INTEGER,
+       dma_50 REAL,
+       ema_10 REAL,
+       dma_50_prev_15d REAL,
+       dma_50_25d_ago REAL,
+       rsi REAL,
+       macd REAL,
+       signal REAL,
+       breakout_20d INTEGER,
+       breakout_60d INTEGER,
+       breakout_confirmed INTEGER,
+       price_gt_50dma INTEGER,
+       price_gt_10ema INTEGER,
+       dma_50_rising INTEGER,
+       rsi_50_75 INTEGER,
+       macd_bullish INTEGER,
+       date_created DATE NOT NULL DEFAULT (date('now')),
+       UNIQUE (ticker)
+)"""
+
+
+@pytest.fixture
+def version_3_db(tmp_path) -> str:
+    """A database at version 3: today's schema with stock_criteria scoring the five old core criteria, two rows."""
+    path = str(tmp_path / 'v3.db')
+    init_db(path)
+    _execute(
+        path,
+        'DROP TABLE stock_criteria',
+        CORE_5_STOCK_CRITERIA,
+        'PRAGMA user_version = 3',
+        'INSERT INTO stock_criteria (id, subsector_id, ticker, price, core_criteria_score, max_vol_10d, ema_10, '
+        'dma_50_prev_15d, dma_50_25d_ago, price_gt_10ema, date_created) '
+        "VALUES (1, 10, 'XOM', 110.5, 5, 900, 108.2, 101.0, 99.5, 1, '2026-11-05')",
+        "INSERT INTO stock_criteria (id, subsector_id, ticker, price, date_created) VALUES (2, 10, 'CVX', 150.0, "
+        "'2026-11-05')",
+    )
+    return path
+
+
+def test_upgrade_reworks_stock_criteria_keeping_every_row(version_3_db, current_db):
+    upgrade_db(version_3_db)
+
+    assert _query(version_3_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_3_db, 'stock_criteria') == _table_sql(current_db, 'stock_criteria')
+    assert _query(
+        version_3_db, 'SELECT id, ticker, price, core_criteria_score, dma_50_prev_15d, volume_ratio FROM stock_criteria'
+    ) == [(1, 'XOM', 110.5, 5, 101.0, None), (2, 'CVX', 150.0, None, None, None)]
 
 
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):

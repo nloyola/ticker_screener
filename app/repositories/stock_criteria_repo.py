@@ -15,11 +15,9 @@ COLUMNS = (
     'high_60d',
     'volume',
     'avg_vol_20d',
-    'max_vol_10d',
+    'volume_ratio',
     'dma_50',
-    'ema_10',
     'dma_50_prev_15d',
-    'dma_50_25d_ago',
     'rsi',
     'macd',
     'signal',
@@ -27,7 +25,6 @@ COLUMNS = (
     'breakout_60d',
     'breakout_confirmed',
     'price_gt_50dma',
-    'price_gt_10ema',
     'dma_50_rising',
     'rsi_50_75',
     'macd_bullish',
@@ -63,11 +60,9 @@ def _row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_float(sc.high_60d),
         _as_int(sc.volume),  # INTEGER
         _as_int(sc.avg_vol_20d),  # INTEGER
-        _as_int(sc.max_vol_10d),  # INTEGER
+        _as_float(sc.volume_ratio),
         _as_float(sc.dma_50),
-        _as_float(sc.ema_10),
         _as_float(sc.dma_50_prev_15d),
-        _as_float(sc.dma_50_25d_ago),
         _as_float(sc.rsi),
         _as_float(sc.macd),
         _as_float(sc.signal),
@@ -75,7 +70,6 @@ def _row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_int(sc.breakout_60d),  # INTEGER
         _as_int(sc.breakout_confirmed),  # INTEGER
         _as_int(sc.price_gt_50dma),  # INTEGER
-        _as_int(sc.price_gt_10ema),  # INTEGER
         _as_int(sc.dma_50_rising),  # INTEGER
         _as_int(sc.rsi_50_75),  # INTEGER
         _as_int(sc.macd_bullish),  # INTEGER
