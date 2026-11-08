@@ -81,6 +81,43 @@ RS_1M_DAYS = 21
 RS_3M_DAYS = 63
 SECTOR_MIN_TICKERS = 3
 
+# The strategy's statuses (GLOSSARY.md, "Status"), set once a ticker's subsector comparison is known
+# (with_status). A confirmed breakout meets the four core conditions, and is high-conviction when it also passes at
+# least HIGH_CONVICTION_MIN of the SECONDARY_INDICATORS. A ticker on the pre-breakout watchlist is not a confirmed
+# breakout, but passes both trend conditions and closes near its resistance (PROXIMITY_PCT).
+HIGH_CONVICTION = 'high_conviction'
+CONFIRMED = 'confirmed'
+PRE_BREAKOUT = 'pre_breakout'
+HIGH_CONVICTION_MIN = 4
+
+
+def _all_pass(sc: StockCriteria, *flags: str) -> bool:
+    return all(getattr(sc, flag) == 1 for flag in flags)
+
+
+def _any_passes(sc: StockCriteria, *flags: str) -> bool:
+    return any(getattr(sc, flag) == 1 for flag in flags)
+
+
+# The strategy's secondary indicators judged on the breakout day, each passed by its flags as the strategy words it,
+# an empty flag counting as not passed. Breakout proximity is left out (it defines the watchlist, never a breakout's
+# quality), and so are the retest and durability, which need the days after the breakout. Moving-average alignment
+# includes the core close above the 50-day average, which every confirmed breakout passes; the rising averages and
+# the declining base volume are the strategy's "preferably" and "ideally", not required.
+SECONDARY_INDICATORS: dict[str, Callable[[StockCriteria], bool]] = {
+    'rsi': lambda sc: _all_pass(sc, 'rsi_50_70'),
+    'macd': lambda sc: _any_passes(sc, 'macd_crossover', 'macd_above_signal', 'macd_hist_rising'),
+    'relative_strength': lambda sc: _any_passes(
+        sc, 'outperforms_market_1m', 'outperforms_market_3m', 'outperforms_sector_1m', 'outperforms_sector_3m'
+    ),
+    'moving_average_alignment': lambda sc: _all_pass(sc, 'price_gt_20dma', 'price_gt_50dma', 'price_gt_200dma'),
+    'consolidation_quality': lambda sc: _all_pass(sc, 'consolidation_tight'),
+    'closing_strength': lambda sc: _all_pass(sc, 'close_upper_quarter'),
+    'ema_21_alignment': lambda sc: _all_pass(
+        sc, 'price_gt_21ema', 'ema_21_rising', 'price_gt_21wema', 'ema_21w_rising'
+    ),
+}
+
 # The history every core condition needs: SMA_DAYS rows ending SMA_RISING_DAYS days before the scored day, and the
 # longest breakout window before it. A ticker with fewer rows is not scored at all.
 MIN_ROWS = max(SMA_DAYS + SMA_RISING_DAYS, max(BREAKOUT_WINDOWS) + 1)
@@ -250,6 +287,17 @@ def with_sector_strength(items: list[StockCriteria]) -> list[StockCriteria]:
     return result
 
 
+def with_status(sc: StockCriteria) -> StockCriteria:
+    """'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none."""
+    passed = sum(passes(sc) for passes in SECONDARY_INDICATORS.values())
+    status = None
+    if sc.core_criteria_met:
+        status = HIGH_CONVICTION if passed >= HIGH_CONVICTION_MIN else CONFIRMED
+    elif _all_pass(sc, 'price_gt_50dma', 'dma_50_rising', 'near_resistance'):
+        status = PRE_BREAKOUT
+    return replace(sc, secondary_passed=passed, status=status)
+
+
 def _days_above(macd: pd.Series, signal: pd.Series) -> int:
     """How many sessions in a row, ending on the last, MACD has been above its signal line: 0 when it is not."""
     days = 0
@@ -311,7 +359,8 @@ class Analyzer:
 
         Each scored ticker's returns are compared with its market's benchmark, as stored by the last fetch that
         covered that market, and then with its subsector's median (with_sector_strength), over the tickers scored in
-        this run.
+        this run. Only then is its status set (with_status), since relative strength is one of the secondary
+        indicators a high-conviction breakout counts.
 
         Prints one summary line per market that has prices.
         """
@@ -370,7 +419,7 @@ class Analyzer:
             )
 
         # keep only real StockCriteria objects
-        items: list[StockCriteria] = with_sector_strength([sc for sc in results if sc is not None])
+        items = [with_status(sc) for sc in with_sector_strength([sc for sc in results if sc is not None])]
         date_created = datetime.now().date()
         self.save_to_repository(items, date_created)
 

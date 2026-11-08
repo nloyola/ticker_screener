@@ -1,4 +1,4 @@
-"""The core criteria and secondary indicators Analyzer.analyze_ticker computes.
+"""The core criteria and secondary indicators Analyzer.analyze_ticker computes, and the statuses with_status sets.
 
 Each test builds a made-up price series, loads it through Analyzer.load_price_data exactly as a run does, and
 checks the stored values against numbers worked out by hand. Close prices are linear or zigzag so the averages,
@@ -17,12 +17,12 @@ highs and indicators have closed forms. Each day's high equals its close unless 
   reference_macd below, written out from the definitions rather than with the library the analyzer uses.
 """
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from app.analyzer import Analyzer
+from app.analyzer import CONFIRMED, HIGH_CONVICTION, PRE_BREAKOUT, SECONDARY_INDICATORS, Analyzer, with_status
 from app.models import PriceData, StockCriteria
 
 SUBSECTOR_ID = 7
@@ -888,6 +888,175 @@ def test_a_subsector_with_fewer_than_three_returns_has_no_median():
     # YOUNG has too few rows to be scored, so only two returns remain
     assert sorted(by_ticker) == ['AAA', 'BBB']
     assert all(sc.rs_sector_1m is None and sc.outperforms_sector_3m is None for sc in by_ticker.values())
+
+
+# --- Statuses ---------------------------------------------------------------
+
+
+def run_one(closes: list[float], volumes: list[int]) -> StockCriteria:
+    """
+    Analyzes one ticker as a whole run does, started after its last row's session, and returns what it saved: alone,
+    it has no subsector median.
+    """
+    rows = price_rows('TEST', closes, volumes)
+    analyzer, criteria_repo = make_analyzer(rows)
+    analyzer.analyze(started_at=datetime.combine(rows[-1].date + timedelta(days=1), time(12), UTC))
+    (((sc,), _),) = criteria_repo.saved
+    return sc
+
+
+def passed_indicators(sc: StockCriteria) -> list[str]:
+    return [name for name, passes in SECONDARY_INDICATORS.items() if passes(sc)]
+
+
+def test_a_breakout_passing_most_secondary_indicators_is_high_conviction():
+    # the zigzag passes every secondary indicator but relative strength, which has no benchmark or subsector median;
+    # each day closes at its high, and its last 20 days span (286 - 266) / 286 below the 10% of a tight base
+    sc = run_one(zigzag(368), volumes_with_last(368, 2000))
+
+    assert sc.core_criteria_met is True
+    assert passed_indicators(sc) == [
+        'rsi',
+        'macd',
+        'moving_average_alignment',
+        'consolidation_quality',
+        'closing_strength',
+        'ema_21_alignment',
+    ]
+    assert (sc.secondary_passed, sc.status) == (6, HIGH_CONVICTION)
+
+
+def test_a_breakout_passing_few_secondary_indicators_is_confirmed():
+    # 100 rows of a steady rise: RSI 100 is outside the band, there are too few rows for the 200-day average and the
+    # 21-week EMA, and the base spans 10.1%; only the MACD above its signal line and the close at the day's high pass
+    sc = run_one(rising(100), volumes_with_last(100, 2000))
+
+    assert sc.core_criteria_met is True
+    assert passed_indicators(sc) == ['macd', 'closing_strength']
+    assert (sc.secondary_passed, sc.status) == (2, CONFIRMED)
+
+
+def test_a_rising_ticker_just_below_its_resistance_is_on_the_watchlist():
+    # a year's steady rise whose last close, 463, is 3 under the 466 high: above its rising 50-day average, 0.64%
+    # below its resistance, and no breakout
+    sc = run_one(with_last(YEAR, YEAR[-2] - 3), volumes_with_last(368, 2000))
+
+    assert (sc.core_criteria_score, sc.price_gt_50dma, sc.dma_50_rising, sc.near_resistance) == (3, 1, 1, 1)
+    assert sc.status == PRE_BREAKOUT
+    assert sc.secondary_passed == 4
+
+
+def test_a_falling_ticker_has_no_status():
+    sc = run_one(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2000))
+
+    assert sc.core_criteria_score == 1  # only its volume
+    assert (sc.secondary_passed, sc.status) == (1, None)  # it closes at the day's high
+
+
+def flags(**values: int | None) -> StockCriteria:
+    """A ticker passing every core condition and none of the secondary indicators, but for 'values'."""
+    core = dict(core_criteria_met=True, core_criteria_score=4, breakout_20d=1, breakout_confirmed=1, dma_50_rising=1)
+    return StockCriteria(id=0, subsector_id=SUBSECTOR_ID, ticker='TEST', **(core | {'price_gt_50dma': 1} | values))
+
+
+# flags passing each secondary indicator on their own
+INDICATOR_FLAGS = {
+    'rsi': {'rsi_50_70': 1},
+    'macd': {'macd_hist_rising': 1},
+    'relative_strength': {'outperforms_sector_3m': 1},
+    'moving_average_alignment': {'price_gt_20dma': 1, 'price_gt_200dma': 1},
+    'consolidation_quality': {'consolidation_tight': 1},
+    'closing_strength': {'close_upper_quarter': 1},
+    'ema_21_alignment': {'price_gt_21ema': 1, 'ema_21_rising': 1, 'price_gt_21wema': 1, 'ema_21w_rising': 1},
+}
+
+
+def passing(*names: str) -> dict[str, int]:
+    return {flag: value for name in names for flag, value in INDICATOR_FLAGS[name].items()}
+
+
+@pytest.mark.parametrize('name', INDICATOR_FLAGS)
+def test_each_indicators_flags_pass_it_alone(name):
+    assert passed_indicators(flags(**passing(name))) == [name]
+
+
+@pytest.mark.parametrize(
+    ('passed', 'status'), [(3, CONFIRMED), (4, HIGH_CONVICTION), (7, HIGH_CONVICTION)], ids=['3', '4', 'all 7']
+)
+def test_high_conviction_takes_4_secondary_indicators(passed, status):
+    sc = with_status(flags(**passing(*list(INDICATOR_FLAGS)[:passed])))
+
+    assert (sc.secondary_passed, sc.status) == (passed, status)
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        {'macd_crossover': 1},
+        {'macd_above_signal': 1},
+        {'macd_hist_rising': 1},
+    ],
+)
+def test_any_one_macd_flag_passes_macd(values):
+    assert passed_indicators(flags(**values)) == ['macd']
+
+
+@pytest.mark.parametrize(
+    'flag', ['outperforms_market_1m', 'outperforms_market_3m', 'outperforms_sector_1m', 'outperforms_sector_3m']
+)
+def test_outperforming_on_any_one_comparison_passes_relative_strength(flag):
+    assert passed_indicators(flags(**{flag: 1})) == ['relative_strength']
+
+
+@pytest.mark.parametrize(
+    ('name', 'flag'),
+    [
+        ('moving_average_alignment', 'price_gt_20dma'),
+        ('moving_average_alignment', 'price_gt_50dma'),
+        ('moving_average_alignment', 'price_gt_200dma'),
+        ('ema_21_alignment', 'price_gt_21ema'),
+        ('ema_21_alignment', 'ema_21_rising'),
+        ('ema_21_alignment', 'price_gt_21wema'),
+        ('ema_21_alignment', 'ema_21w_rising'),
+    ],
+)
+@pytest.mark.parametrize('value', [0, None], ids=['failed', 'empty'])
+def test_an_alignment_fails_on_any_one_flag_failed_or_empty(name, flag, value):
+    assert passed_indicators(flags(**(passing(name) | {flag: value}))) == []
+
+
+def test_empty_flags_count_as_not_passed():
+    sc = with_status(flags())
+
+    assert (sc.secondary_passed, sc.status) == (0, CONFIRMED)
+
+
+def test_the_watchlist_needs_both_trend_conditions_and_a_close_near_resistance():
+    not_met = {'core_criteria_met': False, 'core_criteria_score': 3, 'breakout_20d': 0, 'near_resistance': 1}
+
+    assert with_status(flags(**not_met)).status == PRE_BREAKOUT
+    assert with_status(flags(**(not_met | {'price_gt_50dma': 0}))).status is None
+    assert with_status(flags(**(not_met | {'dma_50_rising': 0}))).status is None
+    assert with_status(flags(**(not_met | {'near_resistance': 0}))).status is None
+    assert with_status(flags(**(not_met | {'near_resistance': None}))).status is None
+
+
+def test_a_confirmed_breakout_near_a_higher_resistance_is_not_on_the_watchlist():
+    # above its 20-day high but within 5% below its 60-day one
+    assert with_status(flags(near_resistance=1)).status == CONFIRMED
+
+
+def test_a_status_counts_the_subsector_comparison():
+    # each passes the MACD and its closing strength, CCC's slower rise a tight base too; in one run BBB also
+    # outperforms the subsector median (test_returns_are_compared_with_the_subsector_median)
+    by_ticker = run_subsector({'AAA': rising(100), 'BBB': rising(100, step=2.0), 'CCC': rising(100, step=0.5)})
+
+    assert {t: passed_indicators(sc) for t, sc in by_ticker.items()} == {
+        'AAA': ['macd', 'closing_strength'],
+        'BBB': ['macd', 'relative_strength', 'closing_strength'],
+        'CCC': ['macd', 'consolidation_quality', 'closing_strength'],
+    }
+    assert {t: sc.secondary_passed for t, sc in by_ticker.items()} == {'AAA': 2, 'BBB': 3, 'CCC': 3}
 
 
 # --- How much history is needed ---------------------------------------------

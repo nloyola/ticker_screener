@@ -1,7 +1,7 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
-stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), and older
-databases are upgraded to all three.
+stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), and the
+status, and older databases are upgraded to all three.
 """
 
 import os
@@ -358,6 +358,34 @@ def test_upgrade_adds_benchmark_price_and_relative_strength_keeping_every_row(ve
         'SELECT id, ticker, core_criteria_score, close_position, near_resistance, return_1m_pct, rs_market_3m, '
         'outperforms_sector_1m FROM stock_criteria',
     ) == [(1, 'XOM', 4, 0.8, 1, None, None, None), (2, 'CVX', None, None, None, None, None, None)]
+
+
+@pytest.fixture
+def version_7_db(version_6_db) -> str:
+    """A database at version 7: the version 6 one with relative strength, without the status."""
+    con = open_connection(version_6_db)
+    try:
+        with con:
+            db.UPGRADES[6](con)
+            con.execute('PRAGMA user_version = 7')
+            con.execute("UPDATE stock_criteria SET rs_market_3m = 2.5, outperforms_sector_1m = 1 WHERE ticker = 'XOM'")
+    finally:
+        con.close()
+    return version_6_db
+
+
+def test_upgrade_adds_the_status_keeping_every_row(version_7_db, current_db):
+    upgrade_db(version_7_db)
+
+    assert _query(version_7_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_7_db, 'stock_criteria') == _table_sql(current_db, 'stock_criteria')
+    assert _query(
+        version_7_db,
+        'SELECT id, ticker, core_criteria_score, rs_market_3m, outperforms_sector_1m, secondary_passed, status '
+        'FROM stock_criteria',
+    ) == [(1, 'XOM', 4, 2.5, 1, None, None), (2, 'CVX', None, None, None, None, None)]
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(version_7_db, "UPDATE stock_criteria SET status = 'watchlist' WHERE ticker = 'XOM'")
 
 
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):

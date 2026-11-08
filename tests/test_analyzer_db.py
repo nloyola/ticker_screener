@@ -530,3 +530,26 @@ def test_analyze_stores_every_relative_strength_value(path, container):
         }
     )
     assert row['core_criteria_score'] == 4
+
+
+def test_analyze_stores_each_tickers_status(path, container):
+    # BRK breaks out on doubled volume; NEAR closes at 197, 1.5% under its 200 high; FALL closes lower every day
+    container.price_data_repo.bulk_insert(price_rows('BRK', TODAY))
+    near = price_rows('NEAR', TODAY, n=101)
+    container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1000)])
+    fall = price_rows('FALL', TODAY)
+    container.price_data_repo.bulk_insert([replace(row, close=300.0 - i) for i, row in enumerate(fall)])
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    with sqlite3.connect(path) as con:
+        rows = con.execute('SELECT ticker, core_criteria_score, secondary_passed, status FROM stock_criteria')
+        by_ticker = {ticker: (score, passed, status) for ticker, score, passed, status in rows}
+    # no high or low stored: closing strength and the base's range are empty, and 100 rows are too few for the
+    # 200-day average and the 21-week EMA. BRK passes the MACD above its signal line and, its returns above NEAR's,
+    # the subsector's median, so outperforms it; NEAR's drop puts its MACD under its signal line
+    assert by_ticker == {
+        'BRK': (4, 2, 'confirmed'),
+        'NEAR': (2, 0, 'pre_breakout'),
+        'FALL': (1, 0, None),
+    }

@@ -286,6 +286,24 @@ def _add_relative_strength(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE stock_criteria ADD COLUMN {column} {kind}')
 
 
+def _add_stock_criteria_status(con: sqlite3.Connection) -> None:
+    """
+    Version 8: stock_criteria gains secondary_passed and status, the breakout strategy's status of each ticker, left
+    NULL in the rows already stored until the next analyze replaces them. Adds only what the table lacks, so a table
+    schema.sql created this way is left as it is.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('stock_criteria')")}
+    if not columns:
+        return  # no table: schema.sql creates it this way
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    for column, kind in (
+        ('secondary_passed', 'INTEGER'),
+        ('status', "TEXT CHECK (status IN ('high_conviction', 'confirmed', 'pre_breakout'))"),
+    ):
+        if column not in columns:
+            con.execute(f'ALTER TABLE stock_criteria ADD COLUMN {column} {kind}')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -294,6 +312,7 @@ UPGRADES = (
     _add_stock_criteria_secondary_columns,
     _add_stock_criteria_price_action_columns,
     _add_relative_strength,
+    _add_stock_criteria_status,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

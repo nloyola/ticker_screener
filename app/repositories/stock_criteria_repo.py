@@ -69,6 +69,8 @@ COLUMNS = (
     'outperforms_market_3m',
     'outperforms_sector_1m',
     'outperforms_sector_3m',
+    'secondary_passed',
+    'status',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -154,6 +156,8 @@ def _row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_int(sc.outperforms_market_3m),  # INTEGER
         _as_int(sc.outperforms_sector_1m),  # INTEGER
         _as_int(sc.outperforms_sector_3m),  # INTEGER
+        _as_int(sc.secondary_passed),  # INTEGER
+        sc.status,
     )
 
 

@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- to this table: the fourth drops the columns of the core rules the breakout strategy removed (max_vol_10d, ema_10,
 -- dma_50_25d_ago, price_gt_10ema) and adds volume_ratio, the fifth renames rsi_50_75 and macd_bullish and adds the
 -- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, and the
--- seventh the relative strength columns after those, where ALTER TABLE places them; change both together.
+-- seventh the relative strength columns after those, and the eighth secondary_passed and status after those, where
+-- ALTER TABLE places them; change both together. status is the strategy's status (with_status in app/analyzer.py),
+-- NULL for a ticker with none.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -136,6 +138,8 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        outperforms_market_3m INTEGER,
        outperforms_sector_1m INTEGER,
        outperforms_sector_3m INTEGER,
+       secondary_passed INTEGER,
+       status TEXT CHECK (status IN ('high_conviction', 'confirmed', 'pre_breakout')),
        UNIQUE (ticker)
 );
 

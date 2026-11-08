@@ -118,3 +118,7 @@ class StockCriteria:
     outperforms_market_3m: int | None = None
     outperforms_sector_1m: int | None = None
     outperforms_sector_3m: int | None = None
+    # how many of the strategy's secondary indicators it passes (SECONDARY_INDICATORS in app/analyzer.py), and its
+    # status: 'high_conviction', 'confirmed', 'pre_breakout', or None for none
+    secondary_passed: int | None = None
+    status: str | None = None
