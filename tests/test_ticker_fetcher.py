@@ -25,6 +25,7 @@ from app.price_apis.http import (
     retry_delay,
 )
 from app.price_apis.tiingo import TiingoPrices
+from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
@@ -34,14 +35,28 @@ OLD_DAY = window_start(TODAY) - timedelta(days=1)
 
 
 class FakeApi:
-    """The parts of a price API (app.price_apis.PriceApi) every fake shares: Tiingo's name and markets, no quota."""
+    """
+    The parts of a price API (app.price_apis.PriceApi) every fake shares: Tiingo's name and markets, no quota, and
+    company names from 'names', each a name or an exception to raise (a ticker not in it has none), recording each
+    lookup in 'name_lookups'.
+    """
 
     name = 'Tiingo'
+    setting = 'tiingo'
     markets = frozenset({US})
     api_key = 'test-key'
+    names: dict[str, str | Exception] = {}  # replaced, never changed, by a test that wants names
+    name_lookups: list[str]
 
     def check_quota(self, needed: int) -> None:
         pass
+
+    def company_name(self, ticker: str) -> str | None:
+        self.__dict__.setdefault('name_lookups', []).append(ticker)
+        answer = self.names.get(ticker)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 def tiingo_rows(rows: list[tuple[date, float]]) -> list[DailyPrice]:
@@ -130,7 +145,10 @@ def repo(tmp_path) -> PriceDataRepo:
 
 def make_fetcher(repo: PriceDataRepo, api, subsectors: dict[int, list[str]]) -> TickerFetcher:
     container = SimpleNamespace(
-        price_api_client=api, sector_service=FakeSectorService(subsectors), price_data_repo=repo
+        price_api_client=api,
+        sector_service=FakeSectorService(subsectors),
+        price_data_repo=repo,
+        company_name_repo=CompanyNameRepo(SimpleNamespace(db_path=repo.db_path)),
     )
     fetcher = TickerFetcher(container)
     fetcher.sleep = lambda seconds: None
@@ -494,12 +512,13 @@ def test_tiingo_prices_raises_http_error_with_the_response():
 
 def test_timed_out_request_is_retried_and_then_succeeds(repo):
     body = f'[{{"date": "{days_ago(1).isoformat()}T00:00:00.000Z", "adjClose": 1.0, "adjVolume": 100}}]'.encode()
-    client, adapter = tiingo_prices([requests.ReadTimeout('read timed out'), tiingo_response(200, body)])
+    meta = tiingo_response(200, b'{"ticker": "cvx", "name": "Chevron Corp"}')
+    client, adapter = tiingo_prices([requests.ReadTimeout('read timed out'), tiingo_response(200, body), meta])
     fetcher = make_fetcher(repo, client, {1: ['CVX']})
 
     stats = fetcher.fetch()
 
-    assert len(adapter.sent) == 2
+    assert len(adapter.sent) == 3  # the prices twice, then the company name
     assert (stats.attempted, stats.failed) == (1, 0)
     assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]
 

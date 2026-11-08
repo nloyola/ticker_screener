@@ -27,6 +27,8 @@ class PriceApiStop(Exception):
 class PriceApi(Protocol):
     # the API's name, as log lines and messages show it
     name: str
+    # the PRICE_API setting that picks it, as the company_name table records where a name came from
+    setting: str
     # the markets (app.markets) whose tickers it can fetch
     markets: Collection[str]
     # the key it sends, so error messages that quote it back can be redacted
@@ -37,6 +39,14 @@ class PriceApi(Protocol):
         The ticker's rows from 'start' to 'end'; an empty list when the range holds no trading day. Raises requests'
         HTTPError for an error status, requests.Timeout when the API stops answering, and another error for a row
         that is not a price.
+        """
+        ...
+
+    def company_name(self, ticker: str) -> str | None:
+        """
+        The ticker's company name, or None when the API does not know the ticker or gives it no name. One request
+        (EODHD counts each search as one call). Raises requests' HTTPError for an error status, requests.Timeout when
+        the API stops answering, and ValueError for an answer of the wrong shape.
         """
         ...
 

@@ -1,6 +1,6 @@
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING
@@ -15,6 +15,7 @@ from app.redaction import redact
 from app.services.sector_service import normalize_ticker
 
 if TYPE_CHECKING:
+    from app.repositories.company_name_repo import CompanyNameRepo
     from app.repositories.price_data_repo import PriceDataRepo
     from app.services.sector_service import SectorService
 
@@ -98,17 +99,26 @@ class TickerFetcher:
     'FLAGGED ticker=<ticker> reason=not_found|no_prices [last=<date>]' line after its warning, where 'last' is the
     newest price date stored for it before this run, read now because a later 'prune' may delete every one of its
     rows (see app/progress.py). 'flagged' holds the tickers reported, so analyze does not report them again as stale.
+
+    After the prices, it looks up the company name of each ticker whose prices it stored in this run and that has no
+    name stored (company_name), one request per ticker, retried as a price request is, and stores each name as soon as
+    it is found, so an interrupted run keeps the names it found. A ticker whose download failed or held no trading day
+    is not looked up. A lookup that fails, or that finds no name, is logged and skipped: it never counts as attempted
+    or failed, so it cannot fail a run. Prints 'PROGRESS stage=names ticker=<done>/<total>' before the first lookup and
+    after each one, where the total is the number of tickers to look up, 0 when every one has a name.
     """
 
     def __init__(self, container: Container) -> None:
         self.api: PriceApi = container.price_api_client
         self.sector_service: SectorService = container.sector_service
         self.price_data_repo: PriceDataRepo = container.price_data_repo
+        self.company_name_repo: CompanyNameRepo = container.company_name_repo
 
         self.sleep: Callable[[float], None] = time.sleep
         self.strict = False
         self.stats = FetchStats()
         self._fetched: set[str] = set()
+        self._stored: list[str] = []
         self.flagged: set[str] = set()
 
     def fetch(
@@ -118,6 +128,7 @@ class TickerFetcher:
         self.strict = strict
         self.stats = FetchStats(api=self.api.name)
         self._fetched = set()
+        self._stored = []
         self.flagged = set()
         logger.info(f'price API: {self.api.name}')
 
@@ -139,6 +150,7 @@ class TickerFetcher:
 
         if self.stats.skipped:
             logger.info(f'skipped {self.stats.skipped} tickers not covered by {self.api.name}, stored rows kept')
+        self._look_up_names(self._stored)
         return self.stats
 
     def prune(self) -> int:
@@ -214,6 +226,7 @@ class TickerFetcher:
                 self.stats.failed += 1
             elif rows:
                 self.price_data_repo.replace_for_ticker(ticker, rows)
+                self._stored.append(ticker)
             else:
                 logger.warning(
                     f'no prices from {self.api.name} in the last {HISTORY_DAYS} days, likely delisted, '
@@ -226,6 +239,32 @@ class TickerFetcher:
         latest = self.price_data_repo.latest_for_ticker(ticker)
         report_flagged(ticker, reason, latest.date if latest else None)
         self.flagged.add(ticker)
+
+    def _look_up_names(self, tickers: Iterable[str]) -> None:
+        """Looks up and stores the names of the tickers that have none stored; see the class docstring."""
+        missing = self.company_name_repo.missing(tickers)
+        total = len(missing)
+        found = 0
+        report_progress('names', ticker=f'0/{total}')
+        for done, ticker in enumerate(missing, start=1):
+            name = self._look_up_name(ticker)
+            if name is not None:
+                self.company_name_repo.store(ticker, name, self.api.setting)
+                found += 1
+            report_progress('names', ticker=f'{done}/{total}')
+        if total:
+            logger.info(f'company names: found {found} of {total} missing on {self.api.name}')
+
+    def _look_up_name(self, ticker: str) -> str | None:
+        """The ticker's company name, or None when the API has none or the lookup fails, which is logged."""
+        try:
+            name = self._retrying(ticker, lambda: self.api.company_name(ticker))
+        except Exception as e:
+            logger.warning(f'⚠️ company name of {ticker} not looked up on {self.api.name}: {self._redact(e)}')
+            return None
+        if name is None:
+            logger.info(f'no company name on {self.api.name} for {ticker}')
+        return name
 
     def _fetch_ticker_data(self, subsector_id: int, ticker: str) -> list[PriceData] | None:
         """Returns the ticker's rows for the whole window, or None when the download fails."""
@@ -246,7 +285,9 @@ class TickerFetcher:
                     close=price.close,
                     volume=price.volume,
                 )
-                for price in self._get_prices(ticker, fetch_start_date, fetch_end_date)
+                for price in self._retrying(
+                    ticker, lambda: self.api.daily_prices(ticker, fetch_start_date, fetch_end_date)
+                )
             ]
         except Exception as e:
             # a failed request, or a row that is not a price
@@ -257,11 +298,11 @@ class TickerFetcher:
                 self._flag(ticker, NOT_FOUND)
             return None
 
-    def _get_prices(self, ticker: str, start: date, end: date):
-        """Requests the ticker's prices, retrying transient errors; raises the last error once the attempts run out."""
+    def _retrying[T](self, ticker: str, request: Callable[[], T]) -> T:
+        """Makes the ticker's request, retrying transient errors; raises the last error once the attempts run out."""
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                return self.api.daily_prices(ticker, start, end)
+                return request()
             except Exception as e:
                 if attempt == RETRY_ATTEMPTS or not is_transient(e):
                     raise

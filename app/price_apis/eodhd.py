@@ -1,20 +1,29 @@
-"""Daily prices from EODHD, which covers US and Canadian tickers."""
+"""Daily prices and company names from EODHD, which covers US and Canadian tickers."""
 
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from urllib.parse import quote
 
 import requests
 
+from app.config import EODHD
 from app.markets import CANADA, US, market_of
 from app.price_apis import DailyPrice, PriceApiStop
-from app.price_apis.http import CONNECT_TIMEOUT, READ_TIMEOUT, error_detail, response_of
+from app.price_apis.http import CONNECT_TIMEOUT, READ_TIMEOUT, company_name_of, error_detail, response_of
 from app.redaction import redact
 
 logger = logging.getLogger(__name__)
 
 EODHD_EOD_URL = 'https://eodhd.com/api/eod/{symbol}'
 EODHD_USER_URL = 'https://eodhd.com/api/user'
+EODHD_SEARCH_URL = 'https://eodhd.com/api/search/{code}'
+# the matches a search asks for, EODHD's most: search is fuzzy and ranks matches by popularity, so the exact listing
+# must not fall off the end behind the popular names a short symbol matches on the same exchange
+SEARCH_LIMIT = 500
+# the exchange codes EODHD's search gives the listings of each suffix: one code for every US exchange
+SEARCH_EXCHANGES = {'.TO': 'TO', '.V': 'V'}
+US_EXCHANGE = 'US'
 # the usage check is a courtesy before the run: it must not hold the run up for long
 USAGE_TIMEOUT = (5.0, 10.0)
 
@@ -22,6 +31,17 @@ USAGE_TIMEOUT = (5.0, 10.0)
 def eodhd_symbol(ticker: str) -> str:
     """The symbol EODHD knows a ticker by: a bare (US) ticker gets '.US', a Canadian one is sent as written."""
     return ticker if market_of(ticker) == CANADA else f'{ticker}.US'
+
+
+def search_listing(ticker: str) -> tuple[str, str]:
+    """
+    The symbol EODHD's search knows a ticker by and the exchange code its listing has, as the dashboard's runner looks
+    tickers up (internal/runner/eodhd.go): SHOP.TO is SHOP on TO, ABC.V is ABC on V, and a bare ticker is itself on US.
+    """
+    for suffix, exchange in SEARCH_EXCHANGES.items():
+        if ticker.endswith(suffix):
+            return ticker.removesuffix(suffix), exchange
+    return ticker, US_EXCHANGE
 
 
 @dataclass(frozen=True)
@@ -50,6 +70,7 @@ class EodhdPrices:
     """
 
     name = 'EODHD'
+    setting = EODHD
     markets = frozenset({US, CANADA})
 
     def __init__(self, api_key: str) -> None:
@@ -74,6 +95,39 @@ class EodhdPrices:
             )
             for row in rows
         ]
+
+    def company_name(self, ticker: str) -> str | None:
+        """
+        The name of the ticker's listing on its own exchange, from EODHD's search (one call), which looks on that
+        exchange alone; None for a 404 or when no match has exactly the ticker's symbol there.
+        """
+        code, exchange = search_listing(ticker)
+        response = self.session.get(
+            EODHD_SEARCH_URL.format(code=quote(code, safe='')),
+            params={'exchange': exchange, 'limit': SEARCH_LIMIT, 'fmt': 'json', 'api_token': self.api_key},
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return self.to_name(response.json(), code, exchange)
+
+    @staticmethod
+    def to_name(matches: object, code: str, exchange: str) -> str | None:
+        """
+        The name of the match with symbol 'code' on 'exchange', comparing the symbol ignoring case and the exchange
+        exactly, as the runner does; None when no match has both.
+        """
+        if not isinstance(matches, list):
+            raise ValueError(f'unexpected answer from EODHD search: {type(matches).__name__}, not a list')
+        for match in matches:
+            if (
+                isinstance(match, dict)
+                and str(match.get('Code') or '').strip().upper() == code.upper()
+                and str(match.get('Exchange') or '').strip() == exchange
+            ):
+                return company_name_of(match.get('Name'))
+        return None
 
     def usage(self) -> EodhdUsage:
         """The account's usage from /api/user, which costs no call. Raises requests' errors, or ValueError."""

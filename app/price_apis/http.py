@@ -1,4 +1,7 @@
-"""The HTTP details every price API shares: timeouts, which errors are worth retrying, and how errors are reported."""
+"""
+The HTTP details every price API shares: timeouts, which errors are worth retrying, how errors are reported, and how a
+company name is cleaned.
+"""
 
 import random
 from collections.abc import Callable
@@ -48,6 +51,12 @@ def _error_detail(error: Exception) -> str:
     if len(detail) > ERROR_DETAIL_LIMIT:
         detail = detail[: ERROR_DETAIL_LIMIT - 1] + '…'
     return f'{error}: {detail}' if detail else str(error)
+
+
+def company_name_of(value: object) -> str | None:
+    """A company name as an API gives it, with its whitespace collapsed; None when there is none."""
+    name = ' '.join(str(value).split()) if value is not None else ''
+    return name or None
 
 
 def is_transient(error: Exception) -> bool:

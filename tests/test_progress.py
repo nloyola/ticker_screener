@@ -86,6 +86,7 @@ def make_fetcher(sectors: list[SectorAggregate]) -> TickerFetcher:
         price_api_client=SimpleNamespace(name='Tiingo', markets=frozenset({'US'}), check_quota=lambda needed: None),
         sector_service=FakeSectorService(sectors),
         price_data_repo=SimpleNamespace(replace_for_ticker=lambda ticker, rows: None, latest_for_ticker=lambda t: None),
+        company_name_repo=SimpleNamespace(missing=lambda tickers: []),
     )
     fetcher = TickerFetcher(container)
     fetcher._fetch_ticker_data = lambda subsector_id, ticker: []
@@ -107,6 +108,7 @@ def test_fetch_counts_subsectors_across_sectors(capsys):
         'PROGRESS stage=fetch subsector=1/3',
         'PROGRESS stage=fetch subsector=2/3',
         'PROGRESS stage=fetch subsector=3/3',
+        'PROGRESS stage=names ticker=0/0',
     ]
 
 
@@ -116,6 +118,7 @@ def test_fetch_total_is_the_filtered_sectors_subsectors(capsys):
     assert progress_lines(capsys.readouterr().out) == [
         'PROGRESS stage=fetch subsector=0/1',
         'PROGRESS stage=fetch subsector=1/1',
+        'PROGRESS stage=names ticker=0/0',
     ]
 
 
@@ -125,13 +128,17 @@ def test_fetch_one_ticker_is_one_subsector(capsys):
     assert progress_lines(capsys.readouterr().out) == [
         'PROGRESS stage=fetch subsector=0/1',
         'PROGRESS stage=fetch subsector=1/1',
+        'PROGRESS stage=names ticker=0/0',
     ]
 
 
 def test_fetch_with_no_subsectors_reports_zero_total(capsys):
     make_fetcher([]).fetch()
 
-    assert progress_lines(capsys.readouterr().out) == ['PROGRESS stage=fetch subsector=0/0']
+    assert progress_lines(capsys.readouterr().out) == [
+        'PROGRESS stage=fetch subsector=0/0',
+        'PROGRESS stage=names ticker=0/0',
+    ]
 
 
 def test_analyze_reports_start_and_done(capsys):

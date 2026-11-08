@@ -201,12 +201,13 @@ def test_run_refresh_stopped_by_eodhd_exits_1_without_pruning_or_analyzing(repo,
 )
 def test_eodhd_usage_check_that_fails_otherwise_warns_and_carries_on(repo, caplog, failure):  # noqa: F811
     usage_failure = failure if isinstance(failure, Exception) else answer(500, {}, 'https://eodhd.com/api/user')
-    client, adapter = eodhd([usage_failure, eod_answer([(days_ago(1), 10.0, 5)])])
+    search = answer(200, [{'Code': 'AAPL', 'Exchange': 'US', 'Name': 'Apple Inc'}], 'https://eodhd.com/api/search/AAPL')
+    client, adapter = eodhd([usage_failure, eod_answer([(days_ago(1), 10.0, 5)]), search])
 
     stats = make_fetcher(repo, client, {1: ['AAPL']}).fetch(strict=True)
 
     assert (stats.attempted, stats.failed) == (1, 0)
-    assert len(adapter.sent) == 2
+    assert len(adapter.sent) == 3  # the usage check, the prices and the company name
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and 'EODHD usage check failed, carrying on' in warnings[0]
     assert EODHD_KEY not in caplog.text

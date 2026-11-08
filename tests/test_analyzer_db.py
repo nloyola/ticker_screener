@@ -18,6 +18,7 @@ from app.db import init_db
 from app.markets import US
 from app.models import PriceData
 from app.price_apis import DailyPrice
+from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
@@ -59,6 +60,7 @@ def path(tmp_path) -> str:
 def container(path) -> SimpleNamespace:
     container = SimpleNamespace(db_path=path)
     container.price_data_repo = PriceDataRepo(container)
+    container.company_name_repo = CompanyNameRepo(container)
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.analyzer = Analyzer(container)
     return container
@@ -134,11 +136,15 @@ class TiingoStub:
     """A Tiingo that answers every US ticker with 101 rising closes ending today."""
 
     name = 'Tiingo'
+    setting = 'tiingo'
     markets = frozenset({US})
     api_key = 'test-key'
 
     def check_quota(self, needed: int) -> None:
         pass
+
+    def company_name(self, ticker: str) -> str | None:
+        return f'{ticker} Inc.'
 
     def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
         return [DailyPrice(date=p.date, close=p.close, volume=p.volume) for p in price_rows(ticker, TODAY, n=101)]
