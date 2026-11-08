@@ -179,7 +179,7 @@ def test_run_refresh_stopped_by_eodhd_exits_1_without_pruning_or_analyzing(repo,
     container = SimpleNamespace(
         db_path=str(tmp_path / 'stock_data.db'),
         ticker_fetcher=fetcher,
-        analyzer=SimpleNamespace(analyze=lambda: analyzed.append(True)),
+        analyzer=SimpleNamespace(now=lambda: None, analyze=lambda **_: analyzed.append(True)),
     )
     cmd = RunRefreshCmd()
     parser = argparse.ArgumentParser()

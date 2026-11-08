@@ -45,6 +45,9 @@ class RunRefreshCmd(BaseCommand):
     def handle(self, args: argparse.Namespace, container: Container) -> None:
         ticker_fetcher: TickerFetcher = container.ticker_fetcher
         analyzer: Analyzer = container.analyzer
+        # which sessions are complete is judged by when the run started, not when analyze does: a session still in
+        # progress now is in progress in what the fetch downloads, however late the fetch ends
+        started_at = analyzer.now()
         try:
             with screener_lock(container.db_path):
                 stats = fetch_or_exit(ticker_fetcher, strict=True)
@@ -54,7 +57,9 @@ class RunRefreshCmd(BaseCommand):
                 ticker_fetcher.prune()
                 # only the markets this run fetched: another market's scores would be restamped as current; and a
                 # ticker the fetch flagged is not flagged again as stale or frozen
-                analyzer.analyze(fetched_by=ticker_fetcher.api, already_flagged=ticker_fetcher.flagged)
+                analyzer.analyze(
+                    fetched_by=ticker_fetcher.api, already_flagged=ticker_fetcher.flagged, started_at=started_at
+                )
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)
             sys.exit(EXIT_LOCK_HELD)

@@ -1,6 +1,6 @@
 import logging
-from collections.abc import Collection
-from datetime import date, datetime
+from collections.abc import Callable, Collection
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -8,7 +8,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 from app.container import Container
-from app.markets import MARKETS, UnsupportedTicker, market_of
+from app.markets import MARKET_CLOSES, MARKETS, PUBLISH_DELAY, UnsupportedTicker, last_complete_session, market_of
 from app.models import StockCriteria
 from app.progress import FROZEN, STALE, report_flagged, report_progress
 
@@ -47,22 +47,39 @@ def frozen_since(df: pd.DataFrame) -> date | None:
     return dates[len(dates) - flat]
 
 
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class Analyzer:
-    def __init__(self, container: Container) -> None:
+    def __init__(self, container: Container, now: Callable[[], datetime] = utc_now) -> None:
         self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
         self.price_data_repo: PriceDataRepo = container.price_data_repo
+        # the clock a run's start is read from, timezone aware
+        self.now = now
 
-    def analyze(self, fetched_by: 'PriceApi | None' = None, already_flagged: Collection[str] = ()) -> None:
+    def analyze(
+        self,
+        fetched_by: 'PriceApi | None' = None,
+        already_flagged: Collection[str] = (),
+        started_at: datetime | None = None,
+    ) -> None:
         """
         Scores the tickers of every market, or, after a fetch, only those of the markets 'fetched_by' covers (see
-        _analyze). Prints 'PROGRESS stage=analyze status=start' before the work and 'status=done' after it.
+        _analyze), on the sessions complete when the run started: 'started_at', or now when it is None. Prints
+        'PROGRESS stage=analyze status=start' before the work and 'status=done' after it.
         """
         report_progress('analyze', status='start')
-        self._analyze(fetched_by, already_flagged)
+        self._analyze(fetched_by, already_flagged, started_at if started_at is not None else self.now())
         report_progress('analyze', status='done')
 
-    def _analyze(self, fetched_by: 'PriceApi | None', already_flagged: Collection[str]) -> None:
+    def _analyze(self, fetched_by: 'PriceApi | None', already_flagged: Collection[str], started_at: datetime) -> None:
         """
+        Only completed daily candles are scored. A run started before a market's close plus the price APIs'
+        publishing delay (app/markets.py) fetched that day's row while the session was still in progress, or before
+        its final values were published, so each of that market's rows dated after its last complete session is
+        dropped first, with one line saying how many: a run during market hours scores the previous session.
+
         Each ticker is judged against the newest price date of its own market (app/markets.py), since the markets
         close on different holidays: a US ticker is never left unscored because Canada traded on a US holiday.
 
@@ -99,6 +116,9 @@ class Analyzer:
             if fetched_by is not None and market not in fetched_by.markets:
                 print(f'{market}: not scored, not fetched by this run ({fetched_by.name})')
                 continue
+            groups = self._complete_sessions(market, groups, started_at)
+            if not groups:
+                continue
             newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
             stale = 0
             frozen = 0
@@ -130,6 +150,31 @@ class Analyzer:
         items: list[StockCriteria] = [sc for sc in results if sc is not None]
         date_created = datetime.now().date()
         self.save_to_repository(items, date_created)
+
+    @staticmethod
+    def _complete_sessions(
+        market: str, groups: list[tuple[str, pd.DataFrame]], started_at: datetime
+    ) -> list[tuple[str, pd.DataFrame]]:
+        """
+        Each ticker's rows of 'market' without those dated after its last complete session for a run started at
+        'started_at', leaving out a ticker with no row left. Prints one line when it drops any.
+        """
+        last = last_complete_session(market, started_at)
+        kept: list[tuple[str, pd.DataFrame]] = []
+        dropped = 0
+        for ticker, group_df in groups:
+            complete = group_df.index.get_level_values('date') <= last
+            dropped += int((~complete).sum())
+            if complete.any():
+                kept.append((ticker, group_df[complete].copy()))
+        if dropped:
+            zone, close = MARKET_CLOSES[market]
+            final_at = (datetime.combine(last, close) + PUBLISH_DELAY).time()
+            print(
+                f'{market}: dropped {dropped} row{"" if dropped == 1 else "s"} dated after {last}, '
+                f'whose candles are final only after {final_at:%H:%M} {zone.key} that day'
+            )
+        return kept
 
     def load_price_data(self) -> pd.DataFrame | None:
         # Pull all rows via the repository

@@ -1,13 +1,15 @@
 """
 Which tickers analyze scores, against a real database: a stale or frozen ticker keeps its previous stock_criteria
-row, date_created included, freshness is judged per market, and run-refresh scores only the markets it fetched.
+row, date_created included, freshness is judged per market, run-refresh scores only the markets it fetched, and a
+run started before a market's day is complete scores that market's previous session.
 """
 
 import argparse
 import sqlite3
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -26,6 +28,11 @@ from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
 TODAY = date.today()
 LAST_RUN = TODAY - timedelta(days=3)
+
+NEW_YORK = ZoneInfo('America/New_York')
+# runs started while the US and Canadian markets are open, and in the evening once both have published TODAY's rows
+MARKET_HOURS = datetime.combine(TODAY, time(11), tzinfo=NEW_YORK)
+EVENING = datetime.combine(TODAY, time(20), tzinfo=NEW_YORK)
 
 
 def price_rows(ticker: str, last_day: date, n: int = 100) -> list[PriceData]:
@@ -62,7 +69,7 @@ def container(path) -> SimpleNamespace:
     container.price_data_repo = PriceDataRepo(container)
     container.company_name_repo = CompanyNameRepo(container)
     container.stock_criteria_repo = StockCriteriaRepo(container)
-    container.analyzer = Analyzer(container)
+    container.analyzer = Analyzer(container, now=lambda: EVENING)
     return container
 
 
@@ -328,3 +335,58 @@ def test_ticker_both_stale_and_frozen_is_flagged_once_as_stale(path, container, 
     out = capsys.readouterr().out
     assert summary_lines(out) == [f'US: skipped 1 stale ticker (last price before {TODAY}) and 0 frozen tickers']
     assert flagged_lines(out) == [f'FLAGGED ticker=VERO reason=stale last={yesterday}']
+
+
+def test_run_during_market_hours_scores_the_previous_session(path, container, capsys):
+    # the fetch stored a row for TODAY, a session still in progress, for both markets
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY))
+    container.price_data_repo.bulk_insert(price_rows('LATE', TODAY - timedelta(days=1)))
+
+    container.analyzer.analyze(started_at=MARKET_HOURS)
+
+    # 198.0 is the close of the day before TODAY; LATE, which has no row for TODAY, is current, not stale
+    assert criteria(path) == {
+        'AAA': (198.0, TODAY.isoformat()),
+        'LATE': (199.0, TODAY.isoformat()),
+        'SHOP.TO': (198.0, TODAY.isoformat()),
+    }
+    yesterday = TODAY - timedelta(days=1)
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [
+        f'US: dropped 1 row dated after {yesterday}, whose candles are final only after 19:00 America/New_York '
+        'that day',
+        f'US: skipped 0 stale tickers (last price before {yesterday}) and 0 frozen tickers',
+        f'Canada: dropped 1 row dated after {yesterday}, whose candles are final only after 19:00 America/Toronto '
+        'that day',
+        f'Canada: skipped 0 stale tickers (last price before {yesterday}) and 0 frozen tickers',
+    ]
+    assert flagged_lines(out) == []
+
+
+def test_run_in_the_evening_scores_that_day(path, container, capsys):
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    container.price_data_repo.bulk_insert(price_rows('LATE', TODAY - timedelta(days=1)))
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    assert criteria(path) == {'AAA': (199.0, TODAY.isoformat())}
+    out = capsys.readouterr().out
+    assert summary_lines(out) == [f'US: skipped 1 stale ticker (last price before {TODAY}) and 0 frozen tickers']
+    assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={TODAY - timedelta(days=1)}']
+
+
+def test_run_refresh_judges_completeness_by_when_it_started(path, container):
+    # the refresh starts during market hours and its fetch ends in the evening: TODAY's row is still not final
+    clock = iter([MARKET_HOURS, EVENING])
+    container.analyzer = Analyzer(container, now=lambda: next(clock))
+    container.price_api_client = TiingoStub()
+    container.sector_service = SectorServiceStub(['AAA'])
+    container.ticker_fetcher = TickerFetcher(container)
+    cmd = RunRefreshCmd()
+    parser = argparse.ArgumentParser()
+    cmd.add_arguments(parser)
+    cmd.handle(parser.parse_args([]), container)
+
+    # TiingoStub's closes run from 100.0 to 200.0 on TODAY; 199.0 is the day before's
+    assert criteria(path) == {'AAA': (199.0, TODAY.isoformat())}

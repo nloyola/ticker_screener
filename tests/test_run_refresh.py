@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,8 @@ import pytest
 from app.commands.run_refresh_cmd import EXIT_LOCK_HELD, RunRefreshCmd
 from app.screener_lock import ScreenerLockHeld, lock_path, screener_lock
 from app.ticker_fetcher import FetchStats
+
+STARTED_AT = datetime(2026, 11, 9, 15, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -85,7 +88,10 @@ def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleName
         db_path=db_path,
         ticker_fetcher=fetcher,
         analyzer=SimpleNamespace(
-            analyze=lambda fetched_by=None, already_flagged=(): analyzed.append((fetched_by, already_flagged))
+            now=lambda: STARTED_AT,
+            analyze=lambda fetched_by=None, already_flagged=(), started_at=None: analyzed.append(
+                (fetched_by, already_flagged, started_at)
+            ),
         ),
     )
     return RunRefreshCmd(), container, fetcher, analyzed
@@ -104,8 +110,9 @@ def test_fetches_strictly_then_analyzes(db_path):
 
     assert fetcher.calls == [{'strict': True}]
     assert fetcher.prunes == 1
-    # analyze scores only the markets this run's API fetched, and does not flag again what the fetch flagged
-    assert analyzed == [(fetcher.api, {'GONE'})]
+    # analyze scores only the markets this run's API fetched, does not flag again what the fetch flagged, and
+    # judges which sessions are complete by when the run started
+    assert analyzed == [(fetcher.api, {'GONE'}, STARTED_AT)]
 
 
 @pytest.mark.parametrize(
