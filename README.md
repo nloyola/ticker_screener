@@ -16,11 +16,12 @@ A ticker's market is read from the ticker itself (`app/markets.py`): a bare tick
 
 The markets close on different holidays, so freshness is judged per market:
 
+- `analyze` scores only completed daily candles. A market's day is complete 3 hours after its 16:00 close (`MARKET_CLOSES` and `PUBLISH_DELAY` in `app/markets.py`), when both price APIs have published its final prices; a run started before then, in that market's time zone, first drops the rows dated that day, so a run during market hours scores the previous session. `run-refresh` judges this by when it started, not when its `analyze` begins.
 - `analyze` compares each ticker with the newest price date of its own market, so a US holiday on which Canada traded leaves no US ticker unscored, and the reverse.
 - `run-refresh` scores only the markets its API fetched. The other market's tickers keep their previous `stock_criteria` rows and `date_created`, so their scores are never restamped as current. A standalone `analyze` scores every market.
 - The 400-day cleanup after a strict fetch deletes old rows only in the markets the API fetched: a Tiingo run leaves Canadian prices alone.
 
-`analyze` prints one summary line per market that has prices: `US: skipped 1 stale ticker (last price before 2026-11-06) and 13 frozen tickers` for a scored market, and `Canada: not scored, not fetched by this run (Tiingo)` for one a refresh left out.
+`analyze` prints one summary line per market that has prices: `US: skipped 1 stale ticker (last price before 2026-11-06) and 13 frozen tickers` for a scored market, and `Canada: not scored, not fetched by this run (Tiingo)` for one a refresh left out. Before the summary, a market whose day is not yet complete gets a line saying how many rows it dropped: `US: dropped 1202 rows dated after 2026-11-05, whose candles are final only after 19:00 America/New_York that day`.
 
 Its exit code tells a caller what happened:
 
