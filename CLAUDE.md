@@ -48,7 +48,7 @@ uv run ruff check .                            # lint
 uv run ruff format .                           # format
 ```
 
-The tests in `tests/` cover what the parent's admin pages rely on, the `PROGRESS` and `FLAGGED` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, the core criteria and secondary indicators `analyze` computes (`tests/test_analyzer.py`, made-up price series checked against hand-worked values, and `tests/test_analyzer_db.py`, which reads every secondary indicator back from `stock_criteria`), which tickers `analyze` and the cleanup touch in each market (`tests/test_analyzer_db.py`, `tests/test_ticker_fetcher.py`), and that `analyze` scores only completed daily candles (`tests/test_markets.py`, `tests/test_analyzer_db.py`).
+The tests in `tests/` cover what the parent's admin pages rely on, the `PROGRESS` and `FLAGGED` lines (`app/progress.py`) and `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, the core criteria, secondary indicators and statuses `analyze` computes (`tests/test_analyzer.py`, made-up price series checked against hand-worked values, and `tests/test_analyzer_db.py`, which reads every secondary indicator and the status back from `stock_criteria`), which tickers `analyze` and the cleanup touch in each market (`tests/test_analyzer_db.py`, `tests/test_ticker_fetcher.py`), and that `analyze` scores only completed daily candles (`tests/test_markets.py`, `tests/test_analyzer_db.py`).
 
 ## Git Workflow
 
