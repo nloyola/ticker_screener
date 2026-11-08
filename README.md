@@ -6,6 +6,8 @@ Fetches stock price data from Tiingo or EODHD, computes the screening criteria a
 
 `run-refresh` is the one way to refresh the market data: the stock_analyzer admin pages run it, and so should an operator running the screener by hand. It runs `ticker-fetcher --strict`, deletes the price rows older than 120 days once that fetch has succeeded, and then runs `analyze`, while holding an exclusive lock on `screener.lock` in the directory of the database file (`DB_NAME`), so two refreshes never write the same database at once. `--max-failure-rate` works as it does for `ticker-fetcher`. Every fetch downloads each ticker's last 120 days and replaces its stored rows, since both APIs restate past adjusted closes after a split or dividend; a request that meets a 429, a 5xx or a failed connection is tried up to 3 times, with backoff and the API's `Retry-After`, while any other error (a 404 for an unknown ticker) fails at once; a ticker whose download still fails keeps its rows, and one whose download holds no day in the 120 is logged at WARNING as likely delisted. A ticker the API answers with a 404, one with no day in the 120, and every stale or frozen ticker below are also reported on a `FLAGGED` line (see [Flagged tickers](#flagged-tickers)). `analyze` then leaves that ticker unscored: any ticker whose last price is older than the newest one in its market keeps its previous `stock_criteria` row and its `date_created`, logged at WARNING, and the count is printed in the analyze summary. So does a frozen ticker, whose last 10 trading days all have one close and zero volume: Tiingo keeps repeating the last close of a ticker that stopped trading, so its rows look current while its price is not.
 
+After the prices, every fetch looks up the company name of each ticker whose prices it stored and that has no name in `company_name` yet: Tiingo's metadata (`/tiingo/daily/<TICKER>`), or EODHD's search on the ticker's own exchange (`US`, `TO` or `V`), keeping only the match with exactly its symbol. That is one extra request per such ticker, about one per listed ticker on the first run and then only for tickers added since; a name once stored is never looked up again. Each name is stored as soon as it is found, so an interrupted run keeps what it found. A lookup that fails, after the same retries as a price request, is logged at WARNING and skipped, and one that finds no name is logged at INFO: neither counts as a failed ticker, so names never fail a run or push it over `--max-failure-rate`.
+
 ## Price APIs and markets
 
 The `PRICE_API` setting (`tiingo`, the default, or `eodhd`), read from the environment or `.env` like the keys, picks the API `ticker-fetcher` and `run-refresh` fetch from; only that API's key is needed. One run never mixes the two, and never falls back from one to the other.
@@ -49,18 +51,22 @@ The lines printed today:
 | Command | Line | Meaning |
 |---|---|---|
 | `ticker-fetcher` | `PROGRESS stage=fetch subsector=<done>/<total>` | `<total>` is the number of subsectors this run fetches (after `--sector`; `1` with `--ticker`), and `<done>` how many are finished. Printed once with `0/<total>` before the first subsector, then after each one, so the last line is `<total>/<total>`. |
+| `ticker-fetcher` | `PROGRESS stage=names ticker=<done>/<total>` | After the fetch: `<total>` is the number of tickers whose company name it looks up (those it stored prices for that have no name yet, `0` when every one has a name), and `<done>` how many lookups are finished, found or not. Printed once with `0/<total>` before the first lookup, then after each one, so the last line is `<total>/<total>`. |
 | `analyze` | `PROGRESS stage=analyze status=start` | Printed before the analysis starts. |
 | `analyze` | `PROGRESS stage=analyze status=done` | Printed when the analysis finishes. |
 
-A run that stops early - an unknown `--sector` or `--ticker`, or an error - may print no `fetch` line, or stop short of `<total>/<total>` or `status=done`.
+A run that stops early - an unknown `--sector` or `--ticker`, or an error - may print no `fetch` or `names` line, or stop short of `<total>/<total>` or `status=done`.
 
-For example, a fetch over three subsectors followed by an analysis prints, among its log lines:
+For example, a fetch over three subsectors that stores prices for two tickers with no name yet, followed by an analysis, prints, among its log lines:
 
 ```
 PROGRESS stage=fetch subsector=0/3
 PROGRESS stage=fetch subsector=1/3
 PROGRESS stage=fetch subsector=2/3
 PROGRESS stage=fetch subsector=3/3
+PROGRESS stage=names ticker=0/2
+PROGRESS stage=names ticker=1/2
+PROGRESS stage=names ticker=2/2
 PROGRESS stage=analyze status=start
 PROGRESS stage=analyze status=done
 ```

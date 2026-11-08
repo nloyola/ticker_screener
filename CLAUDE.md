@@ -6,7 +6,7 @@ The ticker screener: a **Python 3.12** command line program (managed with **uv**
 
 This repo is checked out as a git submodule at `screener/` in [nloyola/stock_analyzer](https://github.com/nloyola/stock_analyzer), a Go web app that reads the same database and renders the dashboard. The two programs share one `stock_data.db`:
 
-- The screener owns the schema and fills the market data tables: `ticker`, `price_data`, `stock_criteria` and `metadata` (`MARKET_DATA_TABLES` in `app/db.py`). It also owns `company_name`, each ticker's company name, which is not market data: `db-init` keeps it.
+- The screener owns the schema and fills the market data tables: `ticker`, `price_data`, `stock_criteria` and `metadata` (`MARKET_DATA_TABLES` in `app/db.py`). It also owns `company_name`, each ticker's company name, which is not market data: `db-init` keeps it. `ticker-fetcher` fills in the names missing for the tickers it fetched (README.md, "Refreshing the database").
 - The Go app's admin pages are the source of truth for `sector` and `subsector`, the sectors, subsectors and tickers the screener fetches. The `import` command still deletes and rebuilds both tables from a spreadsheet, undoing every admin edit, until it is retired or made to merge.
 - The Go app also keeps its own tables (`admin_user`, `admin_session`, `analyzer_schema_migration`) in the same file. The screener must never touch them, and `db-init` must never drop or empty them.
 - The Go app's tests use a verbatim copy of `schema.sql` (`internal/repo/testdata/screener_schema.sql` in the parent, checked by its `make schema:check`), so a schema change here needs a matching change there.
@@ -22,7 +22,7 @@ Under `app/`, wired together by a small dependency-injection container:
 - **repositories/** - One repository per table, hand-written SQL.
 - **services/** - Logic over the repositories (`SectorService`).
 - **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py** - The work behind the `analyze`, `ticker-fetcher` and `ticker-sync` commands.
-- **price_apis/** - The price APIs behind one interface (`PriceApi`): `tiingo.py` (US tickers only) and `eodhd.py` (US and Canadian), with the HTTP retry and error helpers they share in `http.py`. Only `wiring.py` picks one, from `PRICE_API`, so either can be deleted cleanly.
+- **price_apis/** - The price APIs behind one interface (`PriceApi`: daily prices, a company name, a quota check): `tiingo.py` (US tickers only) and `eodhd.py` (US and Canadian), with the HTTP retry and error helpers they share in `http.py`. Only `wiring.py` picks one, from `PRICE_API`, so either can be deleted cleanly.
 - **markets.py** - `market_of()`, the market rule: a bare ticker is US, `.TO` and `.V` are Canada, any other suffix is refused; `market_sql()` is the same rule as an SQL expression, for the repositories. `analyze` judges each ticker's freshness against its own market's newest price date, `run-refresh` scores and prunes only the markets its API fetched, and a standalone `analyze` scores every market (README.md, "Price APIs and markets").
 - **redaction.py** - `redact()`, which masks the API keys and any `api_token=` value, applied to every log record by the `stdout` handler's filter and to a crash's traceback by `main.py`'s `sys.excepthook`.
 - **commands/** - One `BaseCommand` subclass per CLI subcommand: a name, its arguments, the config keys it needs (`REQUIRED_CONFIG`, `DB_NAME` by default) and `handle(args, container)`, which takes its workers from the container. Registering a command builds nothing.
