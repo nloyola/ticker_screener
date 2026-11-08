@@ -10,6 +10,10 @@ After the tickers, every fetch downloads the broad-market benchmark of each mark
 
 After the prices, every fetch looks up the company name of each ticker whose prices it stored and that has no name in `company_name` yet: Tiingo's metadata (`/tiingo/daily/<TICKER>`), or EODHD's search on the ticker's own exchange (`US`, `TO` or `V`), keeping only the match with exactly its symbol. That is one extra request per such ticker, about one per listed ticker on the first run and then only for tickers added since; a name once stored is never looked up again. Each name is stored as soon as it is found, so an interrupted run keeps what it found. A lookup that fails, after the same retries as a price request, is logged at WARNING and skipped, and one that finds no name is logged at INFO: neither counts as a failed ticker, so names never fail a run or push it over `--max-failure-rate`.
 
+## Upgrading the schema
+
+Every command brings the database's schema up to date before it opens it (`upgrade_db` in `app/db.py`). `db-upgrade` does only that, and fails when the database file is missing. The stock_analyzer release runs it before the dashboard starts, since the dashboard reads the columns the upgrades add and never upgrades the database itself.
+
 ## Price APIs and markets
 
 The `PRICE_API` setting (`tiingo`, the default, or `eodhd`), read from the environment or `.env` like the keys, picks the API `ticker-fetcher` and `run-refresh` fetch from; only that API's key is needed. One run never mixes the two, and never falls back from one to the other.

@@ -454,6 +454,42 @@ def test_every_command_upgrades_the_database_first(old_db):
     assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == UPGRADED_ROWS
 
 
+def _db_upgrade(db_path: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, 'DB_NAME': db_path}
+    env.pop('TIINGO_API_KEY', None)
+    return subprocess.run(
+        [sys.executable, str(MAIN), 'db-upgrade'],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def test_db_upgrade_upgrades_and_changes_nothing_else(old_db):
+    result = _db_upgrade(old_db)
+    assert result.returncode == 0, result.stderr
+    assert f'schema version {SCHEMA_VERSION}' in result.stdout
+    assert _query(old_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == UPGRADED_ROWS
+
+
+def test_db_upgrade_on_a_current_database_changes_nothing(current_db):
+    before = _dump(current_db)
+    result = _db_upgrade(current_db)
+    assert result.returncode == 0, result.stderr
+    assert _dump(current_db) == before
+
+
+def test_db_upgrade_fails_without_a_database(tmp_path):
+    path = tmp_path / 'missing.db'
+    result = _db_upgrade(str(path))
+    assert result.returncode == 1
+    assert 'nothing to upgrade' in result.stderr
+    assert not path.exists()
+
+
 def test_upgrade_reports_its_own_error_when_sqlite_already_rolled_back(old_db, monkeypatch):
     """SQLite ends the transaction itself on some errors; the ROLLBACK after it must not replace the real error."""
 

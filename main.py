@@ -7,6 +7,7 @@ import sys
 from app.commands.analyzer import AnalyzerCommand
 from app.commands.base_command import BaseCommand, CLI_Interface
 from app.commands.db_init import DbInit
+from app.commands.db_upgrade import DbUpgrade
 from app.commands.importer import ImporterCommand
 from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
@@ -105,6 +106,7 @@ def main() -> None:
 
     cli = CommandLineInterface()
     DbInit().add_to_cli(cli)
+    DbUpgrade().add_to_cli(cli)
     ImporterCommand().add_to_cli(cli)
     TickerFetcherCmd().add_to_cli(cli)
     TickerSyncCmd().add_to_cli(cli)

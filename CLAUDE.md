@@ -37,6 +37,7 @@ Entry point: `main.py`, which sets up logging from `config/0-stdout.json`, regis
 uv sync                                        # install the dependencies into .venv
 uv run python main.py --help                   # list the subcommands
 uv run python main.py db-init                  # create missing tables, empty the market data tables
+uv run python main.py db-upgrade               # upgrade the schema only (every command does first)
 uv run python main.py import --excel FILE      # replace sectors, subsectors and tickers from a spreadsheet
 uv run python main.py ticker-sync              # fetch every ticker symbol from Tiingo
 uv run python main.py ticker-fetcher [--sector NAME] [--ticker SYMBOL]   # fetch price data from PRICE_API
