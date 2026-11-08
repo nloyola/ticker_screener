@@ -50,6 +50,15 @@ COLUMNS = (
     'ema_21w_prev_1w',
     'price_gt_21wema',
     'ema_21w_rising',
+    'close_position',
+    'close_upper_quarter',
+    'consolidation_range_pct',
+    'consolidation_tight',
+    'consolidation_vol_ratio',
+    'consolidation_vol_declining',
+    'dist_high_20d_pct',
+    'dist_high_60d_pct',
+    'near_resistance',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -116,6 +125,15 @@ def _row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_float(sc.ema_21w_prev_1w),
         _as_int(sc.price_gt_21wema),  # INTEGER
         _as_int(sc.ema_21w_rising),  # INTEGER
+        _as_float(sc.close_position),
+        _as_int(sc.close_upper_quarter),  # INTEGER
+        _as_float(sc.consolidation_range_pct),
+        _as_int(sc.consolidation_tight),  # INTEGER
+        _as_float(sc.consolidation_vol_ratio),
+        _as_int(sc.consolidation_vol_declining),  # INTEGER
+        _as_float(sc.dist_high_20d_pct),
+        _as_float(sc.dist_high_60d_pct),
+        _as_int(sc.near_resistance),  # INTEGER
     )
 
 

@@ -46,10 +46,17 @@ class FakeStockCriteriaRepo:
 
 
 def price_rows(
-    ticker: str, closes: list[float], volumes: list[int] | None = None, highs: list[float | None] | None = None
+    ticker: str,
+    closes: list[float],
+    volumes: list[int] | None = None,
+    highs: list[float | None] | None = None,
+    lows: list[float | None] | None = None,
 ) -> list[PriceData]:
+    """Each day's low is 1 under the lower of its close and high unless 'lows' says otherwise; none without a high."""
     volumes = volumes if volumes is not None else [BASE_VOLUME] * len(closes)
     highs = highs if highs is not None else closes
+    if lows is None:
+        lows = [None if high is None else min(close, high) - 1 for close, high in zip(closes, highs, strict=True)]
     start = date(2026, 1, 1)
     return [
         PriceData(
@@ -60,9 +67,9 @@ def price_rows(
             close=close,
             volume=volume,
             high=high,
-            low=None if high is None else min(close, high) - 1,
+            low=low,
         )
-        for i, (close, volume, high) in enumerate(zip(closes, volumes, highs, strict=True))
+        for i, (close, volume, high, low) in enumerate(zip(closes, volumes, highs, lows, strict=True))
     ]
 
 
@@ -73,10 +80,13 @@ def make_analyzer(rows: list[PriceData]) -> tuple[Analyzer, FakeStockCriteriaRep
 
 
 def analyze(
-    closes: list[float], volumes: list[int] | None = None, highs: list[float | None] | None = None
+    closes: list[float],
+    volumes: list[int] | None = None,
+    highs: list[float | None] | None = None,
+    lows: list[float | None] | None = None,
 ) -> StockCriteria | None:
     """Runs analyze_ticker on one ticker's rows, grouped as Analyzer._analyze groups them."""
-    analyzer, _ = make_analyzer(price_rows('TEST', closes, volumes, highs))
+    analyzer, _ = make_analyzer(price_rows('TEST', closes, volumes, highs, lows))
     df = analyzer.load_price_data()
     ((ticker, group_df),) = list(df.groupby(level='ticker'))
     return analyzer.analyze_ticker(ticker, group_df)
@@ -601,6 +611,176 @@ def test_the_secondary_indicators_never_change_the_core_score():
     assert (rise.rsi_50_70, rise.macd_crossover, rise.macd_hist_rising) == (0, 0, 0)
     assert rise.core_criteria_score == zig.core_criteria_score == 4
     assert rise.core_criteria_met is zig.core_criteria_met is True
+
+
+# --- Price action secondary indicators --------------------------------------
+
+
+def with_last(values: list[float | None], last: float | None) -> list[float | None]:
+    return [*values[:-1], last]
+
+
+def test_a_close_at_the_days_high_is_a_strong_close():
+    # each day's low is 1 under its close and high: the close sits at the top of the range
+    sc = analyze(rising(100), volumes_with_last(100, 2000))
+
+    assert sc.close_position == 1.0
+    assert sc.close_upper_quarter == 1
+
+
+@pytest.mark.parametrize(
+    ('high', 'low', 'position', 'strong'),
+    [(203.0, 195.0, 0.5, 0), (200.0, 196.0, 0.75, 1), (199.0, 191.0, 1.0, 1), (207.0, 199.0, 0.0, 0)],
+    ids=['mid-range', 'at the upper quarter', 'at the high', 'at the low'],
+)
+def test_closing_strength_is_the_closes_place_in_the_days_range(high, low, position, strong):
+    closes = rising(100)  # today's close is 199
+    sc = analyze(closes, volumes_with_last(100, 2000), with_last(closes, high), with_last([c - 1 for c in closes], low))
+
+    assert sc.close_position == position
+    assert sc.close_upper_quarter == strong
+
+
+@pytest.mark.parametrize(
+    ('high', 'low'), [(None, None), (199.0, None), (199.0, 199.0)], ids=['no high', 'no low', 'no range']
+)
+def test_closing_strength_without_a_range_is_empty(high, low):
+    closes = rising(100)
+    sc = analyze(closes, volumes_with_last(100, 2000), with_last(closes, high), with_last([c - 1 for c in closes], low))
+
+    assert (sc.close_position, sc.close_upper_quarter) == (None, None)
+    assert sc.core_criteria_score == 4
+
+
+def base_then_breakout(base_volumes: tuple[int, int] = (1000, 1000)) -> tuple[list[float], list[int]]:
+    """
+    Closes rising from 100 to 178 over 79 days, a 20-day base at 180 (highs 180, lows 179), then 190 on 2000 volume.
+    The base's earlier 10 days trade base_volumes[0] a day, its later 10 base_volumes[1].
+    """
+    closes = [*rising(79), *[180.0] * 20, 190.0]
+    volumes = [BASE_VOLUME] * 79 + [base_volumes[0]] * 10 + [base_volumes[1]] * 10 + [2000]
+    return closes, volumes
+
+
+def test_a_tight_base_on_declining_volume():
+    closes, volumes = base_then_breakout((1000, 500))
+    sc = analyze(closes, volumes)
+
+    assert sc.consolidation_range_pct == pytest.approx(100 / 180)  # highs 180, lows 179
+    assert sc.consolidation_tight == 1
+    assert sc.consolidation_vol_ratio == 0.5
+    assert sc.consolidation_vol_declining == 1
+    assert sc.core_criteria_score == 4
+
+
+def test_a_base_on_steady_volume_is_not_declining():
+    sc = analyze(*base_then_breakout())
+
+    assert (sc.consolidation_vol_ratio, sc.consolidation_vol_declining) == (1.0, 0)
+
+
+def test_a_steady_rise_is_no_tight_base():
+    # the 20 days before today close 179..198, lows 178..197: (198 - 178) / 198
+    sc = analyze(rising(100), volumes_with_last(100, 2000))
+
+    assert sc.consolidation_range_pct == pytest.approx(2000 / 198)
+    assert sc.consolidation_tight == 0
+
+
+@pytest.mark.parametrize(('top', 'tight'), [(200.0, 0), (199.9, 1)])
+def test_a_base_is_tight_only_below_10_percent(top, tight):
+    # a base at 190 whose one high and one low span top - 180: exactly 10% of a top at 200
+    closes, volumes = base_then_breakout()
+    closes = [*closes[:79], *[190.0] * 20, 210.0]
+    highs, lows = list(closes), [c - 1 for c in closes]
+    highs[85], lows[90] = top, 180.0
+    sc = analyze(closes, volumes, highs, lows)
+
+    assert sc.consolidation_range_pct == pytest.approx((top - 180) / top * 100)
+    assert sc.consolidation_tight == tight
+
+
+@pytest.mark.parametrize(('low_at', 'tight'), [(-21, 0), (-22, 1)])
+def test_the_base_covers_the_20_days_before_today(low_at, tight):
+    closes, volumes = base_then_breakout()
+    lows = [c - 1 for c in closes]
+    lows[low_at] = 150.0
+    sc = analyze(closes, volumes, lows=lows)
+
+    assert sc.consolidation_tight == tight
+
+
+def test_a_base_with_a_day_missing_its_low_has_no_range():
+    closes, volumes = base_then_breakout((1000, 500))
+    lows: list[float | None] = [c - 1 for c in closes]
+    lows[-5] = None
+    sc = analyze(closes, volumes, lows=lows)
+
+    assert (sc.consolidation_range_pct, sc.consolidation_tight) == (None, None)
+    assert sc.consolidation_vol_declining == 1
+
+
+def test_a_base_whose_earlier_half_traded_nothing_has_no_volume_ratio():
+    sc = analyze(*base_then_breakout((0, 500)))
+
+    assert (sc.consolidation_vol_ratio, sc.consolidation_vol_declining) == (None, None)
+
+
+def test_a_breakout_is_above_its_resistance_not_near_it():
+    sc = analyze(rising(100), volumes_with_last(100, 2000))
+
+    assert sc.dist_high_20d_pct == pytest.approx(-100 / 198)  # 199 is 1 above the 198 high
+    assert sc.dist_high_60d_pct == pytest.approx(-100 / 198)
+    assert sc.near_resistance == 0
+
+
+@pytest.mark.parametrize(
+    ('last', 'distance', 'near'),
+    [(200.0, 0.0, 1), (195.0, 2.5, 1), (190.0, 5.0, 1), (189.0, 5.5, 0)],
+    ids=['at resistance', 'just below', '5% below', 'over 5% below'],
+)
+def test_the_close_near_its_resistance(last, distance, near):
+    # closes 100..200 then today's: both resistances are the 200 high
+    sc = analyze([*rising(101), last])
+
+    assert sc.dist_high_20d_pct == pytest.approx(distance)
+    assert sc.dist_high_60d_pct == pytest.approx(distance)
+    assert sc.near_resistance == near
+    assert sc.breakout_20d == 0
+
+
+def test_near_the_20_day_resistance_far_below_the_60_day_one():
+    closes = [*rising(99), 190.0]
+    highs = list(closes)
+    highs[-40] = 250.0
+    sc = analyze(closes, highs=highs)
+
+    assert sc.dist_high_20d_pct == pytest.approx(800 / 198)
+    assert sc.dist_high_60d_pct == pytest.approx(24.0)
+    assert sc.near_resistance == 1
+
+
+def test_a_20_day_breakout_near_the_60_day_resistance():
+    closes = [*rising(99), 199.0]
+    highs = list(closes)
+    highs[-40] = 205.0
+    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+
+    assert sc.breakout_20d == 1
+    assert sc.dist_high_60d_pct == pytest.approx(600 / 205)
+    assert sc.near_resistance == 1
+
+
+def test_the_price_action_indicators_never_change_the_core_score():
+    # the same breakout scores 4 whether its close is weak or strong, its base loose or tight
+    closes, volumes = base_then_breakout((1000, 500))
+    tight_strong = analyze(closes, volumes)
+    # lows 30 under the closes, and today's range 180-200 around its 190 close
+    loose_weak = analyze(closes, volumes, with_last(closes, 200.0), with_last([c - 30 for c in closes], 180.0))
+
+    assert (tight_strong.consolidation_tight, tight_strong.close_upper_quarter) == (1, 1)
+    assert (loose_weak.consolidation_tight, loose_weak.close_upper_quarter) == (0, 0)
+    assert tight_strong.core_criteria_score == loose_weak.core_criteria_score == 4
 
 
 # --- How much history is needed ---------------------------------------------

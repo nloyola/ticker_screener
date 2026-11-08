@@ -438,3 +438,42 @@ def test_analyze_stores_every_secondary_indicator(path, container):
     # the n-day averages of a close rising by 1 lag it by (n - 1) / 2, the 21-day EMA by 10
     assert (row['dma_20'], row['dma_200'], row['ema_21']) == (457.5, 367.5, 457.0)
     assert row['core_criteria_score'] == 4
+
+
+PRICE_ACTION_COLUMNS = (
+    'close_position',
+    'close_upper_quarter',
+    'consolidation_range_pct',
+    'consolidation_tight',
+    'consolidation_vol_ratio',
+    'consolidation_vol_declining',
+    'dist_high_20d_pct',
+    'dist_high_60d_pct',
+    'near_resistance',
+)
+
+
+def test_analyze_stores_every_price_action_indicator(path, container):
+    # closes rising by 1 to 199, each day's range 2 below its close to 1 above it
+    rows = [replace(row, high=row.close + 1, low=row.close - 2) for row in price_rows('AAA', TODAY)]
+    container.price_data_repo.bulk_insert(rows)
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        (row,) = con.execute(f'SELECT core_criteria_score, {", ".join(PRICE_ACTION_COLUMNS)} FROM stock_criteria')
+    assert {column: row[column] for column in PRICE_ACTION_COLUMNS} == pytest.approx(
+        {
+            'close_position': 2 / 3,  # 199 in a range from 197 to 200
+            'close_upper_quarter': 0,
+            'consolidation_range_pct': (199 - 177) / 199 * 100,  # highs 180..199, lows 177..196
+            'consolidation_tight': 0,
+            'consolidation_vol_ratio': 1.0,
+            'consolidation_vol_declining': 0,
+            'dist_high_20d_pct': 0.0,  # the 199 close equals the 20 days' highest high, 198 + 1
+            'dist_high_60d_pct': 0.0,
+            'near_resistance': 1,
+        }
+    )
+    assert row['core_criteria_score'] == 3  # no breakout: the close only equals the prior high

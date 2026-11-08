@@ -50,6 +50,17 @@ EMA_RISING_DAYS = 5
 # An EMA starts from the first close, whose weight in it falls below 1% only after 50 values (alpha = 2 / 22): one
 # with fewer is left empty.
 EMA_MIN_PERIODS = 50
+# Closing strength: the close's position in the day's high-low range, 0 at the low and 1 at the high, strong at
+# CLOSE_POSITION_MIN or more (the upper 25% of the range).
+CLOSE_POSITION_MIN = 0.75
+# Consolidation quality, over the CONSOLIDATION_DAYS trading days before the scored day (the strategy's window is
+# 10-30 days): the range from its highest high to its lowest low as a percentage of the highest high, tight below
+# CONSOLIDATION_TIGHT_PCT, and volume declining when its later half averages less than its earlier half.
+CONSOLIDATION_DAYS = 20
+CONSOLIDATION_TIGHT_PCT = 10.0
+# Breakout proximity: the close at most PROXIMITY_PCT percent below the 20- or 60-day resistance (the highest high of
+# BREAKOUT_WINDOWS), and not above it.
+PROXIMITY_PCT = 5.0
 
 # The history every core condition needs: SMA_DAYS rows ending SMA_RISING_DAYS days before the scored day, and the
 # longest breakout window before it. A ticker with fewer rows is not scored at all.
@@ -110,6 +121,53 @@ def _above(value: float | None, level: float | None) -> int | None:
     if value is None or level is None:
         return None
     return int(value > level)
+
+
+def _close_position(close: float, high: float | None, low: float | None) -> float | None:
+    """Where 'close' sits in the day's range, 0 at the low and 1 at the high: None without a range."""
+    if high is None or low is None or high <= low:
+        return None
+    return (close - low) / (high - low)
+
+
+def _consolidation(df: pd.DataFrame) -> tuple[float | None, float | None]:
+    """
+    The range of the CONSOLIDATION_DAYS rows before the last one, as a percentage of their highest high, and their
+    later half's average volume over their earlier half's. Each is None when a row it needs lacks the value, or
+    there are too few rows, or the earlier half traded no volume.
+    """
+    window = df.iloc[-1 - CONSOLIDATION_DAYS : -1]
+    if len(window) < CONSOLIDATION_DAYS:
+        return None, None
+    range_pct = None
+    if not (window['high'].isna().any() or window['low'].isna().any()):
+        top = float(window['high'].max())
+        range_pct = (top - float(window['low'].min())) / top * 100 if top > 0 else None
+    vol_ratio = None
+    volumes = window['volume']
+    if not volumes.isna().any():
+        half = CONSOLIDATION_DAYS // 2
+        earlier = float(volumes.iloc[:half].mean())
+        vol_ratio = float(volumes.iloc[half:].mean()) / earlier if earlier > 0 else None
+    return range_pct, vol_ratio
+
+
+def _below(value: float | None, limit: float) -> int | None:
+    """1 when 'value' is below 'limit', 0 when not, None when it is missing."""
+    return None if value is None else int(value < limit)
+
+
+def _distance_pct(price: float, resistance: float) -> float | None:
+    """How far 'price' is below 'resistance', as a percentage of it: negative above it."""
+    return (resistance - price) / resistance * 100 if resistance > 0 else None
+
+
+def _near(distances: list[float | None]) -> int | None:
+    """1 when any distance is from 0 to PROXIMITY_PCT, ends included, 0 when none is, None when all are missing."""
+    known = [d for d in distances if d is not None]
+    if not known:
+        return None
+    return int(any(0 <= d <= PROXIMITY_PCT for d in known))
 
 
 def _days_above(macd: pd.Series, signal: pd.Series) -> int:
@@ -331,6 +389,12 @@ class Analyzer:
         ema_weekly = ema(weekly_closes(df))
         ema_21w, ema_21w_prior = _at(ema_weekly), _at(ema_weekly, 1)
 
+        # price action, from the day's own high and low: a row stored before upgrade 3 has neither, and leaves
+        # closing strength empty rather than standing its close in for them
+        close_position = _close_position(price, _at(df['high']), _at(df['low']))
+        consolidation_range_pct, consolidation_vol_ratio = _consolidation(df)
+        dist_20d, dist_60d = _distance_pct(price, high_20d), _distance_pct(price, high_60d)
+
         breakout_20d = price > high_20d
         breakout_60d = price > high_60d
         breakout_confirmed = volume_ratio is not None and volume_ratio >= VOLUME_RATIO_MIN
@@ -385,6 +449,16 @@ class Analyzer:
             ema_21w_prev_1w=_round(ema_21w_prior),
             price_gt_21wema=_above(price, ema_21w),
             ema_21w_rising=_above(ema_21w, ema_21w_prior),
+            # unrounded, like volume_ratio, so a value just past its threshold never reads as on it
+            close_position=close_position,
+            close_upper_quarter=None if close_position is None else int(close_position >= CLOSE_POSITION_MIN),
+            consolidation_range_pct=consolidation_range_pct,
+            consolidation_tight=_below(consolidation_range_pct, CONSOLIDATION_TIGHT_PCT),
+            consolidation_vol_ratio=consolidation_vol_ratio,
+            consolidation_vol_declining=_below(consolidation_vol_ratio, 1.0),
+            dist_high_20d_pct=dist_20d,
+            dist_high_60d_pct=dist_60d,
+            near_resistance=_near([dist_20d, dist_60d]),
         )
 
     def save_to_repository(self, items: list[StockCriteria], date_created: date) -> None:

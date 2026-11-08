@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- volume_ratio is the day's volume over avg_vol_20d. The upgrades in app/db.py bring databases created before them
 -- to this table: the fourth drops the columns of the core rules the breakout strategy removed (max_vol_10d, ema_10,
 -- dma_50_25d_ago, price_gt_10ema) and adds volume_ratio, the fifth renames rsi_50_75 and macd_bullish and adds the
--- secondary indicators' columns after it, where ALTER TABLE places them; change both together.
+-- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, where ALTER
+-- TABLE places them; change both together.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -116,6 +117,15 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        ema_21w_prev_1w REAL,
        price_gt_21wema INTEGER,
        ema_21w_rising INTEGER,
+       close_position REAL,
+       close_upper_quarter INTEGER,
+       consolidation_range_pct REAL,
+       consolidation_tight INTEGER,
+       consolidation_vol_ratio REAL,
+       consolidation_vol_declining INTEGER,
+       dist_high_20d_pct REAL,
+       dist_high_60d_pct REAL,
+       near_resistance INTEGER,
        UNIQUE (ticker)
 );
 

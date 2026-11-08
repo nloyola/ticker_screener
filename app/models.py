@@ -93,3 +93,16 @@ class StockCriteria:
     ema_21w_prev_1w: float | None = None
     price_gt_21wema: int | None = None
     ema_21w_rising: int | None = None
+    # where the close sits in the day's high-low range, 0 at the low and 1 at the high
+    close_position: float | None = None
+    close_upper_quarter: int | None = None
+    # the 20 days before today: their high-low range as a percentage of their high, and their later 10 days' average
+    # volume over their earlier 10 days'
+    consolidation_range_pct: float | None = None
+    consolidation_tight: int | None = None
+    consolidation_vol_ratio: float | None = None
+    consolidation_vol_declining: int | None = None
+    # how far the close is below high_20d and high_60d, as a percentage of each: negative above it
+    dist_high_20d_pct: float | None = None
+    dist_high_60d_pct: float | None = None
+    near_resistance: int | None = None

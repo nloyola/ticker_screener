@@ -1,7 +1,7 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
-stock_criteria has the breakout strategy's columns, core and secondary, and older databases are upgraded to all
-three.
+stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), and older
+databases are upgraded to all three.
 """
 
 import os
@@ -304,6 +304,32 @@ def test_upgrade_adds_the_secondary_indicators_keeping_every_row(version_4_db, c
         'SELECT id, ticker, core_criteria_score, rsi_50_70, macd_above_signal, volume_ratio, macd_hist, dma_200, '
         'ema_21w_rising FROM stock_criteria',
     ) == [(1, 'XOM', 4, 1, 0, 1.8, None, None, None), (2, 'CVX', None, None, None, None, None, None, None)]
+
+
+@pytest.fixture
+def version_5_db(version_4_db) -> str:
+    """A database at version 5: the version 4 one with the trend and momentum indicators, without the price action."""
+    con = open_connection(version_4_db)
+    try:
+        with con:
+            db.UPGRADES[4](con)
+            con.execute('PRAGMA user_version = 5')
+            con.execute("UPDATE stock_criteria SET macd_hist = 0.25, dma_200 = 98.5 WHERE ticker = 'XOM'")
+    finally:
+        con.close()
+    return version_4_db
+
+
+def test_upgrade_adds_the_price_action_indicators_keeping_every_row(version_5_db, current_db):
+    upgrade_db(version_5_db)
+
+    assert _query(version_5_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_5_db, 'stock_criteria') == _table_sql(current_db, 'stock_criteria')
+    assert _query(
+        version_5_db,
+        'SELECT id, ticker, core_criteria_score, macd_hist, dma_200, close_position, consolidation_tight, '
+        'near_resistance FROM stock_criteria',
+    ) == [(1, 'XOM', 4, 0.25, 98.5, None, None, None), (2, 'CVX', None, None, None, None, None, None)]
 
 
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):

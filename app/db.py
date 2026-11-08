@@ -227,12 +227,38 @@ def _add_stock_criteria_secondary_columns(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE stock_criteria ADD COLUMN {column} {kind}')
 
 
+def _add_stock_criteria_price_action_columns(con: sqlite3.Connection) -> None:
+    """
+    Version 6: stock_criteria gains the price action secondary indicators' columns (closing strength, consolidation
+    quality, breakout proximity), left NULL in the rows already stored until the next analyze replaces them. Adds
+    only what the table lacks, so a table schema.sql created this way is left as it is.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('stock_criteria')")}
+    if not columns:
+        return  # no table: schema.sql creates it this way
+    # spelled out here, not shared with the repository, so that a later schema change cannot alter a shipped upgrade
+    for column, kind in (
+        ('close_position', 'REAL'),
+        ('close_upper_quarter', 'INTEGER'),
+        ('consolidation_range_pct', 'REAL'),
+        ('consolidation_tight', 'INTEGER'),
+        ('consolidation_vol_ratio', 'REAL'),
+        ('consolidation_vol_declining', 'INTEGER'),
+        ('dist_high_20d_pct', 'REAL'),
+        ('dist_high_60d_pct', 'REAL'),
+        ('near_resistance', 'INTEGER'),
+    ):
+        if column not in columns:
+            con.execute(f'ALTER TABLE stock_criteria ADD COLUMN {column} {kind}')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
     _add_price_data_high_low,
     _rework_stock_criteria_core_columns,
     _add_stock_criteria_secondary_columns,
+    _add_stock_criteria_price_action_columns,
 )
 SCHEMA_VERSION = len(UPGRADES)
 
