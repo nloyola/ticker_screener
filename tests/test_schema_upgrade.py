@@ -1,4 +1,7 @@
-"""price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, and older databases are upgraded to it."""
+"""
+price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low, and older
+databases are upgraded to both.
+"""
 
 import os
 import sqlite3
@@ -30,6 +33,20 @@ OLD_ROWS = [
     (2, 10, 'XOM', '2026-11-05', 111.0, 1200),
     (3, None, 'CVX', '2026-11-05', None, None),
 ]
+# the same rows once upgraded: no high and no low until the next fetch replaces them
+UPGRADED_ROWS = [(*row, None, None) for row in OLD_ROWS]
+
+# price_data as schema.sql created it from the date guard (version 1) until the high and low (version 3)
+GUARDED_PRICE_DATA = """
+CREATE TABLE price_data (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       subsector_id INTEGER,
+       ticker TEXT,
+       date TEXT NOT NULL CHECK (date(date) IS date),
+       close REAL,
+       volume INTEGER,
+       UNIQUE (ticker, date)
+)"""
 
 
 def _execute(db_path: str, *statements: str) -> None:
@@ -121,7 +138,7 @@ def test_upgrade_rebuilds_an_old_table_keeping_rows_ids_and_sequence(old_db, cur
     upgrade_db(old_db)
 
     assert _query(old_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
-    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == OLD_ROWS
+    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == UPGRADED_ROWS
     assert _query(old_db, "SELECT seq FROM sqlite_sequence WHERE name = 'price_data'") == [(4,)]
     # exactly the table schema.sql creates, UNIQUE (ticker, date) included
     assert _table_sql(old_db) == _table_sql(current_db)
@@ -132,6 +149,35 @@ def test_upgrade_rebuilds_an_old_table_keeping_rows_ids_and_sequence(old_db, cur
         _insert_price(old_db, 'XOM', '2026-11-05 00:00:00')
     _insert_price(old_db, 'XOM', '2026-11-07')
     assert _query(old_db, "SELECT id FROM price_data WHERE date = '2026-11-07'") == [(5,)]
+
+
+@pytest.fixture
+def version_2_db(tmp_path) -> str:
+    """A database at version 2: today's schema with price_data guarded but without its high and low."""
+    path = str(tmp_path / 'v2.db')
+    init_db(path)
+    _execute(path, 'DROP TABLE price_data', GUARDED_PRICE_DATA, 'PRAGMA user_version = 2')
+    con = open_connection(path)
+    try:
+        with con:
+            con.executemany('INSERT INTO price_data VALUES (?, ?, ?, ?, ?, ?)', OLD_ROWS)
+    finally:
+        con.close()
+    return path
+
+
+def test_upgrade_adds_high_and_low_keeping_every_row(version_2_db, current_db):
+    upgrade_db(version_2_db)
+
+    assert _query(version_2_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _query(version_2_db, 'SELECT * FROM price_data ORDER BY id') == UPGRADED_ROWS
+    # exactly the table schema.sql creates: ALTER TABLE puts the new columns before UNIQUE (ticker, date)
+    assert _table_sql(version_2_db) == _table_sql(current_db)
+    _execute(
+        version_2_db,
+        "INSERT INTO price_data (ticker, date, close, volume, high, low) VALUES ('XOM', '2026-11-06', 2, 3, 2.5, 1.5)",
+    )
+    assert _query(version_2_db, "SELECT high, low FROM price_data WHERE date = '2026-11-06'") == [(2.5, 1.5)]
 
 
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):
@@ -178,7 +224,7 @@ def test_upgrade_refuses_a_newer_database(current_db):
 def test_init_db_upgrades_an_old_table(old_db):
     init_db(old_db)
     assert _query(old_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
-    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == OLD_ROWS
+    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == UPGRADED_ROWS
     with pytest.raises(sqlite3.IntegrityError):
         _insert_price(old_db, 'XOM', None)
 
@@ -197,7 +243,7 @@ def test_every_command_upgrades_the_database_first(old_db):
     )
     assert result.returncode == 0, result.stderr
     assert _query(old_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
-    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == OLD_ROWS
+    assert _query(old_db, 'SELECT * FROM price_data ORDER BY id') == UPGRADED_ROWS
 
 
 def test_upgrade_reports_its_own_error_when_sqlite_already_rolled_back(old_db, monkeypatch):

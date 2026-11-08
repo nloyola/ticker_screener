@@ -155,7 +155,20 @@ def _add_company_name(con: sqlite3.Connection) -> None:
         )""")
 
 
-UPGRADES = (_guard_price_data_date, _add_company_name)
+def _add_price_data_high_low(con: sqlite3.Connection) -> None:
+    """
+    Version 3: price_data.high and price_data.low, left NULL in the rows already stored. Adds only a column the table
+    lacks, so a table schema.sql created with them is left as it is.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('price_data')")}
+    if not columns:
+        return  # no table: schema.sql creates it with both columns
+    for column in ('high', 'low'):
+        if column not in columns:
+            con.execute(f'ALTER TABLE price_data ADD COLUMN {column} REAL')
+
+
+UPGRADES = (_guard_price_data_date, _add_company_name, _add_price_data_high_low)
 SCHEMA_VERSION = len(UPGRADES)
 
 

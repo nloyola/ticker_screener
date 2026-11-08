@@ -13,8 +13,9 @@ import requests
 from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.markets import CANADA, US, UnsupportedTicker, market_of, market_sql
-from app.price_apis import DailyPrice, PriceApiStop
+from app.price_apis import PriceApiStop
 from app.price_apis.eodhd import USAGE_TIMEOUT, EodhdPrices, EodhdUsage, eodhd_symbol
+from app.ticker_fetcher import HISTORY_DAYS
 from tests.test_ticker_fetcher import (  # noqa: F401
     FakeTiingo,
     ScriptedAdapter,
@@ -47,7 +48,7 @@ def usage_answer(spent: int = 0, limit: int = 100_000, extra: int = 0, day: str 
 
 def eod_answer(rows: list[tuple[date, float, int]]) -> requests.Response:
     body = [
-        {'date': d.isoformat(), 'open': 1, 'high': 1, 'low': 1, 'close': 999.0, 'adjusted_close': close, 'volume': vol}
+        {'date': d.isoformat(), 'open': 1, 'high': 1, 'low': 1, 'close': 1, 'adjusted_close': close, 'volume': vol}
         for d, close, vol in rows
     ]
     return answer(200, body)
@@ -120,7 +121,7 @@ def test_eodhd_run_stores_adjusted_close_and_volume_for_bare_and_suffixed_ticker
     assert stored_rows(repo, 'SHOP.TO') == [(days_ago(1), 98.75, 3400)]
     urls = [request.url for request, _ in adapter.sent]
     assert urls[0].startswith('https://eodhd.com/api/user?')
-    assert urls[1].startswith(f'https://eodhd.com/api/eod/AAPL.US?from={days_ago(120).isoformat()}&to=')
+    assert urls[1].startswith(f'https://eodhd.com/api/eod/AAPL.US?from={days_ago(HISTORY_DAYS).isoformat()}&to=')
     assert urls[2].startswith('https://eodhd.com/api/eod/SHOP.TO?')
     assert all('fmt=json' in url and f'api_token={EODHD_KEY}' in url for url in urls)
     assert adapter.sent[0][1] == USAGE_TIMEOUT
@@ -214,9 +215,43 @@ def test_eodhd_usage_check_that_fails_otherwise_warns_and_carries_on(repo, caplo
 
 
 def test_eodhd_rows_parse_as_prices():
-    rows = [{'date': '2026-11-06', 'close': 100.0, 'adjusted_close': 99.5, 'volume': 42}]
+    rows = [{'date': '2026-11-06', 'high': 102.0, 'low': 96.0, 'close': 100.0, 'adjusted_close': 99.5, 'volume': 42}]
 
-    assert EodhdPrices.to_prices(rows) == [DailyPrice(date=date(2026, 11, 6), close=99.5, volume=42)]
+    (price,) = EodhdPrices.to_prices(rows)
+    assert (price.date, price.close, price.volume) == (date(2026, 11, 6), 99.5, 42)
+    # the raw high and low scaled by the day's ratio of adjusted to raw close, 0.995
+    assert price.high == pytest.approx(101.49) and price.low == pytest.approx(95.52)
+
+
+def test_eodhd_split_inside_the_window_leaves_no_jump_in_the_adjusted_highs():
+    # a 2-for-1 split on 2026-11-05: the raw prices halve, EODHD's adjusted closes do not
+    rows = [
+        {'date': '2026-11-03', 'high': 202.0, 'low': 196.0, 'close': 200.0, 'adjusted_close': 100.0, 'volume': 10},
+        {'date': '2026-11-04', 'high': 204.0, 'low': 198.0, 'close': 202.0, 'adjusted_close': 101.0, 'volume': 10},
+        {'date': '2026-11-05', 'high': 102.0, 'low': 100.0, 'close': 101.5, 'adjusted_close': 101.5, 'volume': 20},
+    ]
+
+    prices = EodhdPrices.to_prices(rows)
+
+    assert [p.high for p in prices] == pytest.approx([101.0, 102.0, 102.0])
+    assert [p.low for p in prices] == pytest.approx([98.0, 99.0, 100.0])
+    assert all(p.low <= p.close <= p.high for p in prices)
+
+
+def test_eodhd_scaled_high_and_low_never_fall_on_the_wrong_side_of_the_close():
+    # the raw high equals the close, and the scaling's rounding must not put it below the adjusted close
+    rows = [{'date': '2026-11-06', 'high': 33.3, 'low': 33.3, 'close': 33.3, 'adjusted_close': 11.1, 'volume': 1}]
+
+    (price,) = EodhdPrices.to_prices(rows)
+
+    assert price.high == price.close == price.low == 11.1
+
+
+def test_eodhd_row_with_no_close_is_not_a_price():
+    rows = [{'date': '2026-11-06', 'high': 1.0, 'low': 0.0, 'close': 0.0, 'adjusted_close': 0.0, 'volume': 1}]
+
+    with pytest.raises(ValueError, match='close of 0.0'):
+        EodhdPrices.to_prices(rows)
 
 
 # Tiingo runs

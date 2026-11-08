@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS subsector (
 -- date stays TEXT, a YYYY-MM-DD string: declared DATE, the dashboard's Go driver would scan it as a time.
 -- The CHECK accepts exactly the real calendar dates in that shape, since date() always returns YYYY-MM-DD
 -- or NULL. The upgrade in app/db.py adds it to databases created before it; change both together.
+-- high and low are the day's, adjusted on the close's basis; NULL in rows stored before them, until the next fetch
+-- replaces those. The upgrade in app/db.py adds them to databases created before them; change both together.
 CREATE TABLE IF NOT EXISTS price_data (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -59,6 +61,8 @@ CREATE TABLE IF NOT EXISTS price_data (
        date TEXT NOT NULL CHECK (date(date) IS date),
        close REAL,
        volume INTEGER,
+       high REAL,
+       low REAL,
        UNIQUE (ticker, date)
 );
 

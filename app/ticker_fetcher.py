@@ -22,8 +22,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# the days of prices 'price_data' keeps, and each run downloads, per ticker
-HISTORY_DAYS = 120
+# The calendar days of prices 'price_data' keeps, and each run downloads, per ticker. The longest lookbacks the
+# strategy's indicators need are the 200-day SMA, with the trading days a rising check reaches back (at most 20),
+# about 320 calendar days, and the 21-week EMA, built from weekly closes, whose seed must have faded to under 1% of
+# it: (1 - 2/22)^49 < 0.01, so 49 weeks before its last value and one more for its rising check, about 350 days.
+# 400 days covers both with a few weeks to spare for holidays and the partial first week. Both price APIs count one
+# request per ticker however long the range, so the window changes no request count, only the bytes each answer
+# carries.
+HISTORY_DAYS = 400
 
 
 @dataclass
@@ -284,6 +290,8 @@ class TickerFetcher:
                     date=price.date,
                     close=price.close,
                     volume=price.volume,
+                    high=price.high,
+                    low=price.low,
                 )
                 for price in self._retrying(
                     ticker, lambda: self.api.daily_prices(ticker, fetch_start_date, fetch_end_date)

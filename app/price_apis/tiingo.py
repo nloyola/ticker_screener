@@ -7,7 +7,7 @@ import requests
 
 from app.config import TIINGO
 from app.markets import US
-from app.price_apis import DailyPrice
+from app.price_apis import DailyPrice, daily_price
 from app.price_apis.http import CONNECT_TIMEOUT, READ_TIMEOUT, company_name_of
 
 TIINGO_PRICES_URL = 'https://api.tiingo.com/tiingo/daily/{ticker}/prices'
@@ -17,7 +17,8 @@ TIINGO_META_URL = 'https://api.tiingo.com/tiingo/daily/{ticker}'
 class TiingoPrices:
     """
     Requests a ticker's daily prices from Tiingo's end-of-day endpoint, sending the key in a header. Uses 'adjClose'
-    as the close and 'adjVolume' as the volume. One request per ticker, however long the range.
+    as the close, 'adjHigh' and 'adjLow' as the high and low, and 'adjVolume' as the volume. One request per ticker,
+    however long the range.
     """
 
     name = 'Tiingo'
@@ -36,7 +37,7 @@ class TiingoPrices:
                 'startDate': start.isoformat(),
                 'endDate': end.isoformat(),
                 'resampleFreq': 'daily',
-                'columns': 'date,adjClose,adjVolume',
+                'columns': 'date,adjClose,adjHigh,adjLow,adjVolume',
             },
             timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
         )
@@ -45,10 +46,17 @@ class TiingoPrices:
 
     @staticmethod
     def to_prices(rows: list[dict]) -> list[DailyPrice]:
-        """Tiingo's rows, each with 'date', 'adjClose' and 'adjVolume', as prices; raises for a row that is not one."""
+        """
+        Tiingo's rows, each with 'date', 'adjClose', 'adjHigh', 'adjLow' and 'adjVolume', as prices; raises for a row
+        that is not one.
+        """
         return [
-            DailyPrice(
-                date=pd.to_datetime(row['date']).date(), close=float(row['adjClose']), volume=int(row['adjVolume'])
+            daily_price(
+                pd.to_datetime(row['date']).date(),
+                close=float(row['adjClose']),
+                volume=int(row['adjVolume']),
+                high=float(row['adjHigh']),
+                low=float(row['adjLow']),
             )
             for row in rows
         ]

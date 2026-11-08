@@ -4,6 +4,7 @@ the prices, against a real database.
 """
 
 import argparse
+import json
 import logging
 from types import SimpleNamespace
 
@@ -246,9 +247,10 @@ def test_failed_lookup_leaves_the_outcome_and_failure_count_unchanged(repo, capl
 
 
 def test_transient_lookup_error_is_retried(repo):  # noqa: F811
+    row = {'date': days_ago(1).isoformat(), 'adjClose': 1, 'adjHigh': 1, 'adjLow': 1, 'adjVolume': 1}
     client, adapter = tiingo(
         [
-            tiingo_response(200, f'[{{"date": "{days_ago(1).isoformat()}", "adjClose": 1, "adjVolume": 1}}]'.encode()),
+            tiingo_response(200, json.dumps([row]).encode()),
             tiingo_response(503),
             tiingo_response(200, TIINGO_CVX),
         ]
@@ -278,7 +280,7 @@ def test_lookup_that_keeps_failing_gives_up_after_the_retries(repo):  # noqa: F8
 
 
 def test_eodhd_run_stores_its_names_as_eodhd_and_hides_the_key(repo, caplog):  # noqa: F811
-    eod = [{'date': days_ago(1).isoformat(), 'adjusted_close': 1.0, 'volume': 5}]
+    eod = [{'date': days_ago(1).isoformat(), 'high': 1, 'low': 1, 'close': 1, 'adjusted_close': 1.0, 'volume': 5}]
     client, _ = eodhd(
         [
             answer(200, {'apiRequests': 0, 'dailyRateLimit': 100, 'extraLimit': 0}, 'https://eodhd.com/api/user'),

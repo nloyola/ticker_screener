@@ -7,6 +7,7 @@ from app.config import DB_NAME, PRICE_API
 from app.container import Container
 from app.price_apis import PriceApiStop
 from app.services.sector_service import normalize_ticker
+from app.ticker_fetcher import HISTORY_DAYS
 
 from .base_command import BaseCommand
 
@@ -47,7 +48,7 @@ class TickerFetcherCmd(BaseCommand):
             action='store_true',
             help='log each failed ticker, print a summary and exit 1 when nothing was fetched, '
             'every ticker failed or the failure rate exceeds --max-failure-rate; otherwise delete the price rows '
-            'older than 120 days (without --strict, old rows are never deleted)',
+            f'older than {HISTORY_DAYS} days (without --strict, old rows are never deleted)',
         )
         parser.add_argument(
             '--max-failure-rate',

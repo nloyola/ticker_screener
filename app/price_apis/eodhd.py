@@ -9,7 +9,7 @@ import requests
 
 from app.config import EODHD
 from app.markets import CANADA, US, market_of
-from app.price_apis import DailyPrice, PriceApiStop
+from app.price_apis import DailyPrice, PriceApiStop, daily_price
 from app.price_apis.http import CONNECT_TIMEOUT, READ_TIMEOUT, company_name_of, error_detail, response_of
 from app.redaction import redact
 
@@ -65,8 +65,9 @@ class EodhdPrices:
     parameter: every URL it builds holds the key, so any error quoting one must go through error_detail() or redact().
 
     Uses 'adjusted_close' (adjusted for splits and dividends) as the close and 'volume' (adjusted for splits) as the
-    volume; the raw OHLC fields are not used. One call per ticker, whatever the range; an unknown ticker answers 404
-    and still costs a call.
+    volume. EODHD gives the high and low only as traded, so each is scaled by the day's ratio of adjusted to raw
+    close, putting it on the adjusted close's basis; 'open' is not used. One call per ticker, whatever the range; an
+    unknown ticker answers 404 and still costs a call.
     """
 
     name = 'EODHD'
@@ -88,13 +89,22 @@ class EodhdPrices:
 
     @staticmethod
     def to_prices(rows: list[dict]) -> list[DailyPrice]:
-        """EODHD's rows as prices; raises for a row that is not one."""
-        return [
-            DailyPrice(
-                date=date.fromisoformat(row['date']), close=float(row['adjusted_close']), volume=int(row['volume'])
-            )
-            for row in rows
-        ]
+        """EODHD's rows as prices, with the high and low adjusted as the close is; raises for a row that is not one."""
+        return [EodhdPrices.to_price(row) for row in rows]
+
+    @staticmethod
+    def to_price(row: dict) -> DailyPrice:
+        close, adjusted = float(row['close']), float(row['adjusted_close'])
+        if close <= 0:
+            raise ValueError(f'EODHD row for {row["date"]} has a close of {close}, which cannot scale its high and low')
+        ratio = adjusted / close
+        return daily_price(
+            date.fromisoformat(row['date']),
+            close=adjusted,
+            volume=int(row['volume']),
+            high=float(row['high']) * ratio,
+            low=float(row['low']) * ratio,
+        )
 
     def company_name(self, ticker: str) -> str | None:
         """

@@ -22,7 +22,7 @@ from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
-from app.ticker_fetcher import TickerFetcher, window_start
+from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
 TODAY = date.today()
 LAST_RUN = TODAY - timedelta(days=3)
@@ -147,7 +147,8 @@ class TiingoStub:
         return f'{ticker} Inc.'
 
     def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
-        return [DailyPrice(date=p.date, close=p.close, volume=p.volume) for p in price_rows(ticker, TODAY, n=101)]
+        rows = price_rows(ticker, TODAY, n=101)
+        return [DailyPrice(date=p.date, close=p.close, volume=p.volume, high=p.close, low=p.close) for p in rows]
 
 
 class SectorServiceStub:
@@ -167,7 +168,7 @@ def rows_of(path: str, table: str, ticker: str) -> list[tuple]:
 def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path, container, capsys):
     # the last run, an EODHD one, scored both markets; SHOP.TO holds rows older than the window too
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY - timedelta(days=1)))
-    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY - timedelta(days=1), n=130))
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY - timedelta(days=1), n=HISTORY_DAYS + 10))
     score_all(container.analyzer, LAST_RUN)
     shop_criteria = rows_of(path, 'stock_criteria', 'SHOP.TO')
     shop_prices = rows_of(path, 'price_data', 'SHOP.TO')
