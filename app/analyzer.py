@@ -170,7 +170,8 @@ class Analyzer:
         # Technical indicators
         df['50dma'] = df['close'].rolling(window=50).mean()
         df['10ema'] = df['close'].ewm(span=10, adjust=False).mean()
-        df['volume_avg_20'] = df['volume'].rolling(window=20).mean()
+        # the 20 days before the scored day: the breakout day's own volume must not raise its baseline
+        df['volume_avg_20'] = df['volume'].rolling(window=20).mean().shift(1)
         df['max_20d'] = df['close'].rolling(window=20).max()
         df['max_60d'] = df['close'].rolling(window=60).max()
         df['max_vol_10d'] = df['volume'].rolling(window=10).max()

@@ -119,7 +119,7 @@ def test_clean_breakout_meets_every_core_criterion():
     assert sc.dma_50_25d_ago == 150.5  # 24 days earlier: mean of 126..175
     assert sc.ema_10 == 194.5  # 199 - 4.5
     assert sc.volume == 2000
-    assert sc.avg_vol_20d == 1050  # (19 * 1000 + 2000) / 20
+    assert sc.avg_vol_20d == 1000  # the 20 days before today, not including its 2000
     assert sc.max_vol_10d == 1000  # the 10 days before today
 
     assert core_flags(sc) == dict.fromkeys(core_flags(sc), 1)
@@ -176,20 +176,29 @@ def test_no_breakout_at_the_previous_high():
 
 
 def test_breakout_on_low_volume_is_unconfirmed():
-    # 1500 < 1.5 * (19 * 1000 + 1500) / 20 = 1537.5
-    sc = analyze(rising(100), volumes_with_last(100, 1500))
+    # 1499 < 1.5 * the 20-day average of 1000
+    sc = analyze(rising(100), volumes_with_last(100, 1499))
 
-    assert sc.avg_vol_20d == 1025
+    assert sc.avg_vol_20d == 1000
     assert sc.breakout_confirmed == 0
     assert sc.core_criteria_score == 4
     assert sc.core_criteria_met is False
 
 
+def test_the_breakout_days_own_volume_does_not_raise_the_average():
+    # exactly 1.5 times the 20 days before it; counted in its own average it would fall short
+    sc = analyze(rising(100), volumes_with_last(100, 1500))
+
+    assert sc.avg_vol_20d == 1000
+    assert sc.breakout_confirmed == 1
+    assert sc.core_criteria_met is True
+
+
 def test_breakout_below_a_recent_volume_spike_is_unconfirmed():
-    # 2000 >= 1.5 * the 20-day average of 1250, but below the 5000 of five days ago
+    # 2000 >= 1.5 * the 20-day average of 1200, but below the 5000 of five days ago
     sc = analyze(rising(100), volumes_with_last(100, 2000, spikes={-6: 5000}))
 
-    assert sc.avg_vol_20d == 1250  # (18 * 1000 + 5000 + 2000) / 20
+    assert sc.avg_vol_20d == 1200  # (19 * 1000 + 5000) / 20
     assert sc.max_vol_10d == 5000
     assert sc.breakout_confirmed == 0
     assert sc.core_criteria_met is False
@@ -205,9 +214,9 @@ def test_the_10_day_volume_high_covers_the_10_days_before_today(spike_at, confir
 
 
 def test_volume_exactly_at_both_thresholds_confirms():
-    # 1500 is exactly 1.5 * the 20-day average of (17 * 1000 + 0 + 1500 + 1500) / 20 = 1000,
+    # 1500 is exactly 1.5 * the 20-day average of (18 * 1000 + 500 + 1500) / 20 = 1000,
     # and equal to yesterday's 1500, the 10-day high
-    volumes = volumes_with_last(100, 1500, spikes={-2: 1500, -3: 0})
+    volumes = volumes_with_last(100, 1500, spikes={-2: 1500, -3: 500})
     sc = analyze(rising(100), volumes)
 
     assert sc.avg_vol_20d == 1000
@@ -375,7 +384,7 @@ def test_75_rows_is_enough_to_score_fully():
 def test_analyze_saves_one_row_per_ticker_with_enough_history():
     rows = (
         price_rows('AAA', rising(100), volumes_with_last(100, 2000))
-        + price_rows('BBB', rising(100), volumes_with_last(100, 1500))
+        + price_rows('BBB', rising(100), volumes_with_last(100, 1499))
         + price_rows('CCC', rising(74))
     )
     analyzer, criteria_repo = make_analyzer(rows)
