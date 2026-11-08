@@ -50,9 +50,13 @@ class FakeBenchmarkPriceRepo:
 class FakeStockCriteriaRepo:
     def __init__(self) -> None:
         self.saved: list[tuple[list[StockCriteria], date]] = []
+        self.cleared: list[str] = []
 
     def bulk_insert(self, items, date_created) -> None:
         self.saved.append((list(items), date_created))
+
+    def clear_status(self, tickers) -> None:
+        self.cleared = list(tickers)
 
 
 def price_rows(

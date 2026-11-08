@@ -1,7 +1,7 @@
 """
 Which tickers analyze scores, against a real database: a stale or frozen ticker keeps its previous stock_criteria
-row, date_created included, freshness is judged per market, run-refresh scores only the markets it fetched, and a
-run started before a market's day is complete scores that market's previous session.
+row, date_created included, but not its status, freshness is judged per market, run-refresh scores only the markets
+it fetched, and a run started before a market's day is complete scores that market's previous session.
 """
 
 import argparse
@@ -663,3 +663,40 @@ def test_thinly_traded_ticker_ending_in_a_flat_run_is_scored(path, container, ca
     out = capsys.readouterr().out
     assert summary_lines(out) == ['US: skipped 0 stale tickers (last price before 2026-11-06) and 0 frozen tickers']
     assert flagged_lines(out) == []
+
+
+def padded_rows(ticker: str) -> list[PriceData]:
+    """price_rows ending today, whose last 2 days repeat the close of the day before them with no volume."""
+    rows = price_rows(ticker, TODAY)
+    close = rows[-3].close
+    return [*rows[:-2], *(replace(row, close=close, volume=0) for row in rows[-2:])]
+
+
+def statuses(path: str) -> dict[str, tuple[float, str, str | None]]:
+    with sqlite3.connect(path) as con:
+        rows = con.execute('SELECT ticker, price, date_created, status FROM stock_criteria').fetchall()
+    return {ticker: (price, date_created, status) for ticker, price, date_created, status in rows}
+
+
+@pytest.mark.parametrize(
+    'rows',
+    [
+        pytest.param(price_rows('BRK', TODAY - timedelta(days=1)), id='stale'),
+        pytest.param(padded_rows('BRK'), id='padded stop'),
+        pytest.param(frozen_rows('BRK', flat=10), id='frozen'),
+    ],
+)
+def test_ticker_skipped_after_being_scored_the_same_day_loses_its_status(path, container, capsys, rows):
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+    container.price_data_repo.bulk_insert(price_rows('BRK', TODAY))
+    container.analyzer.analyze()
+    scored = statuses(path)
+    assert scored['BRK'][2] is not None
+
+    # a later run the same day, with another price API, stored rows BRK is skipped on
+    container.price_data_repo.replace_for_ticker('BRK', rows)
+    container.analyzer.analyze()
+
+    price, date_created, _ = scored['BRK']
+    assert statuses(path) == {**scored, 'BRK': (price, date_created, None)}
+    assert len(flagged_lines(capsys.readouterr().out)) == 1

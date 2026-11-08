@@ -378,7 +378,8 @@ class Analyzer:
 
         A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with today's
         date_created, so a ticker whose last price is older than its market's newest keeps its previous stock_criteria
-        row instead. So does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
+        row instead, with its date and values but without its status, which its stored prices no longer support. So
+        does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
         its rows are current, but its price is not. A padded stop (see padded_stop), a ticker that traded every day
         until its API began repeating its last close, counts as stale from its second flat day, dated by its last
         trade, so both price APIs reach the same verdict on a ticker that stopped trading. For the same reason, after
@@ -411,6 +412,7 @@ class Analyzer:
                 logger.warning(f'{ticker} not scored: {err}')
 
         results: list[StockCriteria | None] = []
+        skipped: list[str] = []
         for market, groups in by_market.items():
             if not groups:
                 continue
@@ -437,6 +439,7 @@ class Analyzer:
                         f'before the newest {market} market date {newest}'
                     )
                     stale += 1
+                    skipped.append(ticker)
                     if ticker not in already_flagged:
                         report_flagged(ticker, STALE, last_trade or last)
                     continue
@@ -446,6 +449,7 @@ class Analyzer:
                         f'since with no volume'
                     )
                     stale += 1
+                    skipped.append(ticker)
                     if ticker not in already_flagged:
                         report_flagged(ticker, STALE, last_trade)
                     continue
@@ -453,6 +457,7 @@ class Analyzer:
                 if since is not None:
                     logger.warning(f'{ticker} not scored: its price has been frozen, with no volume, since {since}')
                     frozen += 1
+                    skipped.append(ticker)
                     if ticker not in already_flagged:
                         report_flagged(ticker, FROZEN, since)
                     continue
@@ -466,6 +471,7 @@ class Analyzer:
         items = [with_status(sc) for sc in with_sector_strength([sc for sc in results if sc is not None])]
         date_created = datetime.now().date()
         self.save_to_repository(items, date_created)
+        self.stock_criteria_repo.clear_status(skipped)
 
     @staticmethod
     def _complete_sessions(

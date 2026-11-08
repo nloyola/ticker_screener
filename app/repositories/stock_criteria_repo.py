@@ -175,3 +175,8 @@ class StockCriteriaRepo:
         values = [_row_values(sc, date_created) for sc in items]
         with connect(self.db_path) as con:
             con.executemany(sql, values)
+
+    def clear_status(self, tickers: Iterable[str]) -> None:
+        """Clears the status of each of 'tickers' rows, leaving its date_created and every other value as it was."""
+        with connect(self.db_path) as con:
+            con.executemany('UPDATE stock_criteria SET status = NULL WHERE ticker = ?', [(t,) for t in tickers])
