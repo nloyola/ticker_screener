@@ -92,3 +92,13 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        date_created DATE NOT NULL DEFAULT (date('now')),
        UNIQUE (ticker)
 );
+
+-- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
+-- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in
+-- app/db.py creates it in databases from before it; change both together.
+CREATE TABLE IF NOT EXISTS company_name (
+       ticker TEXT NOT NULL PRIMARY KEY COLLATE NOCASE,
+       name TEXT NOT NULL,
+       price_api TEXT NOT NULL CHECK (price_api IN ('tiingo', 'eodhd')),
+       stored_at TIMESTAMP NOT NULL DEFAULT (datetime('now'))
+);

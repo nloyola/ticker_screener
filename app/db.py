@@ -143,7 +143,19 @@ def _guard_price_data_date(con: sqlite3.Connection) -> None:
     logger.info('Rebuilt price_data with the date guard, keeping its %d rows', rows)
 
 
-UPGRADES = (_guard_price_data_date,)
+def _add_company_name(con: sqlite3.Connection) -> None:
+    """Version 2: the company_name table, which schema.sql only creates when db-init runs."""
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS company_name (
+               ticker TEXT NOT NULL PRIMARY KEY COLLATE NOCASE,
+               name TEXT NOT NULL,
+               price_api TEXT NOT NULL CHECK (price_api IN ('tiingo', 'eodhd')),
+               stored_at TIMESTAMP NOT NULL DEFAULT (datetime('now'))
+        )""")
+
+
+UPGRADES = (_guard_price_data_date, _add_company_name)
 SCHEMA_VERSION = len(UPGRADES)
 
 
