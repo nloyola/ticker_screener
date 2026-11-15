@@ -30,6 +30,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The version of the screener's rules, bumped (semver) whenever a threshold, a window, an indicator's definition or a
+# status rule changes, so a stored score can always be traced to the rules that produced it (AGENTS.md, "Screener
+# version"). rule_settings() is the snapshot of the settings that travels with it.
+SCREENER_VERSION = '1.0.0'
+
 # The four mandatory conditions of the breakout strategy (GLOSSARY.md, "Core criteria"), scored on the last row.
 # The breakout compares the close with the highest high of the BREAKOUT_WINDOWS trading days before it.
 BREAKOUT_WINDOWS = (20, 60)
@@ -44,10 +49,15 @@ SMA_RISING_DAYS = 15
 
 # The secondary indicators (GLOSSARY.md, "Secondary indicators"): stored with their flags, never counted in the core
 # criteria score. An indicator a ticker has too few rows for is left empty, and so are the flags that need it.
-# Momentum: the 14-day RSI inside RSI_BAND, ends included.
+# Momentum: the RSI_DAYS-day RSI inside RSI_BAND, ends included.
+RSI_DAYS = 14
 RSI_BAND = (50.0, 70.0)
-# MACD crossover: MACD crossed above its signal line within the last MACD_CROSSOVER_DAYS sessions, the scored day
-# included, and has stayed above it since.
+# MACD: the MACD_FAST_DAYS-day EMA less the MACD_SLOW_DAYS-day one, with a MACD_SIGNAL_DAYS-day EMA of it as its
+# signal line. Crossover: MACD crossed above its signal line within the last MACD_CROSSOVER_DAYS sessions, the
+# scored day included, and has stayed above it since.
+MACD_FAST_DAYS = 12
+MACD_SLOW_DAYS = 26
+MACD_SIGNAL_DAYS = 9
 MACD_CROSSOVER_DAYS = 5
 # Moving-average alignment: the close above the 20-, 50- and 200-day simple moving averages, each rising over
 # SMA_RISING_DAYS like the 50-day one (SMA_DAYS, a core condition).
@@ -133,6 +143,45 @@ FROZEN_DAYS = 10
 # the 2-day minimum. A longer flat stretch after thin trading is left to the FROZEN_DAYS rule.
 PADDED_WINDOW = 30
 PADDED_MIN_DAYS = 2
+
+
+def rule_settings() -> dict[str, object]:
+    """
+    The snapshot of the rules SCREENER_VERSION names: every threshold and window the analyzer scores with, keyed by
+    its constant's name, and the secondary indicators a high-conviction breakout counts, in a form json.dumps takes
+    (a tuple as a list). tests/test_rule_settings.py fails when a constant is added here without being listed.
+    """
+    return {
+        'BREAKOUT_WINDOWS': list(BREAKOUT_WINDOWS),
+        'VOLUME_AVG_DAYS': VOLUME_AVG_DAYS,
+        'VOLUME_RATIO_MIN': VOLUME_RATIO_MIN,
+        'SMA_DAYS': SMA_DAYS,
+        'SMA_RISING_DAYS': SMA_RISING_DAYS,
+        'RSI_DAYS': RSI_DAYS,
+        'RSI_BAND': list(RSI_BAND),
+        'MACD_FAST_DAYS': MACD_FAST_DAYS,
+        'MACD_SLOW_DAYS': MACD_SLOW_DAYS,
+        'MACD_SIGNAL_DAYS': MACD_SIGNAL_DAYS,
+        'MACD_CROSSOVER_DAYS': MACD_CROSSOVER_DAYS,
+        'SHORT_SMA_DAYS': SHORT_SMA_DAYS,
+        'LONG_SMA_DAYS': LONG_SMA_DAYS,
+        'EMA_SPAN': EMA_SPAN,
+        'EMA_RISING_DAYS': EMA_RISING_DAYS,
+        'EMA_MIN_PERIODS': EMA_MIN_PERIODS,
+        'CLOSE_POSITION_MIN': CLOSE_POSITION_MIN,
+        'CONSOLIDATION_DAYS': CONSOLIDATION_DAYS,
+        'CONSOLIDATION_TIGHT_PCT': CONSOLIDATION_TIGHT_PCT,
+        'PROXIMITY_PCT': PROXIMITY_PCT,
+        'RS_1M_DAYS': RS_1M_DAYS,
+        'RS_3M_DAYS': RS_3M_DAYS,
+        'SECTOR_MIN_TICKERS': SECTOR_MIN_TICKERS,
+        'HIGH_CONVICTION_MIN': HIGH_CONVICTION_MIN,
+        'SECONDARY_INDICATORS': list(SECONDARY_INDICATORS),
+        'MIN_ROWS': MIN_ROWS,
+        'FROZEN_DAYS': FROZEN_DAYS,
+        'PADDED_WINDOW': PADDED_WINDOW,
+        'PADDED_MIN_DAYS': PADDED_MIN_DAYS,
+    }
 
 
 def _flat_days(closes: list, volumes: list) -> int:
@@ -564,8 +613,10 @@ class Analyzer:
         sma = df['close'].rolling(window=SMA_DAYS).mean()
 
         close_series = df['close'].squeeze()
-        rsi = RSIIndicator(close=close_series).rsi()
-        macd_calc = MACD(close=close_series)
+        rsi = RSIIndicator(close=close_series, window=RSI_DAYS).rsi()
+        macd_calc = MACD(
+            close=close_series, window_slow=MACD_SLOW_DAYS, window_fast=MACD_FAST_DAYS, window_sign=MACD_SIGNAL_DAYS
+        )
         macd_line = macd_calc.macd()
         signal_line = macd_calc.macd_signal()
         macd_hist = macd_calc.macd_diff()

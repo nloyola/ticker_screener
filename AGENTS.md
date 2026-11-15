@@ -38,6 +38,17 @@ This guide is for human and AI coding agents contributing to the ticker screener
 - Repositories open every connection through `connect(db_path)` (`app/db.py`), never their own; it commits on success, rolls back on error and closes. Work spanning several statements outside a repository goes inside `SQLite.connect()`, which wraps it in one transaction.
 
 
+## Screener version
+
+`SCREENER_VERSION` (`app/analyzer.py`) names the rules a score was produced by, and `rule_settings()` beside it is the snapshot of their settings that travels with it. Bump the version (semver) in the same commit as any change to what `analyze` scores:
+
+- Major: a core condition or status rule added, removed or redefined, so a breakout or status means something different.
+- Minor: a secondary indicator added, removed or redefined, or a threshold or window changed (`VOLUME_RATIO_MIN`, `RSI_BAND`, `SMA_RISING_DAYS` and the like), which moves results without changing what they mean.
+- Patch: a fix that changes some results without changing any rule's intent, such as an off-by-one in a lookback or the handling of missing rows.
+
+A change that leaves every score as it was (logging, refactoring, the fetch) needs no bump. A new threshold or window is a module-level constant in `app/analyzer.py`, never an inline number, and is listed in `rule_settings()`: `tests/test_rule_settings.py` fails on a constant that is neither listed there nor named in its `NOT_RULE_SETTINGS`.
+
+
 ## Testing
 
 - `uv run pytest` runs the tests in `tests/`. They cover what the dashboard relies on: the progress and flagged-ticker lines (`app/progress.py`), `run-refresh` with its lock (`app/screener_lock.py`), both documented in `README.md`, the core criteria and secondary indicators `Analyzer.analyze_ticker` computes (`tests/test_analyzer.py`), none of which changes the core criteria score, and the status `with_status` sets from them, that `analyze` leaves stale and frozen tickers unscored, judging staleness against each ticker's own market, that it scores only completed daily candles, dropping a day's rows until 3 hours after its market's close (`tests/test_markets.py`, `tests/test_analyzer_db.py`), and that `run-refresh` scores and prunes only the markets it fetched (`tests/test_analyzer_db.py`, with the frozen and padded-stop rules themselves in `tests/test_frozen.py`), that `ticker-fetcher` looks up only the missing company names and that a failed lookup never fails a ticker (`tests/test_company_name_lookup.py`, with each API's lookup on recorded answers), and that `ticker-fetcher --ticker` finds a ticker's subsector by parsing the ticker lists (`tests/test_sector_service.py`). A change to the criteria or indicators must update those tests to match. Check any other change by running the affected commands against a scratch database (`DB_NAME=/path/to/scratch.db uv run python main.py db-init`), never against `data/stock_data.db` unless that is the point.
