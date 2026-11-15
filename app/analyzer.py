@@ -2,7 +2,7 @@ import json
 import logging
 import statistics
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -415,6 +415,54 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+@dataclass(frozen=True)
+class Scored:
+    """
+    One ticker scored on a session: its criteria, the market and session it was scored in, that session's close
+    (unrounded, as price_data holds it) and the dates of the rows it was scored from, the session's the last.
+    """
+
+    criteria: StockCriteria
+    market: str
+    session_date: date
+    close: float
+    dates: pd.Index
+
+
+@dataclass(frozen=True)
+class Skipped:
+    """
+    A ticker left unscored on its market's session: 'reason' is STALE or FROZEN (app/progress.py), 'last' the date
+    its FLAGGED line carries and 'detail' why it was not scored, for the warning a run logs.
+    """
+
+    ticker: str
+    reason: str
+    last: date
+    detail: str
+
+
+@dataclass(frozen=True)
+class MarketScore:
+    """
+    One market's session (its newest price date), the tickers scored on it and those left unscored as stale or
+    frozen. A ticker with fewer than MIN_ROWS rows is in neither.
+    """
+
+    session_date: date
+    scored: list[Scored]
+    skipped: list[Skipped]
+
+
+def with_strength_and_status(scored: list[Scored]) -> list[Scored]:
+    """
+    'scored' with each ticker's returns compared with its subsector's median over 'scored' (with_sector_strength),
+    then its status set (with_status), which counts that comparison among the secondary indicators.
+    """
+    criteria = with_sector_strength([s.criteria for s in scored])
+    return [replace(s, criteria=with_status(sc)) for s, sc in zip(scored, criteria, strict=True)]
+
+
 class Analyzer:
     def __init__(self, container: Container, now: Callable[[], datetime] = utc_now) -> None:
         self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
@@ -496,16 +544,8 @@ class Analyzer:
             logger.info('No price data found.')
             return
 
-        by_market: dict[str, list[tuple[str, pd.DataFrame]]] = {market: [] for market in MARKETS}
-        for ticker, group_df in df.groupby(level='ticker'):
-            try:
-                by_market[market_of(str(ticker))].append((str(ticker), group_df))
-            except UnsupportedTicker as err:
-                logger.warning(f'{ticker} not scored: {err}')
-
-        results: list[StockCriteria | None] = []
-        # each ticker scored: its market, the session, that session's close and its stored price dates
-        scored_on: dict[str, tuple[str, date, float, pd.Index]] = {}
+        by_market = self._by_market(df)
+        scored: list[Scored] = []
         # each market's session scored, and how many of its tickers were
         sessions: dict[str, tuple[date, int]] = {}
         for market, groups in by_market.items():
@@ -517,57 +557,24 @@ class Analyzer:
             groups = self._complete_sessions(market, groups, started_at)
             if not groups:
                 continue
-            benchmark = self.benchmark_price_repo.closes(BENCHMARKS[market])
-            if not benchmark:
-                logger.info(
-                    f'{market}: no closes stored for benchmark {BENCHMARKS[market]}, market strength left empty'
-                )
-            newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
-            market_start = len(results)
-            stale = 0
-            frozen = 0
-            for ticker, group_df in groups:
-                last = group_df.index.get_level_values('date').max()
-                last_trade = padded_stop(group_df)
-                if last < newest:
-                    logger.warning(
-                        f'{ticker} not scored: its last price is from {last}, '
-                        f'before the newest {market} market date {newest}'
-                    )
-                    stale += 1
-                    if ticker not in already_flagged:
-                        report_flagged(ticker, STALE, last_trade or last)
-                    continue
-                if last_trade is not None:
-                    logger.warning(
-                        f'{ticker} not scored: it last traded on {last_trade}, and its price has been repeated '
-                        f'since with no volume'
-                    )
-                    stale += 1
-                    if ticker not in already_flagged:
-                        report_flagged(ticker, STALE, last_trade)
-                    continue
-                since = frozen_since(group_df)
-                if since is not None:
-                    logger.warning(f'{ticker} not scored: its price has been frozen, with no volume, since {since}')
-                    frozen += 1
-                    if ticker not in already_flagged:
-                        report_flagged(ticker, FROZEN, since)
-                    continue
-                results.append(self.analyze_ticker(ticker, group_df, benchmark))
-                dates = group_df.index.get_level_values('date')
-                scored_on[ticker] = (market, newest, float(group_df['close'].iloc[-1]), dates)
-            scored = sum(1 for sc in results[market_start:] if sc is not None)
-            if scored:
-                sessions[market] = (newest, scored)
+            result = self._score_market(market, groups)
+            for skipped in result.skipped:
+                logger.warning(f'{skipped.ticker} not scored: {skipped.detail}')
+                if skipped.ticker not in already_flagged:
+                    report_flagged(skipped.ticker, skipped.reason, skipped.last)
+            scored.extend(result.scored)
+            if result.scored:
+                sessions[market] = (result.session_date, len(result.scored))
+            stale = sum(1 for s in result.skipped if s.reason == STALE)
+            frozen = len(result.skipped) - stale
             print(
                 f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} '
-                f'(stopped trading, or last price before {newest}) '
+                f'(stopped trading, or last price before {result.session_date}) '
                 f'and {frozen} frozen ticker{"" if frozen == 1 else "s"}'
             )
 
-        # keep only real StockCriteria objects
-        items = [with_status(sc) for sc in with_sector_strength([sc for sc in results if sc is not None])]
+        scored = with_strength_and_status(scored)
+        items = [s.criteria for s in scored]
         date_created = datetime.now().date()
         self.save_to_repository(items, date_created)
         judged = fetched_by.markets if fetched_by is not None else MARKETS
@@ -575,27 +582,96 @@ class Analyzer:
         settings = json.dumps(rule_settings(), sort_keys=True)
         commit = git_commit()
         self._record_sessions(sessions, run_id, settings, commit)
-        self._archive_signals(items, scored_on, run_id, settings, commit)
+        self._archive_signals(scored, run_id, settings, commit)
 
-    def _archive_signals(
-        self,
-        items: list[StockCriteria],
-        scored_on: Mapping[str, tuple[str, date, float, pd.Index]],
-        run_id: int | None,
-        settings: str,
-        commit: str | None,
-    ) -> None:
+    def score_as_of(self, session_date: date, prices: pd.DataFrame | None = None) -> list[Scored]:
         """
-        Archives each of 'items' that is a signal, status confirmed or high-conviction, as a live signal of the
-        session 'scored_on' maps its ticker to, linked to the ticker's previous signal with the trading days since
-        it. A signal already archived for the same ticker, session and version is left as it was, so a rerun of a
-        session adds nothing. Logs how many it archived.
+        Scores every ticker as of 'session_date', as a run on that session would have, using only the price and
+        benchmark rows dated on or before it: no indicator, and no subsector median, reads a later row. 'prices' is
+        load_price_data()'s frame, loaded here when None, so a caller replaying many sessions loads it once.
+
+        Only the markets that traded on 'session_date' are scored: a market whose newest row on or before it is
+        older (a holiday, or a weekend) is left out, rather than scored again on its previous session. A ticker is
+        left out as a run leaves it out, stale, frozen or with fewer than MIN_ROWS rows, but without a warning or a
+        FLAGGED line, and nothing is stored. The session must be complete: rows of a candle not yet final are scored as
+        they stand.
+
+        Returns the tickers scored, with their subsector comparison and status set over the tickers scored on that
+        session in every market.
+        """
+        df = self.load_price_data() if prices is None else prices
+        if df is None:
+            return []
+        df = df[df.index.get_level_values('date') <= session_date]
+        scored: list[Scored] = []
+        for market, groups in self._by_market(df).items():
+            if not groups:
+                continue
+            result = self._score_market(market, groups)
+            if result.session_date == session_date:
+                scored.extend(result.scored)
+        return with_strength_and_status(scored)
+
+    @staticmethod
+    def _by_market(df: pd.DataFrame) -> dict[str, list[tuple[str, pd.DataFrame]]]:
+        """Each market's tickers with their rows, oldest first, leaving out (with a warning) a ticker of none."""
+        by_market: dict[str, list[tuple[str, pd.DataFrame]]] = {market: [] for market in MARKETS}
+        for ticker, group_df in df.groupby(level='ticker'):
+            try:
+                by_market[market_of(str(ticker))].append((str(ticker), group_df))
+            except UnsupportedTicker as err:
+                logger.warning(f'{ticker} not scored: {err}')
+        return by_market
+
+    def _score_market(self, market: str, groups: list[tuple[str, pd.DataFrame]]) -> MarketScore:
+        """
+        Scores each of 'market's tickers ('groups', each ticker's rows oldest first) on the market's session, its
+        newest price date, against the benchmark's closes up to that session. A ticker whose last price is older,
+        or whose rows end in a padded stop (padded_stop) is skipped as stale, and a frozen one (frozen_since) as
+        frozen. Warns about, flags and stores nothing; the subsector comparison and the status are left to the caller
+        (with_strength_and_status), which knows every ticker scored on the session.
+        """
+        newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
+        benchmark = {d: c for d, c in self.benchmark_price_repo.closes(BENCHMARKS[market]).items() if d <= newest}
+        if not benchmark:
+            logger.info(f'{market}: no closes stored for benchmark {BENCHMARKS[market]}, market strength left empty')
+        scored: list[Scored] = []
+        skipped: list[Skipped] = []
+        for ticker, group_df in groups:
+            last = group_df.index.get_level_values('date').max()
+            last_trade = padded_stop(group_df)
+            if last < newest:
+                detail = f'its last price is from {last}, before the newest {market} market date {newest}'
+                skipped.append(Skipped(ticker, STALE, last_trade or last, detail))
+                continue
+            if last_trade is not None:
+                detail = f'it last traded on {last_trade}, and its price has been repeated since with no volume'
+                skipped.append(Skipped(ticker, STALE, last_trade, detail))
+                continue
+            since = frozen_since(group_df)
+            if since is not None:
+                detail = f'its price has been frozen, with no volume, since {since}'
+                skipped.append(Skipped(ticker, FROZEN, since, detail))
+                continue
+            sc = self.analyze_ticker(ticker, group_df, benchmark)
+            if sc is not None:
+                dates = group_df.index.get_level_values('date')
+                scored.append(Scored(sc, market, newest, float(group_df['close'].iloc[-1]), dates))
+        return MarketScore(newest, scored, skipped)
+
+    def _archive_signals(self, scored: list[Scored], run_id: int | None, settings: str, commit: str | None) -> None:
+        """
+        Archives each of 'scored' that is a signal, status confirmed or high-conviction, as a live signal of the
+        session it was scored on, linked to the ticker's previous signal with the trading days since it. A signal
+        already archived for the same ticker, session and version is left as it was, so a rerun of a session adds
+        nothing. Logs how many it archived.
         """
         signals: list[Signal] = []
-        for sc in items:
+        for s in scored:
+            sc = s.criteria
             if sc.status not in SIGNAL_STATUSES:
                 continue
-            market, session_date, close, dates = scored_on[sc.ticker]
+            market, session_date, close, dates = s.market, s.session_date, s.close, s.dates
             previous = self.signal_repo.previous(sc.ticker, session_date)
             signals.append(
                 Signal(

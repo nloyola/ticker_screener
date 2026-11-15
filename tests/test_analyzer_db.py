@@ -1007,3 +1007,119 @@ def test_repeated_signal_links_to_the_previous_one(path, container):
 def test_trading_days_between(previous, expected):
     stored = pd.Index([date(2026, 11, 5), date(2026, 11, 6), date(2026, 11, 9), date(2026, 11, 10)])
     assert trading_days_between(stored, previous, date(2026, 11, 10)) == expected
+
+
+# Scoring a past session: score_as_of reads only the rows dated on or before it.
+AS_OF = TODAY - timedelta(days=40)
+LATER_DAYS = 40
+
+
+def history_rows(ticker: str, step: float, last_day: date) -> list[PriceData]:
+    """
+    A year of closes rising by 'step' a day from 100 to last_day, each day's range 2 below its close to half a step
+    above it, so every close breaks out above the day before's high, with a volume spike on last_day: long enough for
+    every indicator, the 200-day average and 21-week EMA included.
+    """
+    rows = []
+    for i, row in enumerate(price_rows(ticker, last_day, n=368)):
+        close = 100.0 + step * i
+        rows.append(replace(row, close=close, high=close + step / 2, low=close - 2))
+    return rows
+
+
+def benchmark_prices(last_day: date) -> list[DailyPrice]:
+    return [
+        DailyPrice(last_day - timedelta(days=367 - i), 200.0 + i, 1, 201.0 + i, 198.0 + i, 200.0 + i)
+        for i in range(368)
+    ]
+
+
+def extreme_rows(ticker: str, first_day: date, n: int) -> list[PriceData]:
+    """n days from first_day whose closes, ranges and volumes swing wildly, to move any indicator that reads them."""
+    return [
+        PriceData(
+            id=0,
+            subsector_id=1,
+            ticker=ticker,
+            date=first_day + timedelta(days=i),
+            close=1e6 if i % 2 else 0.01,
+            volume=10**12 if i % 2 else 0,
+            high=2e6,
+            low=0.001,
+        )
+        for i in range(n)
+    ]
+
+
+def extreme_benchmark(first_day: date, n: int) -> list[DailyPrice]:
+    return [DailyPrice(first_day + timedelta(days=i), 1e9 if i % 2 else 1e-3, 1, 2e9, 1e-4, 1.0) for i in range(n)]
+
+
+SUBSECTOR_STEPS = {'AAA': 1.0, 'BBB': 2.0, 'CCC': 0.5}
+
+
+def store_history(container, last_day: date) -> None:
+    """Three US tickers of one subsector and one Canadian, with both markets' benchmarks, ending on last_day."""
+    for ticker, step in (*SUBSECTOR_STEPS.items(), ('SHOP.TO', 1.0)):
+        container.price_data_repo.bulk_insert(history_rows(ticker, step, last_day))
+    container.benchmark_price_repo.replace('SPY', benchmark_prices(last_day))
+    container.benchmark_price_repo.replace('XIU.TO', benchmark_prices(last_day))
+
+
+def scores(scored) -> dict[str, tuple]:
+    return {s.criteria.ticker: (s.criteria, s.market, s.session_date, s.close, list(s.dates)) for s in scored}
+
+
+def test_score_as_of_ignores_every_row_after_the_session(container):
+    store_history(container, AS_OF)
+    before = container.analyzer.score_as_of(AS_OF)
+
+    # every indicator is filled in, the subsector comparison and the status included, so each one is checked
+    aaa = next(s.criteria for s in before if s.criteria.ticker == 'AAA')
+    assert [f for f, v in vars(aaa).items() if v is None] == []
+    assert aaa.status == 'high_conviction'
+    assert {s.criteria.ticker for s in before} == {*SUBSECTOR_STEPS, 'SHOP.TO'}
+
+    # wild rows after the session for every ticker and benchmark, and a ticker of the same subsector with no row on
+    # the session, stale as of it, whose later rows would move the subsector's medians if it were scored
+    first_later = AS_OF + timedelta(days=1)
+    for ticker in (*SUBSECTOR_STEPS, 'SHOP.TO'):
+        container.price_data_repo.bulk_insert(extreme_rows(ticker, first_later, LATER_DAYS))
+    container.price_data_repo.bulk_insert(history_rows('GAP', 3.0, AS_OF - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(extreme_rows('GAP', first_later, LATER_DAYS))
+    for symbol in ('SPY', 'XIU.TO'):
+        container.benchmark_price_repo.replace(
+            symbol, [*benchmark_prices(AS_OF), *extreme_benchmark(first_later, LATER_DAYS)]
+        )
+
+    after = container.analyzer.score_as_of(AS_OF)
+
+    assert scores(after) == scores(before)
+    # the later rows are there to be read: the newest session scores differently
+    latest = container.analyzer.score_as_of(first_later + timedelta(days=LATER_DAYS - 1))
+    assert scores(latest).keys() == {*scores(before), 'GAP'}
+    assert all(scores(latest)[t][0] != scores(before)[t][0] for t in scores(before))
+
+
+def test_score_as_of_the_latest_session_matches_what_a_run_stores(path, container):
+    store_history(container, TODAY)
+    container.analyzer.analyze(started_at=EVENING)
+
+    stored = table_rows(path, 'stock_criteria')
+    scored = container.analyzer.score_as_of(TODAY)
+
+    assert {s.criteria.ticker for s in scored} == set(stored) == {*SUBSECTOR_STEPS, 'SHOP.TO'}
+    for s in scored:
+        row = stored[s.criteria.ticker]
+        expected = {f: row[f] for f in vars(s.criteria) if f != 'id'}
+        assert {f: getattr(s.criteria, f) for f in expected} == expected, s.criteria.ticker
+
+
+def test_score_as_of_leaves_out_a_market_closed_that_session(container):
+    # Canada traded on AS_OF and the US did not
+    container.price_data_repo.bulk_insert(history_rows('AAA', 1.0, AS_OF - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(history_rows('SHOP.TO', 1.0, AS_OF))
+
+    scored = container.analyzer.score_as_of(AS_OF)
+
+    assert [(s.criteria.ticker, s.session_date) for s in scored] == [('SHOP.TO', AS_OF)]
