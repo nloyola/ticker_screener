@@ -177,6 +177,103 @@ CREATE TABLE IF NOT EXISTS screened_session (
        PRIMARY KEY (market, session_date)
 );
 
+-- The breakout archive: one row per ticker that met all four mandatory conditions (status confirmed or
+-- high_conviction) on a session, append-only. A ticker's market, exchange (NULL when unknown) and market time zone
+-- (MARKET_CLOSES in app/markets.py); the session it was scored on and that session's close as price_data holds it,
+-- unrounded, where price is rounded; the sector and subsector names at signal time, not ids, since the dashboard
+-- renames and deletes them; every value and flag column of stock_criteria under the same name and type
+-- (tests/test_signal_schema.py fails on one it lacks), with secondary_passed and the status; the rules it was scored
+-- by, the commit and the run, as in screened_session; and its source, live from a run or backfill from a replayed
+-- session. A repeated signal points at the ticker's previous one and counts the trading days since it. A rerun of
+-- a session adds nothing: one signal per ticker, session and screener version, whose unique index also serves the
+-- lookups by ticker. Not market data: db-init and the dashboard's ticker removals never touch it. The eleventh
+-- upgrade in app/db.py creates it in databases from before it; change both together.
+CREATE TABLE IF NOT EXISTS signal (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       ticker TEXT NOT NULL,
+       market TEXT NOT NULL CHECK (market IN ('US', 'Canada')),
+       exchange TEXT,
+       time_zone TEXT NOT NULL,
+       session_date TEXT NOT NULL CHECK (date(session_date) IS session_date),
+       close REAL NOT NULL,
+       sector TEXT,
+       subsector TEXT,
+       price REAL,
+       core_criteria_met BOOLEAN,
+       core_criteria_score INTEGER,
+       high_20d REAL,
+       high_60d REAL,
+       volume INTEGER,
+       avg_vol_20d INTEGER,
+       dma_50 REAL,
+       dma_50_prev_15d REAL,
+       rsi REAL,
+       macd REAL,
+       signal REAL,
+       breakout_20d INTEGER,
+       breakout_60d INTEGER,
+       breakout_confirmed INTEGER,
+       price_gt_50dma INTEGER,
+       dma_50_rising INTEGER,
+       rsi_50_70 INTEGER,
+       macd_above_signal INTEGER,
+       volume_ratio REAL,
+       macd_hist REAL,
+       macd_hist_prev REAL,
+       macd_days_above INTEGER,
+       macd_crossover INTEGER,
+       macd_hist_rising INTEGER,
+       dma_20 REAL,
+       dma_20_prev_15d REAL,
+       dma_200 REAL,
+       dma_200_prev_15d REAL,
+       price_gt_20dma INTEGER,
+       dma_20_rising INTEGER,
+       price_gt_200dma INTEGER,
+       dma_200_rising INTEGER,
+       ema_21 REAL,
+       ema_21_prev_5d REAL,
+       price_gt_21ema INTEGER,
+       ema_21_rising INTEGER,
+       ema_21w REAL,
+       ema_21w_prev_1w REAL,
+       price_gt_21wema INTEGER,
+       ema_21w_rising INTEGER,
+       close_position REAL,
+       close_upper_quarter INTEGER,
+       consolidation_range_pct REAL,
+       consolidation_tight INTEGER,
+       consolidation_vol_ratio REAL,
+       consolidation_vol_declining INTEGER,
+       dist_high_20d_pct REAL,
+       dist_high_60d_pct REAL,
+       near_resistance INTEGER,
+       return_1m_pct REAL,
+       return_3m_pct REAL,
+       rs_market_1m REAL,
+       rs_market_3m REAL,
+       rs_sector_1m REAL,
+       rs_sector_3m REAL,
+       outperforms_market_1m INTEGER,
+       outperforms_market_3m INTEGER,
+       outperforms_sector_1m INTEGER,
+       outperforms_sector_3m INTEGER,
+       secondary_passed INTEGER,
+       status TEXT NOT NULL CHECK (status IN ('high_conviction', 'confirmed')),
+       screener_version TEXT NOT NULL,
+       rule_settings TEXT NOT NULL CHECK (json_valid(rule_settings)),
+       git_commit TEXT,
+       run_id INTEGER,
+       source TEXT NOT NULL CHECK (source IN ('live', 'backfill')),
+       previous_signal_id INTEGER REFERENCES signal (id),
+       trading_days_since_previous INTEGER CHECK (trading_days_since_previous > 0),
+       archived_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+       CHECK ((previous_signal_id IS NULL) = (trading_days_since_previous IS NULL)),
+       UNIQUE (ticker, session_date, screener_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_session_date ON signal(session_date);
+
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
 -- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in
 -- app/db.py creates it in databases from before it; change both together.
