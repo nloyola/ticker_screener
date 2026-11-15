@@ -317,6 +317,23 @@ def _add_open(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE {table} ADD COLUMN open REAL')
 
 
+def _add_screened_session(con: sqlite3.Connection) -> None:
+    """Version 10: the screened_session table, which schema.sql only creates when db-init runs."""
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS screened_session (
+               market TEXT NOT NULL CHECK (market IN ('US', 'Canada')),
+               session_date TEXT NOT NULL CHECK (date(session_date) IS session_date),
+               screener_version TEXT NOT NULL,
+               rule_settings TEXT NOT NULL CHECK (json_valid(rule_settings)),
+               git_commit TEXT,
+               run_id INTEGER,
+               tickers_scored INTEGER NOT NULL CHECK (tickers_scored > 0),
+               screened_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+               PRIMARY KEY (market, session_date)
+        )""")
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -327,6 +344,7 @@ UPGRADES = (
     _add_relative_strength,
     _add_stock_criteria_status,
     _add_open,
+    _add_screened_session,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

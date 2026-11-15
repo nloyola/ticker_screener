@@ -1,3 +1,4 @@
+import json
 import logging
 import statistics
 from collections.abc import Callable, Collection, Mapping
@@ -19,13 +20,15 @@ from app.markets import (
     last_complete_session,
     market_of,
 )
-from app.models import StockCriteria
+from app.models import ScreenedSession, StockCriteria
 from app.progress import FROZEN, STALE, report_flagged, report_progress
+from app.provenance import git_commit
 
 if TYPE_CHECKING:
     from app.price_apis import PriceApi
     from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
     from app.repositories.price_data_repo import PriceDataRepo
+    from app.repositories.screened_session_repo import ScreenedSessionRepo
     from app.repositories.stock_criteria_repo import StockCriteriaRepo
 
 logger = logging.getLogger(__name__)
@@ -397,6 +400,7 @@ class Analyzer:
         self.stock_criteria_repo: StockCriteriaRepo = container.stock_criteria_repo
         self.price_data_repo: PriceDataRepo = container.price_data_repo
         self.benchmark_price_repo: BenchmarkPriceRepo = container.benchmark_price_repo
+        self.screened_session_repo: ScreenedSessionRepo = container.screened_session_repo
         # the clock a run's start is read from, timezone aware
         self.now = now
 
@@ -405,17 +409,25 @@ class Analyzer:
         fetched_by: 'PriceApi | None' = None,
         already_flagged: Collection[str] = (),
         started_at: datetime | None = None,
+        run_id: int | None = None,
     ) -> None:
         """
         Scores the tickers of every market, or, after a fetch, only those of the markets 'fetched_by' covers (see
-        _analyze), on the sessions complete when the run started: 'started_at', or now when it is None. Prints
-        'PROGRESS stage=analyze status=start' before the work and 'status=done' after it.
+        _analyze), on the sessions complete when the run started: 'started_at', or now when it is None. Records each
+        market's session it scored in screened_session, from the stock_analyzer screener_run 'run_id' when given.
+        Prints 'PROGRESS stage=analyze status=start' before the work and 'status=done' after it.
         """
         report_progress('analyze', status='start')
-        self._analyze(fetched_by, already_flagged, started_at if started_at is not None else self.now())
+        self._analyze(fetched_by, already_flagged, started_at if started_at is not None else self.now(), run_id)
         report_progress('analyze', status='done')
 
-    def _analyze(self, fetched_by: 'PriceApi | None', already_flagged: Collection[str], started_at: datetime) -> None:
+    def _analyze(
+        self,
+        fetched_by: 'PriceApi | None',
+        already_flagged: Collection[str],
+        started_at: datetime,
+        run_id: int | None,
+    ) -> None:
         """
         Only completed daily candles are scored. A run started before a market's close plus the price APIs'
         publishing delay (app/markets.py) fetched that day's row while the session was still in progress, or before
@@ -449,6 +461,10 @@ class Analyzer:
         this run. Only then is its status set (with_status), since relative strength is one of the secondary
         indicators a high-conviction breakout counts.
 
+        Each market with at least one ticker scored records its session, the market's newest price date, in
+        screened_session, with SCREENER_VERSION, rule_settings(), the screener's git commit, 'run_id' and how many
+        of its tickers were scored, replacing the row of an earlier run that scored the same session.
+
         Prints one summary line per market that has prices.
         """
         df = self.load_price_data()
@@ -464,6 +480,8 @@ class Analyzer:
                 logger.warning(f'{ticker} not scored: {err}')
 
         results: list[StockCriteria | None] = []
+        # each market's session scored, and how many of its tickers were
+        sessions: dict[str, tuple[date, int]] = {}
         for market, groups in by_market.items():
             if not groups:
                 continue
@@ -479,6 +497,7 @@ class Analyzer:
                     f'{market}: no closes stored for benchmark {BENCHMARKS[market]}, market strength left empty'
                 )
             newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
+            market_start = len(results)
             stale = 0
             frozen = 0
             for ticker, group_df in groups:
@@ -510,6 +529,9 @@ class Analyzer:
                         report_flagged(ticker, FROZEN, since)
                     continue
                 results.append(self.analyze_ticker(ticker, group_df, benchmark))
+            scored = sum(1 for sc in results[market_start:] if sc is not None)
+            if scored:
+                sessions[market] = (newest, scored)
             print(
                 f'{market}: skipped {stale} stale ticker{"" if stale == 1 else "s"} '
                 f'(stopped trading, or last price before {newest}) '
@@ -522,6 +544,30 @@ class Analyzer:
         self.save_to_repository(items, date_created)
         judged = fetched_by.markets if fetched_by is not None else MARKETS
         self._clear_unscored_statuses(judged, {sc.ticker for sc in items})
+        self._record_sessions(sessions, run_id)
+
+    def _record_sessions(self, sessions: Mapping[str, tuple[date, int]], run_id: int | None) -> None:
+        """Records each market's session scored, as 'sessions' maps it, with the rules it was scored by."""
+        if not sessions:
+            return
+        settings = json.dumps(rule_settings(), sort_keys=True)
+        commit = git_commit()
+        self.screened_session_repo.record(
+            ScreenedSession(
+                market=market,
+                session_date=session_date,
+                screener_version=SCREENER_VERSION,
+                rule_settings=settings,
+                git_commit=commit,
+                run_id=run_id,
+                tickers_scored=scored,
+            )
+            for market, (session_date, scored) in sessions.items()
+        )
+        for market, (session_date, scored) in sessions.items():
+            logger.info(
+                f'{market}: recorded session {session_date}, {scored} ticker{"" if scored == 1 else "s"} scored'
+            )
 
     def _clear_unscored_statuses(self, markets: Collection[str], scored: Collection[str]) -> None:
         """Clears the status of every stock_criteria row of 'markets' whose ticker is not in 'scored'."""

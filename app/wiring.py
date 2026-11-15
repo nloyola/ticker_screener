@@ -10,6 +10,7 @@ from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
+from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.repositories.subsector_repo import SubsectorRepo
@@ -39,6 +40,7 @@ def build_container(config: Config) -> Container:
     c.register('stock_criteria_repo', Singleton(lambda: StockCriteriaRepo(c)))
     c.register('ticker_repo', Singleton(lambda: TickerRepo(c)))
     c.register('company_name_repo', Singleton(lambda: CompanyNameRepo(c)))
+    c.register('screened_session_repo', Singleton(lambda: ScreenedSessionRepo(c)))
 
     c.register('price_api_client', Singleton(lambda: price_api_client(c)))
     c.register('sector_service', Singleton(lambda: SectorService(c)))

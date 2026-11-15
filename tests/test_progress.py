@@ -149,7 +149,10 @@ def test_fetch_with_no_subsectors_reports_zero_total(capsys):
 
 def test_analyze_reports_start_and_done(capsys):
     container = SimpleNamespace(
-        stock_criteria_repo=None, price_data_repo=SimpleNamespace(all=lambda: []), benchmark_price_repo=None
+        stock_criteria_repo=None,
+        price_data_repo=SimpleNamespace(all=lambda: []),
+        benchmark_price_repo=None,
+        screened_session_repo=None,
     )
     Analyzer(container).analyze()
 

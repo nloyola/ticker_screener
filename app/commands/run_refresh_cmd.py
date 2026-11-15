@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 # EX_TEMPFAIL: another refresh holds the lock, so a caller can tell "busy, try later" from a failed run
 EXIT_LOCK_HELD = os.EX_TEMPFAIL
 
+# The stock_analyzer screener_run this refresh is, set by its screener runner and recorded with each screened session.
+RUN_ID_ENV = 'SCREENER_RUN_ID'
+
+
+def run_id_from_env() -> int | None:
+    """The SCREENER_RUN_ID the runner set, or None when unset or not a positive integer, which is logged."""
+    value = os.environ.get(RUN_ID_ENV, '').strip()
+    if not value:
+        return None
+    if value.isdigit() and int(value) > 0:
+        return int(value)
+    logger.warning('%s=%r is not a run id, screened sessions recorded without one', RUN_ID_ENV, value)
+    return None
+
 
 class RunRefreshCmd(BaseCommand):
     _NAME = 'run-refresh'
@@ -48,6 +62,7 @@ class RunRefreshCmd(BaseCommand):
         # which sessions are complete is judged by when the run started, not when analyze does: a session still in
         # progress now is in progress in what the fetch downloads, however late the fetch ends
         started_at = analyzer.now()
+        run_id = run_id_from_env()
         try:
             with screener_lock(container.db_path):
                 stats = fetch_or_exit(ticker_fetcher, strict=True)
@@ -58,7 +73,10 @@ class RunRefreshCmd(BaseCommand):
                 # only the markets this run fetched: another market's scores would be restamped as current; and a
                 # ticker the fetch flagged is not flagged again as stale or frozen
                 analyzer.analyze(
-                    fetched_by=ticker_fetcher.api, already_flagged=ticker_fetcher.flagged, started_at=started_at
+                    fetched_by=ticker_fetcher.api,
+                    already_flagged=ticker_fetcher.flagged,
+                    started_at=started_at,
+                    run_id=run_id,
                 )
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)

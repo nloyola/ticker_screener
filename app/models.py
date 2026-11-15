@@ -123,3 +123,19 @@ class StockCriteria:
     # status: 'high_conviction', 'confirmed', 'pre_breakout', or None for none
     secondary_passed: int | None = None
     status: str | None = None
+
+
+@dataclass(frozen=True)
+class ScreenedSession:
+    """One market's session scored by a run, with the rules it was scored by (SCREENER_VERSION in app/analyzer.py)."""
+
+    market: str
+    session_date: date
+    screener_version: str
+    # rule_settings() as JSON
+    rule_settings: str
+    # the screener's git commit, with '-dirty' when its checkout had uncommitted changes; None when unknown
+    git_commit: str | None
+    # the stock_analyzer screener_run the scores came from; None for a run not started by its runner
+    run_id: int | None
+    tickers_scored: int

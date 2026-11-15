@@ -5,6 +5,7 @@ it fetched, and a run started before a market's day is complete scores that mark
 """
 
 import argparse
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
@@ -14,15 +15,18 @@ from zoneinfo import ZoneInfo
 import pytest
 import requests
 
-from app.analyzer import Analyzer
-from app.commands.run_refresh_cmd import RunRefreshCmd
+import app.analyzer as analyzer_module
+from app.analyzer import SCREENER_VERSION, Analyzer, rule_settings
+from app.commands.run_refresh_cmd import RUN_ID_ENV, RunRefreshCmd, run_id_from_env
 from app.db import init_db
-from app.markets import US
+from app.markets import CANADA, US
 from app.models import PriceData
 from app.price_apis import DailyPrice
+from app.provenance import COMMIT_ENV
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
+from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
@@ -71,6 +75,7 @@ def container(path) -> SimpleNamespace:
     container.benchmark_price_repo = BenchmarkPriceRepo(container)
     container.company_name_repo = CompanyNameRepo(container)
     container.stock_criteria_repo = StockCriteriaRepo(container)
+    container.screened_session_repo = ScreenedSessionRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     return container
 
@@ -747,3 +752,102 @@ def test_ticker_left_unscored_after_being_scored_loses_its_status(path, containe
     price, date_created, _ = scored['BRK']
     assert statuses(path) == {**scored, 'BRK': (price, date_created, None)}
     assert flagged_lines(capsys.readouterr().out) == []
+
+
+# screened_session: each market's session a run scored, with the rules it scored by
+
+SESSION_BEFORE = TODAY - timedelta(days=1)
+
+
+def sessions(path: str) -> list[tuple]:
+    with sqlite3.connect(path) as con:
+        return con.execute(
+            'SELECT market, session_date, screener_version, rule_settings, git_commit, run_id, tickers_scored '
+            'FROM screened_session ORDER BY market, session_date'
+        ).fetchall()
+
+
+def run_with_rules(container, monkeypatch, version: str, run_id: int) -> None:
+    """Runs analyze as a screener at 'version', whose snapshot names it, so each row shows which run wrote it."""
+    monkeypatch.setattr(analyzer_module, 'SCREENER_VERSION', version)
+    monkeypatch.setattr(analyzer_module, 'rule_settings', lambda: {'version': version})
+    container.analyzer.analyze(run_id=run_id)
+
+
+def test_reruns_replace_a_session_and_the_next_session_adds_its_own(path, container, monkeypatch):
+    monkeypatch.setenv(COMMIT_ENV, 'abc1234')
+    container.price_data_repo.bulk_insert(price_rows('AAA', SESSION_BEFORE))
+    container.price_data_repo.bulk_insert(price_rows('BBB', SESSION_BEFORE))
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', SESSION_BEFORE))
+
+    run_with_rules(container, monkeypatch, '1.0.0', run_id=1)
+    run_with_rules(container, monkeypatch, '1.1.0', run_id=2)
+    # the next session: every ticker gets TODAY's row
+    for ticker in ('AAA', 'BBB', 'SHOP.TO'):
+        container.price_data_repo.bulk_insert(price_rows(ticker, TODAY))
+    run_with_rules(container, monkeypatch, '2.0.0', run_id=3)
+
+    v11, v20 = json.dumps({'version': '1.1.0'}), json.dumps({'version': '2.0.0'})
+    assert sessions(path) == [
+        (CANADA, SESSION_BEFORE.isoformat(), '1.1.0', v11, 'abc1234', 2, 1),
+        (CANADA, TODAY.isoformat(), '2.0.0', v20, 'abc1234', 3, 1),
+        (US, SESSION_BEFORE.isoformat(), '1.1.0', v11, 'abc1234', 2, 2),
+        (US, TODAY.isoformat(), '2.0.0', v20, 'abc1234', 3, 2),
+    ]
+
+
+def test_session_carries_the_current_rules(path, container, monkeypatch):
+    monkeypatch.delenv(COMMIT_ENV, raising=False)
+    monkeypatch.setattr('app.provenance._git', lambda *args: {'rev-parse': 'f' * 40, 'status': ''}[args[0]])
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
+
+    container.analyzer.analyze()
+
+    [(market, day, version, settings, commit, run_id, scored)] = sessions(path)
+    assert (market, day, version, commit, run_id, scored) == (
+        US,
+        TODAY.isoformat(),
+        SCREENER_VERSION,
+        'f' * 40,
+        None,
+        1,
+    )
+    assert json.loads(settings) == rule_settings()
+
+
+def test_market_with_no_ticker_scored_records_no_session(path, container):
+    # 10 rows are too few to score
+    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY, n=10))
+
+    container.analyzer.analyze()
+
+    assert sessions(path) == []
+
+
+def test_run_refresh_records_its_run_id_for_the_markets_it_fetched(path, container, monkeypatch):
+    monkeypatch.setenv(RUN_ID_ENV, '42')
+    monkeypatch.setenv(COMMIT_ENV, 'unknown')
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY))
+    container.price_api_client = TiingoStub()
+    container.sector_service = SectorServiceStub(['AAA', 'SHOP.TO'])
+    container.ticker_fetcher = TickerFetcher(container)
+    cmd = RunRefreshCmd()
+    parser = argparse.ArgumentParser()
+    cmd.add_arguments(parser)
+    cmd.handle(parser.parse_args([]), container)
+
+    # Tiingo covers only the US; an image built without a revision records no commit
+    assert [(m, d, c, r, n) for m, d, _, _, c, r, n in sessions(path)] == [(US, TODAY.isoformat(), None, 42, 1)]
+
+
+@pytest.mark.parametrize(
+    ('value', 'expected'), [('', None), ('7', 7), (' 7 ', 7), ('0', None), ('-3', None), ('x', None)]
+)
+def test_run_id_from_env(monkeypatch, value, expected):
+    monkeypatch.setenv(RUN_ID_ENV, value)
+    assert run_id_from_env() == expected
+
+
+def test_run_id_unset(monkeypatch):
+    monkeypatch.delenv(RUN_ID_ENV, raising=False)
+    assert run_id_from_env() is None

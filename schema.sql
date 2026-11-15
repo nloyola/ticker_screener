@@ -159,6 +159,24 @@ CREATE TABLE IF NOT EXISTS benchmark_price (
        PRIMARY KEY (ticker, date)
 );
 
+-- The sessions each market was scored on: one row per market (MARKETS in app/markets.py) and session date, written
+-- by every analyze that scored at least one of that market's tickers on it, with the rules it scored by
+-- (SCREENER_VERSION and rule_settings() in app/analyzer.py, the latter as JSON), the screener's git commit (NULL when
+-- unknown) and the stock_analyzer screener_run the run was (run_id, NULL for a run its runner did not start; no
+-- foreign key, since that table is the dashboard's). A rerun of a session replaces its row. Not market data: db-init
+-- keeps it. The tenth upgrade in app/db.py creates it in databases from before it; change both together.
+CREATE TABLE IF NOT EXISTS screened_session (
+       market TEXT NOT NULL CHECK (market IN ('US', 'Canada')),
+       session_date TEXT NOT NULL CHECK (date(session_date) IS session_date),
+       screener_version TEXT NOT NULL,
+       rule_settings TEXT NOT NULL CHECK (json_valid(rule_settings)),
+       git_commit TEXT,
+       run_id INTEGER,
+       tickers_scored INTEGER NOT NULL CHECK (tickers_scored > 0),
+       screened_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+       PRIMARY KEY (market, session_date)
+);
+
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
 -- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in
 -- app/db.py creates it in databases from before it; change both together.

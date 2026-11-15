@@ -46,8 +46,11 @@ ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     HOME=/tmp
 
-# Provenance: map the image back to the commit it was built from.
+# Provenance: map the image back to the commit it was built from. The image
+# holds no .git, so SCREENER_COMMIT tells the screener its own commit, which
+# it records with each screened session (app/provenance.py).
 ARG GIT_REVISION=unknown
+ENV SCREENER_COMMIT=${GIT_REVISION}
 LABEL org.opencontainers.image.title="ticker-screener" \
       org.opencontainers.image.revision="${GIT_REVISION}"
 

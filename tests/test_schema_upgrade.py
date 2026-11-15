@@ -557,3 +557,38 @@ def test_upgrade_reports_its_own_error_when_sqlite_already_rolled_back(old_db, m
     with pytest.raises(ValueError, match='the real error'):
         upgrade_db(old_db)
     assert _query(old_db, 'PRAGMA user_version') == [(0,)]
+
+
+@pytest.fixture
+def version_9_db(tmp_path) -> str:
+    """A database at version 9: today's schema without screened_session."""
+    path = str(tmp_path / 'v9.db')
+    init_db(path)
+    _execute(path, 'DROP TABLE screened_session', 'PRAGMA user_version = 9')
+    return path
+
+
+def test_upgrade_adds_screened_session(version_9_db, current_db):
+    upgrade_db(version_9_db)
+
+    assert _query(version_9_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_9_db, 'screened_session') == _table_sql(current_db, 'screened_session')
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        "('Mars', '2026-11-13', '1.0.0', '{}', NULL, NULL, 1)",
+        "('US', '2026-11-31', '1.0.0', '{}', NULL, NULL, 1)",
+        "('US', '2026-11-13', '1.0.0', 'not json', NULL, NULL, 1)",
+        "('US', '2026-11-13', '1.0.0', '{}', NULL, NULL, 0)",
+    ],
+)
+def test_screened_session_refuses_a_bad_row(current_db, values):
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(
+            current_db,
+            'INSERT INTO screened_session '
+            '(market, session_date, screener_version, rule_settings, git_commit, run_id, tickers_scored) '
+            f'VALUES {values}',
+        )

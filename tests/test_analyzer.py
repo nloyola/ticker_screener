@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.analyzer import CONFIRMED, HIGH_CONVICTION, PRE_BREAKOUT, SECONDARY_INDICATORS, Analyzer, with_status
-from app.models import PriceData, StockCriteria
+from app.models import PriceData, ScreenedSession, StockCriteria
 
 SUBSECTOR_ID = 7
 BASE_VOLUME = 1000
@@ -45,6 +45,14 @@ class FakeBenchmarkPriceRepo:
 
     def closes(self, ticker: str) -> dict[date, float]:
         return self.closes_by_ticker.get(ticker, {})
+
+
+class FakeScreenedSessionRepo:
+    def __init__(self) -> None:
+        self.recorded: list[ScreenedSession] = []
+
+    def record(self, sessions) -> None:
+        self.recorded.extend(sessions)
 
 
 class FakeStockCriteriaRepo:
@@ -98,6 +106,7 @@ def make_analyzer(
         price_data_repo=FakePriceDataRepo(rows),
         stock_criteria_repo=criteria_repo,
         benchmark_price_repo=FakeBenchmarkPriceRepo(benchmarks),
+        screened_session_repo=FakeScreenedSessionRepo(),
     )
     return Analyzer(container), criteria_repo
 

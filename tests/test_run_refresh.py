@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.commands.run_refresh_cmd import EXIT_LOCK_HELD, RunRefreshCmd
+from app.commands.run_refresh_cmd import EXIT_LOCK_HELD, RUN_ID_ENV, RunRefreshCmd
 from app.screener_lock import ScreenerLockHeld, lock_path, screener_lock
 from app.ticker_fetcher import FetchStats
 
@@ -89,8 +89,8 @@ def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleName
         ticker_fetcher=fetcher,
         analyzer=SimpleNamespace(
             now=lambda: STARTED_AT,
-            analyze=lambda fetched_by=None, already_flagged=(), started_at=None: analyzed.append(
-                (fetched_by, already_flagged, started_at)
+            analyze=lambda fetched_by=None, already_flagged=(), started_at=None, run_id=None: analyzed.append(
+                (fetched_by, already_flagged, started_at, run_id)
             ),
         ),
     )
@@ -103,7 +103,8 @@ def run(cmd: RunRefreshCmd, container: SimpleNamespace, *argv: str) -> None:
     cmd.handle(parser.parse_args(argv), container)
 
 
-def test_fetches_strictly_then_analyzes(db_path):
+def test_fetches_strictly_then_analyzes(db_path, monkeypatch):
+    monkeypatch.setenv(RUN_ID_ENV, '5')
     cmd, container, fetcher, analyzed = make_cmd(db_path, FetchStats(attempted=10, failed=1))
 
     run(cmd, container)
@@ -111,8 +112,8 @@ def test_fetches_strictly_then_analyzes(db_path):
     assert fetcher.calls == [{'strict': True}]
     assert fetcher.prunes == 1
     # analyze scores only the markets this run's API fetched, does not flag again what the fetch flagged, and
-    # judges which sessions are complete by when the run started
-    assert analyzed == [(fetcher.api, {'GONE'}, STARTED_AT)]
+    # judges which sessions are complete by when the run started; it records the sessions with the runner's run id
+    assert analyzed == [(fetcher.api, {'GONE'}, STARTED_AT, 5)]
 
 
 @pytest.mark.parametrize(
