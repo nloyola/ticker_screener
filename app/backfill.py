@@ -17,6 +17,7 @@ from app.analyzer import (
     BACKFILL,
     EMA_MIN_PERIODS,
     LONG_SMA_DAYS,
+    SIGNAL_STATUSES,
     SMA_RISING_DAYS,
     Analyzer,
     rule_settings,
@@ -126,7 +127,7 @@ class Backfill:
                 stored = self.analyzer.archive_signals(scored, None, settings, commit, source=BACKFILL)
             archived += stored
             if stored:
-                tickers.update(s.criteria.ticker for s in scored)
+                tickers.update(s.criteria.ticker for s in scored if s.criteria.status in SIGNAL_STATUSES)
             print(
                 f'{session} ({", ".join(markets)}): scored {len(scored)} ticker{"" if len(scored) == 1 else "s"}, '
                 f'archived {stored} new signal{"" if stored == 1 else "s"}'
