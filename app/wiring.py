@@ -1,5 +1,6 @@
 # wiring.py
 from app.analyzer import Analyzer
+from app.backfill import Backfill
 from app.config import DB_NAME, EODHD, EODHD_API_KEY, PRICE_API, TIINGO, TIINGO_API_KEY, Config
 from app.container import Container, Required, Singleton
 from app.db import SQLite
@@ -49,6 +50,7 @@ def build_container(config: Config) -> Container:
     c.register('ticker_fetcher', Singleton(lambda: TickerFetcher(c)))
     c.register('ticker_sync', Singleton(lambda: TickerSync(c)))
     c.register('analyzer', Singleton(lambda: Analyzer(c)))
+    c.register('backfill', Singleton(lambda: Backfill(c)))
     return c
 
 

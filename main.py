@@ -5,6 +5,7 @@ import pathlib
 import sys
 
 from app.commands.analyzer import AnalyzerCommand
+from app.commands.backfill_cmd import BackfillCmd
 from app.commands.base_command import BaseCommand, CLI_Interface
 from app.commands.db_init import DbInit
 from app.commands.db_upgrade import DbUpgrade
@@ -112,6 +113,7 @@ def main() -> None:
     TickerSyncCmd().add_to_cli(cli)
     AnalyzerCommand().add_to_cli(cli)
     RunRefreshCmd().add_to_cli(cli)
+    BackfillCmd().add_to_cli(cli)
     cli.execute()
 
 

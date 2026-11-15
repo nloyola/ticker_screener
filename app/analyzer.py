@@ -106,9 +106,11 @@ CONFIRMED = 'confirmed'
 PRE_BREAKOUT = 'pre_breakout'
 HIGH_CONVICTION_MIN = 4
 # The statuses that make a scored ticker a signal, archived in the signal table: all four mandatory conditions met.
-# A signal archived by the run that scored its session is LIVE.
+# A signal archived by the run that scored its session is LIVE, and one archived by replaying a past session from the
+# stored prices (app/backfill.py) is BACKFILL.
 SIGNAL_STATUSES = (CONFIRMED, HIGH_CONVICTION)
 LIVE = 'live'
+BACKFILL = 'backfill'
 
 
 def _all_pass(sc: StockCriteria, *flags: str) -> bool:
@@ -534,7 +536,7 @@ class Analyzer:
         screened_session, with SCREENER_VERSION, rule_settings(), the screener's git commit, 'run_id' and how many
         of its tickers were scored, replacing the row of an earlier run that scored the same session.
 
-        Last, each scored ticker whose status is confirmed or high-conviction is archived in signal (_archive_signals)
+        Last, each scored ticker whose status is confirmed or high-conviction is archived in signal (archive_signals)
         with the same rules, commit and run as its market's session.
 
         Prints one summary line per market that has prices.
@@ -582,22 +584,24 @@ class Analyzer:
         settings = json.dumps(rule_settings(), sort_keys=True)
         commit = git_commit()
         self._record_sessions(sessions, run_id, settings, commit)
-        self._archive_signals(scored, run_id, settings, commit)
+        self.archive_signals(scored, run_id, settings, commit)
 
-    def score_as_of(self, session_date: date, prices: pd.DataFrame | None = None) -> list[Scored]:
+    def score_as_of(
+        self, session_date: date, prices: pd.DataFrame | None = None, markets: Collection[str] = MARKETS
+    ) -> list[Scored]:
         """
         Scores every ticker as of 'session_date', as a run on that session would have, using only the price and
         benchmark rows dated on or before it: no indicator, and no subsector median, reads a later row. 'prices' is
         load_price_data()'s frame, loaded here when None, so a caller replaying many sessions loads it once.
 
-        Only the markets that traded on 'session_date' are scored: a market whose newest row on or before it is
+        Only the 'markets' that traded on 'session_date' are scored: a market whose newest row on or before it is
         older (a holiday, or a weekend) is left out, rather than scored again on its previous session. A ticker is
         left out as a run leaves it out, stale, frozen or with fewer than MIN_ROWS rows, but without a warning or a
         FLAGGED line, and nothing is stored. The session must be complete: rows of a candle not yet final are scored as
         they stand.
 
         Returns the tickers scored, with their subsector comparison and status set over the tickers scored on that
-        session in every market.
+        session in every market scored.
         """
         df = self.load_price_data() if prices is None else prices
         if df is None:
@@ -605,7 +609,7 @@ class Analyzer:
         df = df[df.index.get_level_values('date') <= session_date]
         scored: list[Scored] = []
         for market, groups in self._by_market(df).items():
-            if not groups:
+            if not groups or market not in markets:
                 continue
             result = self._score_market(market, groups)
             if result.session_date == session_date:
@@ -659,12 +663,14 @@ class Analyzer:
                 scored.append(Scored(sc, market, newest, float(group_df['close'].iloc[-1]), dates))
         return MarketScore(newest, scored, skipped)
 
-    def _archive_signals(self, scored: list[Scored], run_id: int | None, settings: str, commit: str | None) -> None:
+    def archive_signals(
+        self, scored: list[Scored], run_id: int | None, settings: str, commit: str | None, source: str = LIVE
+    ) -> int:
         """
-        Archives each of 'scored' that is a signal, status confirmed or high-conviction, as a live signal of the
-        session it was scored on, linked to the ticker's previous signal with the trading days since it. A signal
-        already archived for the same ticker, session and version is left as it was, so a rerun of a session adds
-        nothing. Logs how many it archived.
+        Archives each of 'scored' that is a signal, status confirmed or high-conviction, as a signal of the session
+        it was scored on from 'source' (LIVE or BACKFILL), linked to the ticker's previous signal with the trading
+        days since it. A signal already archived for the same ticker, session and version is left as it was, so a
+        rerun of a session adds nothing. Logs and returns how many it archived.
         """
         signals: list[Signal] = []
         for s in scored:
@@ -685,7 +691,7 @@ class Analyzer:
                     rule_settings=settings,
                     git_commit=commit,
                     run_id=run_id,
-                    source=LIVE,
+                    source=source,
                     previous_signal_id=previous[0] if previous else None,
                     trading_days_since_previous=(
                         trading_days_between(dates, previous[1], session_date) if previous else None
@@ -693,12 +699,13 @@ class Analyzer:
                 )
             )
         if not signals:
-            return
+            return 0
         stored = self.signal_repo.archive(signals)
         logger.info(
             f'archived {stored} new signal{"" if stored == 1 else "s"} of {len(signals)} '
             f'confirmed or high-conviction ticker{"" if len(signals) == 1 else "s"}'
         )
+        return stored
 
     def _record_sessions(
         self, sessions: Mapping[str, tuple[date, int]], run_id: int | None, settings: str, commit: str | None

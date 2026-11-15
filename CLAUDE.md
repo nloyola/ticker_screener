@@ -21,7 +21,7 @@ Under `app/`, wired together by a small dependency-injection container:
 - **db.py** - `connect(db_path)`, the one way repositories open a connection (type converters, `sqlite3.Row` rows, foreign keys, commit or roll back, then close), the `SQLite` wrapper (one explicit transaction per `connect()`, for multi-statement work such as `import`), `upgrade_db` (the versioned upgrades, recorded in `PRAGMA user_version`, that change tables an older `schema.sql` created, or create tables added since, since only `db-init` runs `schema.sql`; the dashboard never reads `user_version`), `init_db` (upgrades, then runs `schema.sql`, which only creates missing tables) and `clear_market_data`.
 - **repositories/** - One repository per table, hand-written SQL.
 - **services/** - Logic over the repositories (`SectorService`).
-- **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py** - The work behind the `analyze`, `ticker-fetcher` and `ticker-sync` commands.
+- **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py**, **backfill.py** - The work behind the `analyze`, `ticker-fetcher`, `ticker-sync` and `backfill-signals` commands (README.md, "Seeding the signal archive").
 - **price_apis/** - The price APIs behind one interface (`PriceApi`: daily prices, a company name, a quota check): `tiingo.py` (US tickers only) and `eodhd.py` (US and Canadian), with the HTTP retry and error helpers they share in `http.py`. Only `wiring.py` picks one, from `PRICE_API`, so either can be deleted cleanly.
 - **markets.py** - `market_of()`, the market rule: a bare ticker is US, `.TO` and `.V` are Canada, any other suffix is refused; `market_sql()` is the same rule as an SQL expression, for the repositories. `BENCHMARKS` names each market's broad-market index fund, which every fetch downloads for `analyze`'s relative strength. `last_complete_session()` is the newest day whose daily candle is final in a market for a run started at a given time (its close in `MARKET_CLOSES` plus `PUBLISH_DELAY`); `analyze` drops the rows dated after it before scoring. `analyze` judges each ticker's freshness against its own market's newest price date, `run-refresh` scores and prunes only the markets its API fetched, and a standalone `analyze` scores every market (README.md, "Price APIs and markets").
 - **provenance.py** - `git_commit()`, the screener's commit recorded with each screened session: `SCREENER_COMMIT`, which the image sets from its build's revision, or else the checkout's HEAD, marked `-dirty` when it has uncommitted changes.
@@ -45,6 +45,7 @@ uv run python main.py ticker-fetcher [--sector NAME] [--ticker SYMBOL]   # fetch
 uv run python main.py ticker-fetcher --strict [--max-failure-rate 0.5]   # exit 1 when too many tickers fail
 uv run python main.py analyze                  # compute stock_criteria from price_data, every market
 uv run python main.py run-refresh              # under screener.lock: ticker-fetcher --strict, then analyze
+uv run python main.py backfill-signals         # under screener.lock: archive the signals of every replayable stored session
 uv run pytest                                  # tests
 uv run ruff check .                            # lint
 uv run ruff format .                           # format

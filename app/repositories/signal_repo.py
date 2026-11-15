@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date
 
 from app.container import Container
@@ -60,6 +61,17 @@ def _values(s: Signal) -> tuple:
     )
 
 
+@dataclass(frozen=True)
+class SignalLink:
+    """A signal's link to the ticker's previous signal, both None for a ticker's first."""
+
+    id: int
+    ticker: str
+    session_date: date
+    previous_signal_id: int | None
+    trading_days_since_previous: int | None
+
+
 class SignalRepo:
     """The append-only archive of confirmed breakouts, one row per ticker, session and screener version."""
 
@@ -86,3 +98,36 @@ class SignalRepo:
             for s in signals:
                 stored += con.execute(_INSERT, _values(s)).rowcount
         return stored
+
+    def links(self, tickers: Iterable[str]) -> list[SignalLink]:
+        """Each signal of 'tickers', with its previous signal's id and the trading days since it, oldest first."""
+        tickers = list(tickers)
+        if not tickers:
+            return []
+        with connect(self.db_path) as con:
+            rows = con.execute(
+                'SELECT id, ticker, session_date, previous_signal_id, trading_days_since_previous FROM signal '
+                f'WHERE ticker IN ({",".join(["?"] * len(tickers))}) ORDER BY ticker, session_date, id',
+                tickers,
+            ).fetchall()
+        return [
+            SignalLink(
+                id=row['id'],
+                ticker=row['ticker'],
+                session_date=date.fromisoformat(row['session_date']),
+                previous_signal_id=row['previous_signal_id'],
+                trading_days_since_previous=row['trading_days_since_previous'],
+            )
+            for row in rows
+        ]
+
+    def relink(self, links: Iterable[SignalLink]) -> int:
+        """Stores each link's previous signal and trading days since it, and returns how many signals it changed."""
+        changed = 0
+        with connect(self.db_path) as con:
+            for link in links:
+                changed += con.execute(
+                    'UPDATE signal SET previous_signal_id = ?, trading_days_since_previous = ? WHERE id = ?',
+                    (link.previous_signal_id, link.trading_days_since_previous, link.id),
+                ).rowcount
+        return changed
