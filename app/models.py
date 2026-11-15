@@ -139,3 +139,31 @@ class ScreenedSession:
     # the stock_analyzer screener_run the scores came from; None for a run not started by its runner
     run_id: int | None
     tickers_scored: int
+
+
+@dataclass(frozen=True)
+class Signal:
+    """
+    One archived breakout (table signal): a ticker scoring all four mandatory conditions on a session, with every
+    value it was scored with. Its sector and subsector names are read from 'criteria.subsector_id' when it is stored.
+    """
+
+    criteria: StockCriteria
+    market: str
+    # the exchange named by the ticker's suffix, None for a bare US ticker (exchange_of in app/markets.py)
+    exchange: str | None
+    # the market's time zone, an IANA key
+    time_zone: str
+    session_date: date
+    # the session's close as price_data holds it, unrounded
+    close: float
+    screener_version: str
+    # rule_settings() as JSON
+    rule_settings: str
+    git_commit: str | None
+    run_id: int | None
+    # 'live' for a signal archived by the run that scored its session, 'backfill' for a replayed one
+    source: str
+    # the ticker's previous signal and the trading days since its session, both None for its first
+    previous_signal_id: int | None = None
+    trading_days_since_previous: int | None = None

@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.markets import CANADA, US, last_complete_session
+from app.markets import CANADA, US, UnsupportedTicker, exchange_of, last_complete_session
 
 NEW_YORK = ZoneInfo('America/New_York')
 TORONTO = ZoneInfo('America/Toronto')
@@ -35,3 +35,16 @@ SUNDAY = date(2026, 11, 8)
 )
 def test_last_complete_session(market, started_at, expected):
     assert last_complete_session(market, started_at) == expected
+
+
+@pytest.mark.parametrize(
+    ('ticker', 'expected'),
+    [('AAPL', None), ('BRK-B', None), ('SHOP.TO', 'TSX'), ('BBD-B.TO', 'TSX'), ('ABC.V', 'TSXV')],
+)
+def test_exchange_of(ticker, expected):
+    assert exchange_of(ticker) == expected
+
+
+def test_exchange_of_refuses_an_unsupported_suffix():
+    with pytest.raises(UnsupportedTicker):
+        exchange_of('VOD.L')

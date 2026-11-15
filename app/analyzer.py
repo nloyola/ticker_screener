@@ -3,9 +3,10 @@ import logging
 import statistics
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
@@ -17,10 +18,11 @@ from app.markets import (
     MARKETS,
     PUBLISH_DELAY,
     UnsupportedTicker,
+    exchange_of,
     last_complete_session,
     market_of,
 )
-from app.models import ScreenedSession, StockCriteria
+from app.models import ScreenedSession, Signal, StockCriteria
 from app.progress import FROZEN, STALE, report_flagged, report_progress
 from app.provenance import git_commit
 
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
     from app.repositories.price_data_repo import PriceDataRepo
     from app.repositories.screened_session_repo import ScreenedSessionRepo
+    from app.repositories.signal_repo import SignalRepo
     from app.repositories.stock_criteria_repo import StockCriteriaRepo
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,10 @@ HIGH_CONVICTION = 'high_conviction'
 CONFIRMED = 'confirmed'
 PRE_BREAKOUT = 'pre_breakout'
 HIGH_CONVICTION_MIN = 4
+# The statuses that make a scored ticker a signal, archived in the signal table: all four mandatory conditions met.
+# A signal archived by the run that scored its session is LIVE.
+SIGNAL_STATUSES = (CONFIRMED, HIGH_CONVICTION)
+LIVE = 'live'
 
 
 def _all_pass(sc: StockCriteria, *flags: str) -> bool:
@@ -391,6 +398,19 @@ def _days_above(macd: pd.Series, signal: pd.Series) -> int:
     return days
 
 
+def trading_days_between(dates: pd.Index, previous: date, session: date) -> int:
+    """
+    The trading days after 'previous' up to and including 'session', counted from 'dates', the ticker's stored price
+    dates. When 'previous' is older than its oldest stored row, the stretch before that row, which the price window
+    no longer holds, is counted in weekdays, holidays included.
+    """
+    days = sum(1 for d in dates if previous < d <= session)
+    oldest = min(dates)
+    if previous < oldest:
+        days += int(np.busday_count(previous + timedelta(days=1), oldest))
+    return days
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -401,6 +421,7 @@ class Analyzer:
         self.price_data_repo: PriceDataRepo = container.price_data_repo
         self.benchmark_price_repo: BenchmarkPriceRepo = container.benchmark_price_repo
         self.screened_session_repo: ScreenedSessionRepo = container.screened_session_repo
+        self.signal_repo: SignalRepo = container.signal_repo
         # the clock a run's start is read from, timezone aware
         self.now = now
 
@@ -465,6 +486,9 @@ class Analyzer:
         screened_session, with SCREENER_VERSION, rule_settings(), the screener's git commit, 'run_id' and how many
         of its tickers were scored, replacing the row of an earlier run that scored the same session.
 
+        Last, each scored ticker whose status is confirmed or high-conviction is archived in signal (_archive_signals)
+        with the same rules, commit and run as its market's session.
+
         Prints one summary line per market that has prices.
         """
         df = self.load_price_data()
@@ -480,6 +504,8 @@ class Analyzer:
                 logger.warning(f'{ticker} not scored: {err}')
 
         results: list[StockCriteria | None] = []
+        # each ticker scored: its market, the session, that session's close and its stored price dates
+        scored_on: dict[str, tuple[str, date, float, pd.Index]] = {}
         # each market's session scored, and how many of its tickers were
         sessions: dict[str, tuple[date, int]] = {}
         for market, groups in by_market.items():
@@ -529,6 +555,8 @@ class Analyzer:
                         report_flagged(ticker, FROZEN, since)
                     continue
                 results.append(self.analyze_ticker(ticker, group_df, benchmark))
+                dates = group_df.index.get_level_values('date')
+                scored_on[ticker] = (market, newest, float(group_df['close'].iloc[-1]), dates)
             scored = sum(1 for sc in results[market_start:] if sc is not None)
             if scored:
                 sessions[market] = (newest, scored)
@@ -544,14 +572,64 @@ class Analyzer:
         self.save_to_repository(items, date_created)
         judged = fetched_by.markets if fetched_by is not None else MARKETS
         self._clear_unscored_statuses(judged, {sc.ticker for sc in items})
-        self._record_sessions(sessions, run_id)
+        settings = json.dumps(rule_settings(), sort_keys=True)
+        commit = git_commit()
+        self._record_sessions(sessions, run_id, settings, commit)
+        self._archive_signals(items, scored_on, run_id, settings, commit)
 
-    def _record_sessions(self, sessions: Mapping[str, tuple[date, int]], run_id: int | None) -> None:
+    def _archive_signals(
+        self,
+        items: list[StockCriteria],
+        scored_on: Mapping[str, tuple[str, date, float, pd.Index]],
+        run_id: int | None,
+        settings: str,
+        commit: str | None,
+    ) -> None:
+        """
+        Archives each of 'items' that is a signal, status confirmed or high-conviction, as a live signal of the
+        session 'scored_on' maps its ticker to, linked to the ticker's previous signal with the trading days since
+        it. A signal already archived for the same ticker, session and version is left as it was, so a rerun of a
+        session adds nothing. Logs how many it archived.
+        """
+        signals: list[Signal] = []
+        for sc in items:
+            if sc.status not in SIGNAL_STATUSES:
+                continue
+            market, session_date, close, dates = scored_on[sc.ticker]
+            previous = self.signal_repo.previous(sc.ticker, session_date)
+            signals.append(
+                Signal(
+                    criteria=sc,
+                    market=market,
+                    exchange=exchange_of(sc.ticker),
+                    time_zone=MARKET_CLOSES[market][0].key,
+                    session_date=session_date,
+                    close=close,
+                    screener_version=SCREENER_VERSION,
+                    rule_settings=settings,
+                    git_commit=commit,
+                    run_id=run_id,
+                    source=LIVE,
+                    previous_signal_id=previous[0] if previous else None,
+                    trading_days_since_previous=(
+                        trading_days_between(dates, previous[1], session_date) if previous else None
+                    ),
+                )
+            )
+        if not signals:
+            return
+        stored = self.signal_repo.archive(signals)
+        logger.info(
+            f'archived {stored} new signal{"" if stored == 1 else "s"} of {len(signals)} '
+            f'confirmed or high-conviction ticker{"" if len(signals) == 1 else "s"}'
+        )
+
+    def _record_sessions(
+        self, sessions: Mapping[str, tuple[date, int]], run_id: int | None, settings: str, commit: str | None
+    ) -> None:
         """Records each market's session scored, as 'sessions' maps it, with the rules it was scored by."""
         if not sessions:
             return
-        settings = json.dumps(rule_settings(), sort_keys=True)
-        commit = git_commit()
         self.screened_session_repo.record(
             ScreenedSession(
                 market=market,

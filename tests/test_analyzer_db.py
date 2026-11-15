@@ -12,11 +12,12 @@ from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 import requests
 
 import app.analyzer as analyzer_module
-from app.analyzer import SCREENER_VERSION, Analyzer, rule_settings
+from app.analyzer import SCREENER_VERSION, Analyzer, rule_settings, trading_days_between
 from app.commands.run_refresh_cmd import RUN_ID_ENV, RunRefreshCmd, run_id_from_env
 from app.db import init_db
 from app.markets import CANADA, US
@@ -27,6 +28,7 @@ from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
+from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
@@ -76,6 +78,7 @@ def container(path) -> SimpleNamespace:
     container.company_name_repo = CompanyNameRepo(container)
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.screened_session_repo = ScreenedSessionRepo(container)
+    container.signal_repo = SignalRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     return container
 
@@ -851,3 +854,156 @@ def test_run_id_from_env(monkeypatch, value, expected):
 def test_run_id_unset(monkeypatch):
     monkeypatch.delenv(RUN_ID_ENV, raising=False)
     assert run_id_from_env() is None
+
+
+def add_energy_oil(path: str) -> None:
+    """Sector Energy (id 1) with subsector Oil (id 1), the subsector every price_rows row is in."""
+    with sqlite3.connect(path) as con:
+        con.execute("INSERT INTO sector (id, sector) VALUES (1, 'Energy')")
+        con.execute("INSERT INTO subsector (id, sector_id, subsector, tickers) VALUES (1, 1, 'Oil', 'BRK,NEAR,FALL')")
+
+
+def table_rows(path: str, table: str) -> dict[str, dict]:
+    """Each row of 'table' by ticker, as a dict of its columns."""
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        return {row['ticker']: dict(row) for row in con.execute(f'SELECT * FROM {table}')}
+
+
+def signal_count(path: str) -> int:
+    with sqlite3.connect(path) as con:
+        return con.execute('SELECT count(*) FROM signal').fetchone()[0]
+
+
+def breakout_rows(path: str, container) -> None:
+    """
+    BRK and SHOP.TO break out on doubled volume on TODAY, BRK closing at 199.456; NEAR closes 1.5% under its high, on
+    the pre-breakout watchlist; FALL closes lower every day.
+    """
+    add_energy_oil(path)
+    brk = price_rows('BRK', TODAY)
+    container.price_data_repo.bulk_insert([*brk[:-1], replace(brk[-1], close=199.456)])
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY))
+    near = price_rows('NEAR', TODAY, n=101)
+    container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1000)])
+    fall = price_rows('FALL', TODAY)
+    container.price_data_repo.bulk_insert([replace(row, close=300.0 - i) for i, row in enumerate(fall)])
+
+
+def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, container, monkeypatch):
+    monkeypatch.setenv(COMMIT_ENV, 'abc1234')
+    breakout_rows(path, container)
+
+    container.analyzer.analyze(run_id=7)
+
+    criteria_rows = table_rows(path, 'stock_criteria')
+    signals = table_rows(path, 'signal')
+    assert {t: r['status'] for t, r in criteria_rows.items()} == {
+        'BRK': 'confirmed',
+        'SHOP.TO': 'confirmed',
+        'NEAR': 'pre_breakout',
+        'FALL': None,
+    }
+    assert set(signals) == {'BRK', 'SHOP.TO'}
+    archived = set(criteria_rows['BRK']) - {'id', 'subsector_id', 'date_created'}
+    for ticker, signal in signals.items():
+        assert {c: signal[c] for c in archived} == {c: criteria_rows[ticker][c] for c in archived}, ticker
+    settings = json.dumps(rule_settings(), sort_keys=True)
+    common = {
+        'session_date': TODAY.isoformat(),
+        'sector': 'Energy',
+        'subsector': 'Oil',
+        'screener_version': SCREENER_VERSION,
+        'rule_settings': settings,
+        'git_commit': 'abc1234',
+        'run_id': 7,
+        'source': 'live',
+        'previous_signal_id': None,
+        'trading_days_since_previous': None,
+    }
+    own = [*common, 'market', 'exchange', 'time_zone', 'close', 'price']
+    assert {c: signals['BRK'][c] for c in own} == {
+        **common,
+        'market': US,
+        'exchange': None,
+        'time_zone': 'America/New_York',
+        'close': 199.456,
+        'price': 199.46,
+    }
+    assert {c: signals['SHOP.TO'][c] for c in own} == {
+        **common,
+        'market': CANADA,
+        'exchange': 'TSX',
+        'time_zone': 'America/Toronto',
+        'close': 199.0,
+        'price': 199.0,
+    }
+    # the session's signals carry the rules its screened session records
+    assert {(m, d, v, s, c, r) for m, d, v, s, c, r, _ in sessions(path)} == {
+        (US, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),
+        (CANADA, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),
+    }
+
+
+def test_second_run_on_the_same_session_archives_nothing(path, container):
+    breakout_rows(path, container)
+    container.analyzer.analyze(run_id=1)
+    first = table_rows(path, 'signal')
+
+    container.analyzer.analyze(run_id=2)
+
+    assert signal_count(path) == 2
+    assert table_rows(path, 'signal') == first
+
+
+def test_same_session_under_new_rules_is_archived_again(path, container, monkeypatch):
+    breakout_rows(path, container)
+    run_with_rules(container, monkeypatch, '1.0.0', run_id=1)
+    run_with_rules(container, monkeypatch, '1.1.0', run_id=2)
+
+    with sqlite3.connect(path) as con:
+        rows = con.execute(
+            'SELECT ticker, screener_version, run_id, previous_signal_id FROM signal ORDER BY ticker, screener_version'
+        ).fetchall()
+    # a session never links to a signal of the same session
+    assert rows == [
+        ('BRK', '1.0.0', 1, None),
+        ('BRK', '1.1.0', 2, None),
+        ('SHOP.TO', '1.0.0', 1, None),
+        ('SHOP.TO', '1.1.0', 2, None),
+    ]
+
+
+def test_repeated_signal_links_to_the_previous_one(path, container):
+    add_energy_oil(path)
+    earlier = TODAY - timedelta(days=3)
+    container.price_data_repo.bulk_insert(price_rows('BRK', earlier))
+    container.analyzer.analyze()
+    # three more rising days: BRK breaks out again on TODAY, its volume still twice the average
+    rows = price_rows('BRK', TODAY, n=103)
+    rows[99] = replace(rows[99], volume=2000)
+    container.price_data_repo.replace_for_ticker('BRK', rows)
+
+    container.analyzer.analyze()
+
+    with sqlite3.connect(path) as con:
+        signals = con.execute(
+            'SELECT id, session_date, previous_signal_id, trading_days_since_previous FROM signal ORDER BY id'
+        ).fetchall()
+    first_id = signals[0][0]
+    assert [row[1:] for row in signals] == [(earlier.isoformat(), None, None), (TODAY.isoformat(), first_id, 3)]
+
+
+@pytest.mark.parametrize(
+    ('previous', 'expected'),
+    [
+        # Friday 2026-11-06 to Tuesday 2026-11-10, both stored: Monday and Tuesday
+        pytest.param(date(2026, 11, 6), 2, id='within the stored rows'),
+        # Friday 2026-10-30, before the oldest stored row, Thursday 2026-11-05: the weekdays Monday to Wednesday
+        # before it, then Thursday to Tuesday's four stored rows
+        pytest.param(date(2026, 10, 30), 7, id='before the stored rows'),
+    ],
+)
+def test_trading_days_between(previous, expected):
+    stored = pd.Index([date(2026, 11, 5), date(2026, 11, 6), date(2026, 11, 9), date(2026, 11, 10)])
+    assert trading_days_between(stored, previous, date(2026, 11, 10)) == expected

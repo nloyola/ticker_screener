@@ -18,6 +18,10 @@ MARKETS = (US, CANADA)
 # the exchange suffixes the screener accepts, and their market
 SUFFIX_MARKETS = {'TO': CANADA, 'V': CANADA}
 
+# the exchange each suffix names: the Toronto Stock Exchange and the TSX Venture. A bare US ticker names none, since
+# no price API the screener uses says whether it lists on the NYSE or NASDAQ
+SUFFIX_EXCHANGES = {'TO': 'TSX', 'V': 'TSXV'}
+
 # each market's regular close, in its exchanges' time zone: NYSE and NASDAQ, and the TSX and TSX Venture
 MARKET_CLOSES = {
     US: (ZoneInfo('America/New_York'), time(16)),
@@ -48,6 +52,14 @@ def market_of(ticker: str) -> str:
         allowed = ', '.join(f'.{s}' for s in SUFFIX_MARKETS)
         raise UnsupportedTicker(f'unsupported exchange suffix: {ticker} (only {allowed})')
     return market
+
+
+def exchange_of(ticker: str) -> str | None:
+    """The exchange the ticker's suffix names ('TSX' for '.TO', 'TSXV' for '.V'), or None for a bare ticker."""
+    if '.' not in ticker:
+        return None
+    market_of(ticker)  # refuses an unsupported suffix
+    return SUFFIX_EXCHANGES[ticker.rpartition('.')[2]]
 
 
 def market_sql(column: str) -> str:

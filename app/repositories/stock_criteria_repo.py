@@ -90,7 +90,8 @@ def _as_float(v) -> float | None:
     return float(v)
 
 
-def _row_values(sc: StockCriteria, date_created: date) -> tuple:
+def row_values(sc: StockCriteria, date_created: date) -> tuple:
+    """The values of COLUMNS for 'sc', in order, as the plain ints and floats SQLite stores."""
     # Convert to plain Python ints/floats; booleans -> 0/1
     return (
         _as_int(sc.subsector_id),  # INTEGER
@@ -172,7 +173,7 @@ class StockCriteriaRepo:
         ON CONFLICT(ticker) DO UPDATE SET
         {','.join(f'{c}=excluded.{c}' for c in COLUMNS if c != 'ticker')}
         """
-        values = [_row_values(sc, date_created) for sc in items]
+        values = [row_values(sc, date_created) for sc in items]
         with connect(self.db_path) as con:
             con.executemany(sql, values)
 
