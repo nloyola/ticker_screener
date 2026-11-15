@@ -14,8 +14,8 @@ from typing import Protocol
 @dataclass(frozen=True)
 class DailyPrice:
     """
-    One trading day of a ticker, as stored: the close, the day's high and low and the volume, all adjusted for splits,
-    and the prices on one basis, so the high is never below the close nor the low above it (see daily_price).
+    One trading day of a ticker, as stored: the close, the day's open, high and low and the volume, all adjusted for
+    splits, and the prices on one basis, so the day's range holds its open and close (see daily_price).
     """
 
     date: date
@@ -23,15 +23,18 @@ class DailyPrice:
     volume: int
     high: float
     low: float
+    open: float
 
 
-def daily_price(day: date, close: float, volume: int, high: float, low: float) -> DailyPrice:
+def daily_price(day: date, close: float, volume: int, high: float, low: float, open: float) -> DailyPrice:
     """
-    The day's price, with the high raised to the close and the low lowered to it where they fall short: rounding in an
-    API's adjustment, or EODHD's scaling of the raw high and low, can leave them a hair on the wrong side of the
-    adjusted close, and a day's range always holds its close.
+    The day's price, with the high raised to the close or the open and the low lowered to them where they fall short:
+    rounding in an API's adjustment, or EODHD's scaling of the raw prices, can leave the high or low a hair on the
+    wrong side of the adjusted close or open, and a day's range always holds both.
     """
-    return DailyPrice(date=day, close=close, volume=volume, high=max(high, close), low=min(low, close))
+    return DailyPrice(
+        date=day, close=close, volume=volume, high=max(high, close, open), low=min(low, close, open), open=open
+    )
 
 
 class PriceApiStop(Exception):

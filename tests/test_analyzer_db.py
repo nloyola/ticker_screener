@@ -160,7 +160,10 @@ class TiingoStub:
 
     def daily_prices(self, ticker: str, start: date, end: date) -> list[DailyPrice]:
         rows = price_rows(ticker, TODAY, n=101)
-        return [DailyPrice(date=p.date, close=p.close, volume=p.volume, high=p.close, low=p.close) for p in rows]
+        return [
+            DailyPrice(date=p.date, close=p.close, volume=p.volume, high=p.close, low=p.close, open=p.close)
+            for p in rows
+        ]
 
 
 class SectorServiceStub:
@@ -521,7 +524,8 @@ def test_analyze_stores_every_relative_strength_value(path, container):
         rows = [replace(row, close=100.0 + step * i) for i, row in enumerate(price_rows(ticker, TODAY))]
         container.price_data_repo.bulk_insert(rows)
     container.benchmark_price_repo.replace(
-        'SPY', [DailyPrice(TODAY - timedelta(days=99 - i), 200.0 + i, 1, 200.0 + i, 200.0 + i) for i in range(100)]
+        'SPY',
+        [DailyPrice(TODAY - timedelta(days=99 - i), 200.0 + i, 1, 200.0 + i, 200.0 + i, 200.0 + i) for i in range(100)],
     )
 
     container.analyzer.analyze(started_at=EVENING)

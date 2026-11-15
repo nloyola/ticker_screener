@@ -40,6 +40,7 @@ class PriceData:
     # adjusted as the close is; None in rows stored before the screener kept them, until the next fetch replaces them
     high: float | None = None
     low: float | None = None
+    open: float | None = None
 
 
 @dataclass(frozen=True)

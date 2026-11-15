@@ -325,6 +325,7 @@ class TickerFetcher:
                     volume=price.volume,
                     high=price.high,
                     low=price.low,
+                    open=price.open,
                 )
                 for price in self._retrying(
                     ticker, lambda: self.api.daily_prices(ticker, fetch_start_date, fetch_end_date)

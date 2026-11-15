@@ -222,36 +222,49 @@ def test_eodhd_usage_check_that_fails_otherwise_warns_and_carries_on(repo, caplo
 
 
 def test_eodhd_rows_parse_as_prices():
-    rows = [{'date': '2026-11-06', 'high': 102.0, 'low': 96.0, 'close': 100.0, 'adjusted_close': 99.5, 'volume': 42}]
+    rows = [
+        {
+            'date': '2026-11-06',
+            'open': 98.0,
+            'high': 102.0,
+            'low': 96.0,
+            'close': 100.0,
+            'adjusted_close': 99.5,
+            'volume': 42,
+        }
+    ]
 
     (price,) = EodhdPrices.to_prices(rows)
     assert (price.date, price.close, price.volume) == (date(2026, 11, 6), 99.5, 42)
-    # the raw high and low scaled by the day's ratio of adjusted to raw close, 0.995
+    # the raw open, high and low scaled by the day's ratio of adjusted to raw close, 0.995
     assert price.high == pytest.approx(101.49) and price.low == pytest.approx(95.52)
+    assert price.open == pytest.approx(97.51)
 
 
-def test_eodhd_split_inside_the_window_leaves_no_jump_in_the_adjusted_highs():
+def test_eodhd_split_inside_the_window_leaves_no_jump_in_the_adjusted_prices():
     # a 2-for-1 split on 2026-11-05: the raw prices halve, EODHD's adjusted closes do not
     rows = [
-        {'date': '2026-11-03', 'high': 202.0, 'low': 196.0, 'close': 200.0, 'adjusted_close': 100.0, 'volume': 10},
-        {'date': '2026-11-04', 'high': 204.0, 'low': 198.0, 'close': 202.0, 'adjusted_close': 101.0, 'volume': 10},
-        {'date': '2026-11-05', 'high': 102.0, 'low': 100.0, 'close': 101.5, 'adjusted_close': 101.5, 'volume': 20},
+        {'date': '2026-11-03', 'open': 198.0, 'high': 202.0, 'low': 196.0, 'close': 200.0, 'adjusted_close': 100.0},
+        {'date': '2026-11-04', 'open': 200.0, 'high': 204.0, 'low': 198.0, 'close': 202.0, 'adjusted_close': 101.0},
+        {'date': '2026-11-05', 'open': 101.0, 'high': 102.0, 'low': 100.0, 'close': 101.5, 'adjusted_close': 101.5},
     ]
 
-    prices = EodhdPrices.to_prices(rows)
+    prices = EodhdPrices.to_prices([{**row, 'volume': 10} for row in rows])
 
     assert [p.high for p in prices] == pytest.approx([101.0, 102.0, 102.0])
     assert [p.low for p in prices] == pytest.approx([98.0, 99.0, 100.0])
-    assert all(p.low <= p.close <= p.high for p in prices)
+    assert [p.open for p in prices] == pytest.approx([99.0, 100.0, 101.0])
+    assert all(p.low <= p.open <= p.high and p.low <= p.close <= p.high for p in prices)
 
 
 def test_eodhd_scaled_high_and_low_never_fall_on_the_wrong_side_of_the_close():
     # the raw high equals the close, and the scaling's rounding must not put it below the adjusted close
-    rows = [{'date': '2026-11-06', 'high': 33.3, 'low': 33.3, 'close': 33.3, 'adjusted_close': 11.1, 'volume': 1}]
+    row = {'date': '2026-11-06', 'open': 33.3, 'high': 33.3, 'low': 33.3, 'close': 33.3, 'adjusted_close': 11.1}
 
-    (price,) = EodhdPrices.to_prices(rows)
+    (price,) = EodhdPrices.to_prices([{**row, 'volume': 1}])
 
     assert price.high == price.close == price.low == 11.1
+    assert price.low <= price.open <= price.high
 
 
 def test_eodhd_row_with_no_close_is_not_a_price():

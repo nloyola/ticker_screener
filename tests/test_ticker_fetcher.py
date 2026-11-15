@@ -3,7 +3,9 @@
 import argparse
 import json
 import logging
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -68,6 +70,7 @@ def tiingo_rows(rows: list[tuple[date, float]]) -> list[DailyPrice]:
             {
                 'date': f'{d.isoformat()}T00:00:00.000Z',
                 'adjClose': close,
+                'adjOpen': close,
                 'adjHigh': close,
                 'adjLow': close,
                 'adjVolume': 100,
@@ -507,17 +510,20 @@ def tiingo_prices(answers: list) -> tuple[TiingoPrices, ScriptedAdapter]:
 
 
 def test_tiingo_prices_sends_the_key_in_a_header_with_a_timeout():
-    body = b'[{"date": "2026-11-05T00:00:00.000Z", "adjClose": 1.5, "adjHigh": 1.75, "adjLow": 1.25, "adjVolume": 10}]'
+    body = (
+        b'[{"date": "2026-11-05T00:00:00.000Z", "adjClose": 1.5, "adjOpen": 1.375, "adjHigh": 1.75, "adjLow": 1.25,'
+        b' "adjVolume": 10}]'
+    )
     client, adapter = tiingo_prices([tiingo_response(200, body)])
 
     rows = client.daily_prices('CVX', date(2026, 7, 9), date(2026, 11, 6))
 
-    assert rows == [DailyPrice(date=date(2026, 11, 5), close=1.5, volume=10, high=1.75, low=1.25)]
+    assert rows == [DailyPrice(date=date(2026, 11, 5), close=1.5, volume=10, high=1.75, low=1.25, open=1.375)]
     ((request, timeout),) = adapter.sent
     assert request.method == 'GET'
     assert request.url == (
         'https://api.tiingo.com/tiingo/daily/CVX/prices?startDate=2026-07-09&endDate=2026-11-06'
-        '&resampleFreq=daily&columns=date%2CadjClose%2CadjHigh%2CadjLow%2CadjVolume'
+        '&resampleFreq=daily&columns=date%2CadjClose%2CadjOpen%2CadjHigh%2CadjLow%2CadjVolume'
     )
     assert request.headers['Authorization'] == 'Token test-key'
     assert 'test-key' not in request.url
@@ -526,11 +532,19 @@ def test_tiingo_prices_sends_the_key_in_a_header_with_a_timeout():
 
 def test_tiingo_rows_keep_their_adjusted_high_and_low_on_either_side_of_the_close():
     rows = [
-        {'date': '2026-11-05T00:00:00.000Z', 'adjClose': 10.0, 'adjHigh': 10.5, 'adjLow': 9.5, 'adjVolume': 7},
+        {
+            'date': '2026-11-05T00:00:00.000Z',
+            'adjClose': 10.0,
+            'adjOpen': 9.75,
+            'adjHigh': 10.5,
+            'adjLow': 9.5,
+            'adjVolume': 7,
+        },
         # rounding in Tiingo's adjustment can leave the high a hair below the close, or the low above it
         {
             'date': '2026-11-06T00:00:00.000Z',
             'adjClose': 10.0,
+            'adjOpen': 10.0,
             'adjHigh': 9.9999999,
             'adjLow': 10.0000001,
             'adjVolume': 7,
@@ -542,19 +556,38 @@ def test_tiingo_rows_keep_their_adjusted_high_and_low_on_either_side_of_the_clos
     assert [(p.high, p.low) for p in prices] == [(10.5, 9.5), (10.0, 10.0)]
 
 
+def test_tiingo_open_outside_the_adjusted_range_widens_the_range():
+    # rounding in Tiingo's adjustment can leave the open a hair above the high or below the low
+    rows = [
+        {'date': '2026-11-05', 'adjClose': 10.0, 'adjOpen': 10.6000001, 'adjHigh': 10.6, 'adjLow': 9.5, 'adjVolume': 7},
+        {'date': '2026-11-06', 'adjClose': 10.0, 'adjOpen': 9.4999999, 'adjHigh': 10.5, 'adjLow': 9.5, 'adjVolume': 7},
+    ]
+
+    prices = TiingoPrices.to_prices(rows)
+
+    assert [p.open for p in prices] == [10.6000001, 9.4999999]
+    assert all(p.low <= p.open <= p.high for p in prices)
+
+
+def test_tiingo_row_without_an_open_is_not_a_price():
+    with pytest.raises(KeyError):
+        TiingoPrices.to_prices([{'date': '2026-11-05', 'adjClose': 1.0, 'adjHigh': 1.0, 'adjLow': 1.0, 'adjVolume': 1}])
+
+
 def test_tiingo_row_without_a_high_is_not_a_price():
     with pytest.raises(KeyError):
         TiingoPrices.to_prices([{'date': '2026-11-05', 'adjClose': 1.0, 'adjLow': 1.0, 'adjVolume': 1}])
 
 
 def test_fetch_stores_each_days_high_and_low(repo):
-    rows = [{'date': f'{days_ago(1).isoformat()}T00:00:00.000Z', 'adjClose': 10.0, 'adjHigh': 11.0, 'adjLow': 9.0}]
+    day = f'{days_ago(1).isoformat()}T00:00:00.000Z'
+    rows = [{'date': day, 'adjClose': 10.0, 'adjOpen': 9.5, 'adjHigh': 11.0, 'adjLow': 9.0}]
     body = json.dumps([{**rows[0], 'adjVolume': 100}]).encode()
     client, _ = tiingo_prices([tiingo_response(200, body), tiingo_response(404)])
 
     make_fetcher(repo, client, {1: ['CVX']}).fetch()
 
-    assert [(p.close, p.high, p.low) for p in repo.all_for_ticker('CVX')] == [(10.0, 11.0, 9.0)]
+    assert [(p.close, p.high, p.low, p.open) for p in repo.all_for_ticker('CVX')] == [(10.0, 11.0, 9.0, 9.5)]
 
 
 def test_tiingo_prices_raises_http_error_with_the_response():
@@ -567,7 +600,13 @@ def test_tiingo_prices_raises_http_error_with_the_response():
 
 
 def test_timed_out_request_is_retried_and_then_succeeds(repo):
-    row = {'date': f'{days_ago(1).isoformat()}T00:00:00.000Z', 'adjClose': 1.0, 'adjHigh': 1.0, 'adjLow': 1.0}
+    row = {
+        'date': f'{days_ago(1).isoformat()}T00:00:00.000Z',
+        'adjClose': 1.0,
+        'adjOpen': 1.0,
+        'adjHigh': 1.0,
+        'adjLow': 1.0,
+    }
     body = json.dumps([{**row, 'adjVolume': 100}]).encode()
     meta = tiingo_response(200, b'{"ticker": "cvx", "name": "Chevron Corp"}')
     answers = [requests.ReadTimeout('read timed out'), tiingo_response(200, body), tiingo_response(200, body), meta]
@@ -672,6 +711,16 @@ def test_benchmark_closes_replace_the_stored_ones(repo):
 
     assert benchmark_closes(repo, 'SPY') == dict(BENCHMARK_ROWS)
     assert stored(repo, 'SPY') == []  # never in price_data
+
+
+def test_benchmark_rows_store_each_days_open(repo):
+    BenchmarkPriceRepo(SimpleNamespace(db_path=repo.db_path)).replace(
+        'SPY', [DailyPrice(date=days_ago(1), close=450.0, volume=1, high=452.0, low=447.0, open=448.5)]
+    )
+
+    with closing(sqlite3.connect(repo.db_path)) as con:
+        rows = con.execute("SELECT date, close, open FROM benchmark_price WHERE ticker = 'SPY'").fetchall()
+    assert rows == [(days_ago(1).isoformat(), 450.0, 448.5)]
 
 
 def test_failed_benchmark_keeps_its_closes_and_fails_no_ticker(repo, caplog, capsys):

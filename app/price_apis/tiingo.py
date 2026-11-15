@@ -17,8 +17,8 @@ TIINGO_META_URL = 'https://api.tiingo.com/tiingo/daily/{ticker}'
 class TiingoPrices:
     """
     Requests a ticker's daily prices from Tiingo's end-of-day endpoint, sending the key in a header. Uses 'adjClose'
-    as the close, 'adjHigh' and 'adjLow' as the high and low, and 'adjVolume' as the volume. One request per ticker,
-    however long the range.
+    as the close, 'adjOpen', 'adjHigh' and 'adjLow' as the open, high and low, and 'adjVolume' as the volume. One
+    request per ticker, however long the range.
     """
 
     name = 'Tiingo'
@@ -37,7 +37,7 @@ class TiingoPrices:
                 'startDate': start.isoformat(),
                 'endDate': end.isoformat(),
                 'resampleFreq': 'daily',
-                'columns': 'date,adjClose,adjHigh,adjLow,adjVolume',
+                'columns': 'date,adjClose,adjOpen,adjHigh,adjLow,adjVolume',
             },
             timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
         )
@@ -47,8 +47,8 @@ class TiingoPrices:
     @staticmethod
     def to_prices(rows: list[dict]) -> list[DailyPrice]:
         """
-        Tiingo's rows, each with 'date', 'adjClose', 'adjHigh', 'adjLow' and 'adjVolume', as prices; raises for a row
-        that is not one.
+        Tiingo's rows, each with 'date', 'adjClose', 'adjOpen', 'adjHigh', 'adjLow' and 'adjVolume', as prices; raises
+        for a row that is not one.
         """
         return [
             daily_price(
@@ -57,6 +57,7 @@ class TiingoPrices:
                 volume=int(row['adjVolume']),
                 high=float(row['adjHigh']),
                 low=float(row['adjLow']),
+                open=float(row['adjOpen']),
             )
             for row in rows
         ]

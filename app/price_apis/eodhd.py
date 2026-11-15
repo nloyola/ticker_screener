@@ -65,8 +65,8 @@ class EodhdPrices:
     parameter: every URL it builds holds the key, so any error quoting one must go through error_detail() or redact().
 
     Uses 'adjusted_close' (adjusted for splits and dividends) as the close and 'volume' (adjusted for splits) as the
-    volume. EODHD gives the high and low only as traded, so each is scaled by the day's ratio of adjusted to raw
-    close, putting it on the adjusted close's basis; 'open' is not used. One call per ticker, whatever the range; an
+    volume. EODHD gives the open, high and low only as traded, so each is scaled by the day's ratio of adjusted to raw
+    close, putting it on the adjusted close's basis. One call per ticker, whatever the range; an
     unknown ticker answers 404 and still costs a call.
     """
 
@@ -89,14 +89,16 @@ class EodhdPrices:
 
     @staticmethod
     def to_prices(rows: list[dict]) -> list[DailyPrice]:
-        """EODHD's rows as prices, with the high and low adjusted as the close is; raises for a row that is not one."""
+        """
+        EODHD's rows as prices, with the open, high and low adjusted as the close is; raises for a row that is not one.
+        """
         return [EodhdPrices.to_price(row) for row in rows]
 
     @staticmethod
     def to_price(row: dict) -> DailyPrice:
         close, adjusted = float(row['close']), float(row['adjusted_close'])
         if close <= 0:
-            raise ValueError(f'EODHD row for {row["date"]} has a close of {close}, which cannot scale its high and low')
+            raise ValueError(f'EODHD row for {row["date"]} has a close of {close}, which cannot scale its other prices')
         ratio = adjusted / close
         return daily_price(
             date.fromisoformat(row['date']),
@@ -104,6 +106,7 @@ class EodhdPrices:
             volume=int(row['volume']),
             high=float(row['high']) * ratio,
             low=float(row['low']) * ratio,
+            open=float(row['open']) * ratio,
         )
 
     def company_name(self, ticker: str) -> str | None:

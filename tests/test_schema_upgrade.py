@@ -1,7 +1,7 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
 stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), and the
-status, and older databases are upgraded to all three.
+status, price_data and benchmark_price have the day's open, and older databases are upgraded to all of them.
 """
 
 import os
@@ -34,8 +34,8 @@ OLD_ROWS = [
     (2, 10, 'XOM', '2026-11-05', 111.0, 1200),
     (3, None, 'CVX', '2026-11-05', None, None),
 ]
-# the same rows once upgraded: no high and no low until the next fetch replaces them
-UPGRADED_ROWS = [(*row, None, None) for row in OLD_ROWS]
+# the same rows once upgraded: no high, low or open until the next fetch replaces them
+UPGRADED_ROWS = [(*row, None, None, None) for row in OLD_ROWS]
 
 # price_data as schema.sql created it from the date guard (version 1) until the high and low (version 3)
 GUARDED_PRICE_DATA = """
@@ -386,6 +386,62 @@ def test_upgrade_adds_the_status_keeping_every_row(version_7_db, current_db):
     ) == [(1, 'XOM', 4, 2.5, 1, None, None), (2, 'CVX', None, None, None, None, None)]
     with pytest.raises(sqlite3.IntegrityError):
         _execute(version_7_db, "UPDATE stock_criteria SET status = 'watchlist' WHERE ticker = 'XOM'")
+
+
+# price_data and benchmark_price as schema.sql created them from the high and low (version 3) and benchmark_price
+# (version 7) until the open (version 9)
+HIGH_LOW_PRICE_DATA = """
+CREATE TABLE price_data (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       subsector_id INTEGER,
+       ticker TEXT,
+       date TEXT NOT NULL CHECK (date(date) IS date),
+       close REAL,
+       volume INTEGER,
+       high REAL,
+       low REAL,
+       UNIQUE (ticker, date)
+)"""
+CLOSE_ONLY_BENCHMARK_PRICE = """
+CREATE TABLE benchmark_price (
+       ticker TEXT NOT NULL,
+       date TEXT NOT NULL CHECK (date(date) IS date),
+       close REAL NOT NULL,
+       PRIMARY KEY (ticker, date)
+)"""
+
+
+@pytest.fixture
+def version_8_db(tmp_path) -> str:
+    """A database at version 8: today's schema with price_data and benchmark_price without the open."""
+    path = str(tmp_path / 'v8.db')
+    init_db(path)
+    _execute(
+        path,
+        'DROP TABLE price_data',
+        HIGH_LOW_PRICE_DATA,
+        'DROP TABLE benchmark_price',
+        CLOSE_ONLY_BENCHMARK_PRICE,
+        "INSERT INTO price_data VALUES (7, 10, 'XOM', '2026-11-05', 111.0, 1200, 112.0, 110.0)",
+        "INSERT INTO price_data VALUES (8, 10, 'XOM', '2026-11-06', 112.0, 900, 113.0, 111.0)",
+        "INSERT INTO benchmark_price VALUES ('SPY', '2026-11-06', 600.0)",
+        'PRAGMA user_version = 8',
+    )
+    return path
+
+
+def test_upgrade_adds_the_open_keeping_every_row(version_8_db, current_db):
+    upgrade_db(version_8_db)
+
+    assert _query(version_8_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    for table in ('price_data', 'benchmark_price'):
+        assert _table_sql(version_8_db, table) == _table_sql(current_db, table)
+    assert _query(version_8_db, 'SELECT * FROM price_data ORDER BY id') == [
+        (7, 10, 'XOM', '2026-11-05', 111.0, 1200, 112.0, 110.0, None),
+        (8, 10, 'XOM', '2026-11-06', 112.0, 900, 113.0, 111.0, None),
+    ]
+    assert _query(version_8_db, 'SELECT * FROM benchmark_price') == [('SPY', '2026-11-06', 600.0, None)]
+    assert _query(version_8_db, "SELECT seq FROM sqlite_sequence WHERE name = 'price_data'") == [(8,)]
 
 
 def test_upgrade_keeps_the_sequence_of_an_emptied_table(old_db):

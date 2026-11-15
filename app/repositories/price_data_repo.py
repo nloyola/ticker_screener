@@ -21,8 +21,8 @@ class PriceDataRepo:
         with connect(self.db_path) as con:
             con.execute(
                 """
-                INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume, high, low)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume, high, low, open)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     price_data.subsector_id,
@@ -32,6 +32,7 @@ class PriceDataRepo:
                     price_data.volume,
                     price_data.high,
                     price_data.low,
+                    price_data.open,
                 ),
             )
 
@@ -39,10 +40,10 @@ class PriceDataRepo:
         with connect(self.db_path) as con:
             con.executemany(
                 """
-                INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume, high, low)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO price_data (subsector_id, ticker, date, close, volume, high, low, open)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-                [(p.subsector_id, p.ticker, p.date, p.close, p.volume, p.high, p.low) for p in items],
+                [(p.subsector_id, p.ticker, p.date, p.close, p.volume, p.high, p.low, p.open) for p in items],
             )
 
     def replace_for_ticker(self, ticker: str, rows: Iterable[PriceData]) -> None:
@@ -55,17 +56,17 @@ class PriceDataRepo:
             con.execute('DELETE FROM price_data WHERE ticker = ?', (ticker,))
             con.executemany(
                 """
-                INSERT INTO price_data (subsector_id, ticker, date, close, volume, high, low)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO price_data (subsector_id, ticker, date, close, volume, high, low, open)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [(p.subsector_id, p.ticker, p.date, p.close, p.volume, p.high, p.low) for p in rows],
+                [(p.subsector_id, p.ticker, p.date, p.close, p.volume, p.high, p.low, p.open) for p in rows],
             )
 
     def get(self, ticker: str, d: date) -> PriceData | None:
         with connect(self.db_path) as con:
             row = con.execute(
                 """
-                SELECT id, subsector_id, ticker, date, close, volume, high, low
+                SELECT id, subsector_id, ticker, date, close, volume, high, low, open
                 FROM price_data
                 WHERE ticker = ? AND date = ?
                 """,
@@ -76,7 +77,7 @@ class PriceDataRepo:
     def all(self) -> Iterator[PriceData]:
         with connect(self.db_path) as con:
             rows = con.execute("""
-                SELECT id, subsector_id, ticker, date, close, volume, high, low
+                SELECT id, subsector_id, ticker, date, close, volume, high, low, open
                 FROM price_data
                 ORDER BY ticker, date
             """).fetchall()
@@ -87,7 +88,7 @@ class PriceDataRepo:
         with connect(self.db_path) as con:
             rows = con.execute(
                 """
-                SELECT id, subsector_id, ticker, date, close, volume, high, low
+                SELECT id, subsector_id, ticker, date, close, volume, high, low, open
                 FROM price_data
                 WHERE ticker = ?
                 ORDER BY date
@@ -101,7 +102,7 @@ class PriceDataRepo:
         with connect(self.db_path) as con:
             row = con.execute(
                 """
-                SELECT id, subsector_id, ticker, date, close, volume, high, low
+                SELECT id, subsector_id, ticker, date, close, volume, high, low, open
                 FROM price_data
                 WHERE ticker = ?
                 ORDER BY date DESC

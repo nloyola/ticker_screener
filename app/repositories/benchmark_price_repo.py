@@ -7,18 +7,18 @@ from app.price_apis import DailyPrice
 
 
 class BenchmarkPriceRepo:
-    """The daily closes of the markets' benchmarks (table benchmark_price, BENCHMARKS in app/markets.py)."""
+    """The daily closes and opens of the markets' benchmarks (table benchmark_price, BENCHMARKS in app/markets.py)."""
 
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
     def replace(self, ticker: str, prices: Iterable[DailyPrice]) -> None:
-        """Replaces every stored close of the benchmark 'ticker' with those of 'prices', in one transaction."""
+        """Replaces every stored day of the benchmark 'ticker' with those of 'prices', in one transaction."""
         with connect(self.db_path) as con:
             con.execute('DELETE FROM benchmark_price WHERE ticker = ?', (ticker,))
             con.executemany(
-                'INSERT INTO benchmark_price (ticker, date, close) VALUES (?, ?, ?)',
-                [(ticker, p.date, p.close) for p in prices],
+                'INSERT INTO benchmark_price (ticker, date, close, open) VALUES (?, ?, ?, ?)',
+                [(ticker, p.date, p.close, p.open) for p in prices],
             )
 
     def closes(self, ticker: str) -> dict[date, float]:

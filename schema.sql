@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS subsector (
 -- or NULL. The upgrade in app/db.py adds it to databases created before it; change both together.
 -- high and low are the day's, adjusted on the close's basis; NULL in rows stored before them, until the next fetch
 -- replaces those. The upgrade in app/db.py adds them to databases created before them; change both together.
+-- open is the day's, adjusted as the close is, and NULL in rows stored before it, as the high and low were; the ninth
+-- upgrade adds it.
 CREATE TABLE IF NOT EXISTS price_data (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -63,6 +65,7 @@ CREATE TABLE IF NOT EXISTS price_data (
        volume INTEGER,
        high REAL,
        low REAL,
+       open REAL,
        UNIQUE (ticker, date)
 );
 
@@ -143,14 +146,16 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        UNIQUE (ticker)
 );
 
--- The daily adjusted closes of each market's benchmark (BENCHMARKS in app/markets.py) over the window price_data
--- keeps, replaced by every fetch that covers its market. Apart from price_data, so the dashboard's ticker removals,
+-- The daily adjusted closes and opens of each market's benchmark (BENCHMARKS in app/markets.py) over the window
+-- price_data keeps, replaced by every fetch that covers its market. open is NULL in rows stored before the ninth
+-- upgrade added it, until the next fetch replaces them. Apart from price_data, so the dashboard's ticker removals,
 -- which delete a ticker's price_data rows, never touch it, even for a benchmark also listed as a ticker. The upgrade
 -- in app/db.py creates it in databases from before it; change both together.
 CREATE TABLE IF NOT EXISTS benchmark_price (
        ticker TEXT NOT NULL,
        date TEXT NOT NULL CHECK (date(date) IS date),
        close REAL NOT NULL,
+       open REAL,
        PRIMARY KEY (ticker, date)
 );
 

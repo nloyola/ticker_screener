@@ -304,6 +304,19 @@ def _add_stock_criteria_status(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE stock_criteria ADD COLUMN {column} {kind}')
 
 
+def _add_open(con: sqlite3.Connection) -> None:
+    """
+    Version 9: price_data.open and benchmark_price.open, the day's open adjusted as the close is, left NULL in the rows
+    already stored until the next fetch replaces them. Adds only a column a table lacks, so a table schema.sql created
+    with it is left as it is.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    for table in ('price_data', 'benchmark_price'):
+        columns = {row[1] for row in con.execute(f"PRAGMA table_info('{table}')")}
+        if columns and 'open' not in columns:  # no table: schema.sql creates it with the column
+            con.execute(f'ALTER TABLE {table} ADD COLUMN open REAL')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -313,6 +326,7 @@ UPGRADES = (
     _add_stock_criteria_price_action_columns,
     _add_relative_strength,
     _add_stock_criteria_status,
+    _add_open,
 )
 SCHEMA_VERSION = len(UPGRADES)
 
