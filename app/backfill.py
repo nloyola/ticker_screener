@@ -84,7 +84,7 @@ def market_dates(prices: pd.DataFrame) -> dict[str, pd.Index]:
 
 
 @contextmanager
-def _quiet(name: str) -> Iterator[None]:
+def quiet(name: str) -> Iterator[None]:
     """Keeps the named logger's info lines (one per ticker scored) out of a replay of many sessions."""
     named = logging.getLogger(name)
     level = named.level
@@ -122,7 +122,7 @@ class Backfill:
         archived = 0
         tickers: set[str] = set()
         for session, markets in sessions.items():
-            with _quiet('app.analyzer'):
+            with quiet('app.analyzer'):
                 scored = self.analyzer.score_as_of(session, prices, markets)
                 stored = self.analyzer.archive_signals(scored, None, settings, commit, source=BACKFILL)
             archived += stored
@@ -132,7 +132,7 @@ class Backfill:
                 f'{session} ({", ".join(markets)}): scored {len(scored)} ticker{"" if len(scored) == 1 else "s"}, '
                 f'archived {stored} new signal{"" if stored == 1 else "s"}'
             )
-        relinked = self.relink(tickers, prices)
+        relinked = self.relink(tickers, lambda ticker: prices.xs(ticker, level='ticker').index)
         print(
             f'backfill: replayed {len(sessions)} session{"" if len(sessions) == 1 else "s"}, '
             f'archived {archived} new signal{"" if archived == 1 else "s"}, '
@@ -140,18 +140,18 @@ class Backfill:
         )
         return BackfillResult(len(sessions), archived, relinked)
 
-    def relink(self, tickers: set[str], prices: pd.DataFrame) -> int:
+    def relink(self, tickers: set[str], dates_of: Callable[[str], pd.Index]) -> int:
         """
         Links each signal of 'tickers' whose previous signal is no longer the ticker's latest signal on an earlier
         session, as SignalRepo.previous finds it, to that one, with the trading days since it counted from the
-        ticker's stored prices ('prices'). Returns how many it relinked.
+        ticker's price dates ('dates_of', oldest first). Returns how many it relinked.
         """
         changed: list[SignalLink] = []
         by_ticker: dict[str, list[SignalLink]] = {}
         for link in self.signal_repo.links(sorted(tickers)):
             by_ticker.setdefault(link.ticker, []).append(link)
         for ticker, links in by_ticker.items():
-            dates = prices.xs(ticker, level='ticker').index
+            dates = dates_of(ticker)
             previous: SignalLink | None = None
             for i, link in enumerate(links):
                 # the latest signal on an earlier session: the last of the session before this one's

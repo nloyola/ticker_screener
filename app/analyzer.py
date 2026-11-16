@@ -1,7 +1,7 @@
 import json
 import logging
 import statistics
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -348,35 +348,40 @@ def _positive(value: float | None) -> int | None:
     return None if value is None else int(value > 0)
 
 
+def subsector_medians(returns: Iterable[tuple[int, float | None, float | None]]) -> dict[tuple[int, str], float]:
+    """
+    The median 1- and 3-month returns of each subsector, keyed by (subsector_id, 'return_1m_pct' or
+    'return_3m_pct'), from 'returns', one (subsector_id, return_1m_pct, return_3m_pct) per ticker scored; left out
+    where the subsector has fewer than SECTOR_MIN_TICKERS such returns.
+    """
+    by_subsector: dict[tuple[int, str], list[float]] = {}
+    for subsector_id, return_1m, return_3m in returns:
+        for field, value in (('return_1m_pct', return_1m), ('return_3m_pct', return_3m)):
+            if value is not None:
+                by_subsector.setdefault((subsector_id, field), []).append(value)
+    return {key: statistics.median(values) for key, values in by_subsector.items() if len(values) >= SECTOR_MIN_TICKERS}
+
+
+def with_subsector_medians(sc: StockCriteria, medians: Mapping[tuple[int, str], float]) -> StockCriteria:
+    """'sc' with its 1- and 3-month returns compared with its subsector's medians (subsector_medians)."""
+    rs_1m = _difference(sc.return_1m_pct, medians.get((sc.subsector_id, 'return_1m_pct')))
+    rs_3m = _difference(sc.return_3m_pct, medians.get((sc.subsector_id, 'return_3m_pct')))
+    return replace(
+        sc,
+        rs_sector_1m=rs_1m,
+        rs_sector_3m=rs_3m,
+        outperforms_sector_1m=_positive(rs_1m),
+        outperforms_sector_3m=_positive(rs_3m),
+    )
+
+
 def with_sector_strength(items: list[StockCriteria]) -> list[StockCriteria]:
     """
     'items' with each one's 1- and 3-month returns compared with the median of those of the items in its subsector
     (subsector_id), itself included; left empty where the subsector has fewer than SECTOR_MIN_TICKERS such returns.
     """
-    medians: dict[tuple[int, str], float] = {}
-    for field in ('return_1m_pct', 'return_3m_pct'):
-        by_subsector: dict[int, list[float]] = {}
-        for sc in items:
-            value = getattr(sc, field)
-            if value is not None:
-                by_subsector.setdefault(sc.subsector_id, []).append(value)
-        for subsector_id, values in by_subsector.items():
-            if len(values) >= SECTOR_MIN_TICKERS:
-                medians[subsector_id, field] = statistics.median(values)
-    result = []
-    for sc in items:
-        rs_1m = _difference(sc.return_1m_pct, medians.get((sc.subsector_id, 'return_1m_pct')))
-        rs_3m = _difference(sc.return_3m_pct, medians.get((sc.subsector_id, 'return_3m_pct')))
-        result.append(
-            replace(
-                sc,
-                rs_sector_1m=rs_1m,
-                rs_sector_3m=rs_3m,
-                outperforms_sector_1m=_positive(rs_1m),
-                outperforms_sector_3m=_positive(rs_3m),
-            )
-        )
-    return result
+    medians = subsector_medians((sc.subsector_id, sc.return_1m_pct, sc.return_3m_pct) for sc in items)
+    return [with_subsector_medians(sc, medians) for sc in items]
 
 
 def with_status(sc: StockCriteria) -> StockCriteria:
@@ -591,12 +596,18 @@ class Analyzer:
         self.archive_signals(scored, run_id, settings, commit)
 
     def score_as_of(
-        self, session_date: date, prices: pd.DataFrame | None = None, markets: Collection[str] = MARKETS
+        self,
+        session_date: date,
+        prices: pd.DataFrame | None = None,
+        markets: Collection[str] = MARKETS,
+        benchmarks: Mapping[str, Mapping[date, float]] | None = None,
     ) -> list[Scored]:
         """
         Scores every ticker as of 'session_date', as a run on that session would have, using only the price and
         benchmark rows dated on or before it: no indicator, and no subsector median, reads a later row. 'prices' is
-        load_price_data()'s frame, loaded here when None, so a caller replaying many sessions loads it once.
+        load_price_data()'s frame, loaded here when None, so a caller replaying many sessions loads it once, and
+        'benchmarks' each benchmark's closes by date, keyed by its ticker (BENCHMARKS), read from benchmark_price
+        when None, so prices from elsewhere (the history database) are scored against their own benchmarks.
 
         Only the 'markets' that traded on 'session_date' are scored: a market whose newest row on or before it is
         older (a holiday, or a weekend) is left out, rather than scored again on its previous session. A ticker is
@@ -615,7 +626,7 @@ class Analyzer:
         for market, groups in self._by_market(df).items():
             if not groups or market not in markets:
                 continue
-            result = self._score_market(market, groups)
+            result = self._score_market(market, groups, benchmarks)
             if result.session_date == session_date:
                 scored.extend(result.scored)
         return with_strength_and_status(scored)
@@ -631,16 +642,27 @@ class Analyzer:
                 logger.warning(f'{ticker} not scored: {err}')
         return by_market
 
-    def _score_market(self, market: str, groups: list[tuple[str, pd.DataFrame]]) -> MarketScore:
+    def _score_market(
+        self,
+        market: str,
+        groups: list[tuple[str, pd.DataFrame]],
+        benchmarks: Mapping[str, Mapping[date, float]] | None = None,
+    ) -> MarketScore:
         """
         Scores each of 'market's tickers ('groups', each ticker's rows oldest first) on the market's session, its
-        newest price date, against the benchmark's closes up to that session. A ticker whose last price is older,
-        or whose rows end in a padded stop (padded_stop) is skipped as stale, and a frozen one (frozen_since) as
-        frozen. Warns about, flags and stores nothing; the subsector comparison and the status are left to the caller
-        (with_strength_and_status), which knows every ticker scored on the session.
+        newest price date, against the benchmark's closes up to that session, from 'benchmarks' when given and else
+        from benchmark_price. A ticker whose last price is older, or whose rows end in a padded stop (padded_stop)
+        is skipped as stale, and a frozen one (frozen_since) as frozen. Warns about, flags and stores nothing; the
+        subsector comparison and the status are left to the caller (with_strength_and_status), which knows every
+        ticker scored on the session.
         """
         newest = max(group_df.index.get_level_values('date').max() for _, group_df in groups)
-        benchmark = {d: c for d, c in self.benchmark_price_repo.closes(BENCHMARKS[market]).items() if d <= newest}
+        closes = (
+            self.benchmark_price_repo.closes(BENCHMARKS[market])
+            if benchmarks is None
+            else benchmarks.get(BENCHMARKS[market], {})
+        )
+        benchmark = {d: c for d, c in closes.items() if d <= newest}
         if not benchmark:
             logger.info(f'{market}: no closes stored for benchmark {BENCHMARKS[market]}, market strength left empty')
         scored: list[Scored] = []
