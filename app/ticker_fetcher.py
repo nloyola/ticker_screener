@@ -112,7 +112,8 @@ class TickerFetcher:
     A ticker the API answers with a 404, and one whose download holds no trading day, is also reported with a
     'FLAGGED ticker=<ticker> reason=not_found|no_prices [last=<date>]' line after its warning, where 'last' is the
     newest price date stored for it before this run, read now because a later 'prune' may delete every one of its
-    rows (see app/progress.py). 'flagged' holds the tickers reported, so analyze does not report them again as stale.
+    rows (see app/progress.py). 'flagged' maps each ticker reported to its reason, so analyze does not report them again
+    as stale, and run-refresh ends their signals with it (app/signal_paths.py).
 
     After the prices, it looks up the company name of each ticker whose prices it stored in this run and that has no
     name stored (company_name), one request per ticker, retried as a price request is, and stores each name as soon as
@@ -134,7 +135,7 @@ class TickerFetcher:
         self.stats = FetchStats()
         self._fetched: set[str] = set()
         self._stored: list[str] = []
-        self.flagged: set[str] = set()
+        self.flagged: dict[str, str] = {}
 
     def fetch(
         self, sector_filter: str | None = None, ticker_filter: str | None = None, strict: bool = False
@@ -144,7 +145,7 @@ class TickerFetcher:
         self.stats = FetchStats(api=self.api.name)
         self._fetched = set()
         self._stored = []
-        self.flagged = set()
+        self.flagged = {}
         logger.info(f'price API: {self.api.name}')
 
         batches = self._batches(sector_filter, ticker_filter)
@@ -277,7 +278,7 @@ class TickerFetcher:
         """Prints the ticker's FLAGGED line, with the newest price date stored for it, if any."""
         latest = self.price_data_repo.latest_for_ticker(ticker)
         report_flagged(ticker, reason, latest.date if latest else None)
-        self.flagged.add(ticker)
+        self.flagged[ticker] = reason
 
     def _look_up_names(self, tickers: Iterable[str]) -> None:
         """Looks up and stores the names of the tickers that have none stored; see the class docstring."""

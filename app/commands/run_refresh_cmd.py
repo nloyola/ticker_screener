@@ -13,6 +13,7 @@ from .ticker_fetcher_cmd import failure_rate_arg, fetch_or_exit, strict_fetch_su
 
 if TYPE_CHECKING:
     from app.analyzer import Analyzer
+    from app.signal_paths import SignalPaths
     from app.ticker_fetcher import TickerFetcher
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,8 @@ def run_id_from_env() -> int | None:
 class RunRefreshCmd(BaseCommand):
     _NAME = 'run-refresh'
     _DESCRIPTION = (
-        'holding the screener lock, runs ticker-fetcher --strict and then analyze; '
+        'holding the screener lock, runs ticker-fetcher --strict and then analyze, then updates the signal price '
+        'paths; '
         f'exits {EXIT_LOCK_HELD} if another refresh holds the lock'
     )
 
@@ -77,6 +79,14 @@ class RunRefreshCmd(BaseCommand):
                     already_flagged=ticker_fetcher.flagged,
                     started_at=started_at,
                     run_id=run_id,
+                )
+                # every signal's path from this run's prices, ending the signals of the tickers it got none for,
+                # with the fetch's reason over analyze's for a ticker both flagged
+                signal_paths: SignalPaths = container.signal_paths
+                signal_paths.update(
+                    markets=ticker_fetcher.api.markets,
+                    flagged={**analyzer.flagged, **ticker_fetcher.flagged},
+                    started_at=started_at,
                 )
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)

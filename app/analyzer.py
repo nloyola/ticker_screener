@@ -474,6 +474,8 @@ class Analyzer:
         self.signal_repo: SignalRepo = container.signal_repo
         # the clock a run's start is read from, timezone aware
         self.now = now
+        # each ticker the last analyze left unscored as stale or frozen, with that reason, flagged or not
+        self.flagged: dict[str, str] = {}
 
     def analyze(
         self,
@@ -541,6 +543,7 @@ class Analyzer:
 
         Prints one summary line per market that has prices.
         """
+        self.flagged = {}
         df = self.load_price_data()
         if df is None:
             logger.info('No price data found.')
@@ -562,6 +565,7 @@ class Analyzer:
             result = self._score_market(market, groups)
             for skipped in result.skipped:
                 logger.warning(f'{skipped.ticker} not scored: {skipped.detail}')
+                self.flagged[skipped.ticker] = skipped.reason
                 if skipped.ticker not in already_flagged:
                     report_flagged(skipped.ticker, skipped.reason, skipped.last)
             scored.extend(result.scored)

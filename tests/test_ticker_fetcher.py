@@ -635,7 +635,7 @@ def test_not_found_ticker_is_flagged_with_its_last_stored_date(repo, capsys):
         f'FLAGGED ticker=GONE reason=not_found last={days_ago(30)}',
         'FLAGGED ticker=NEW reason=not_found',
     ]
-    assert fetcher.flagged == {'GONE', 'NEW'}
+    assert fetcher.flagged == {'GONE': 'not_found', 'NEW': 'not_found'}
 
 
 def test_not_found_is_flagged_without_strict_too(repo, capsys):
@@ -650,7 +650,7 @@ def test_other_failures_are_not_flagged(repo, capsys, error):
     fetcher.fetch(strict=True)
 
     assert flagged_lines(capsys.readouterr().out) == []
-    assert fetcher.flagged == set()
+    assert fetcher.flagged == {}
 
 
 def test_empty_download_is_flagged_with_the_date_stored_before_the_run(repo, capsys):
@@ -666,7 +666,7 @@ def test_empty_download_is_flagged_with_the_date_stored_before_the_run(repo, cap
         'FLAGGED ticker=NONE reason=no_prices',
     ]
     assert stored(repo, 'BLD') == []  # pruned: only the line still knows its last date
-    assert fetcher.flagged == {'BLD', 'NONE'}
+    assert fetcher.flagged == {'BLD': 'no_prices', 'NONE': 'no_prices'}
 
 
 def test_flagged_line_follows_its_warning_and_is_printed_once(repo, capsys):

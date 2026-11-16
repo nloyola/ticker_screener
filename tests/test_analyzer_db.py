@@ -28,9 +28,11 @@ from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
+from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
+from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
 TODAY = date.today()
@@ -79,6 +81,8 @@ def container(path) -> SimpleNamespace:
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
+    container.signal_path_repo = SignalPathRepo(container)
+    container.signal_paths = SignalPaths(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     return container
 
@@ -263,6 +267,46 @@ def test_run_refresh_flags_each_dead_or_stale_ticker_once(path, container, capsy
     assert summary_lines(out) == [
         f'US: skipped 2 stale tickers (stopped trading, or last price before {TODAY}) and 0 frozen tickers'
     ]
+
+
+def add_signal(path: str, signal_id: int, ticker: str, session_date: date) -> None:
+    with sqlite3.connect(path) as con:
+        con.execute(
+            'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
+            "rule_settings, source) VALUES (?, ?, 'US', 'America/New_York', ?, 1, 'confirmed', '1.0.0', '{}', 'live')",
+            (signal_id, ticker, session_date.isoformat()),
+        )
+
+
+def test_run_refresh_keeps_each_signals_path_and_ends_those_it_got_no_prices_for(path, container):
+    # signals of a ticker the run fetches, of two it gets no prices for, and of one removed from every subsector
+    yesterday = TODAY - timedelta(days=1)
+    for ticker in ('AAA', 'GONE', 'EMPTY'):
+        container.price_data_repo.bulk_insert(price_rows(ticker, yesterday))
+    session = TODAY - timedelta(days=10)
+    for signal_id, ticker in enumerate(('AAA', 'GONE', 'EMPTY', 'OLD'), start=1001):
+        add_signal(path, signal_id, ticker, session)
+
+    container.price_api_client = TiingoWithDeadTickers()
+    container.sector_service = SectorServiceStub(['AAA', 'GONE', 'EMPTY'])
+    container.ticker_fetcher = TickerFetcher(container)
+    cmd = RunRefreshCmd()
+    parser = argparse.ArgumentParser()
+    cmd.add_arguments(parser)
+    cmd.handle(parser.parse_args([]), container)
+
+    # AAA's path is the fetch's rows from the signal session to today, on the fetch's basis
+    fetched = {p.date: p.close for p in price_rows('AAA', TODAY, n=101)}
+    path_rows = [(p.session_index, p.session_date, p.close) for p in container.signal_path_repo.path(1001)]
+    assert path_rows == [(i, session + timedelta(days=i), fetched[session + timedelta(days=i)]) for i in range(11)]
+    # analyze found GONE and EMPTY stale too, but the fetch's reasons win
+    assert container.analyzer.flagged == {'GONE': 'stale', 'EMPTY': 'stale'}
+    with sqlite3.connect(path) as con:
+        ended = con.execute(
+            "SELECT signal_id, ended_reason, COUNT(*) FROM signal_outcome WHERE status = 'ended' "
+            'GROUP BY signal_id ORDER BY signal_id'
+        ).fetchall()
+    assert ended == [(1002, 'not_found', 6), (1003, 'no_prices', 6), (1004, REMOVED, len(HORIZONS))]
 
 
 def frozen_rows(ticker: str, flat: int, n: int = 100, volume_on: int | None = None) -> list[PriceData]:

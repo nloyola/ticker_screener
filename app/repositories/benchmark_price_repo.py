@@ -27,3 +27,9 @@ class BenchmarkPriceRepo:
             rows = con.execute('SELECT date, close FROM benchmark_price WHERE ticker = ?', (ticker,)).fetchall()
         # date is TEXT, as in price_data, so no converter applies to it
         return {date.fromisoformat(row['date']): row['close'] for row in rows}
+
+    def opens_and_closes(self, ticker: str) -> dict[date, tuple[float | None, float]]:
+        """The benchmark's stored open and close by date; empty when it has none."""
+        with connect(self.db_path) as con:
+            rows = con.execute('SELECT date, open, close FROM benchmark_price WHERE ticker = ?', (ticker,)).fetchall()
+        return {date.fromisoformat(row['date']): (row['open'], row['close']) for row in rows}

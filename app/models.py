@@ -167,3 +167,22 @@ class Signal:
     # the ticker's previous signal and the trading days since its session, both None for its first
     previous_signal_id: int | None = None
     trading_days_since_previous: int | None = None
+
+
+@dataclass(frozen=True)
+class PathSession:
+    """
+    One session of a signal's price path (table signal_price): session_index 0 is the signal session and N the Nth
+    session after it, with the ticker's prices and its market's benchmark's open and close on that day, as the run
+    that wrote the path held them.
+    """
+
+    session_index: int
+    session_date: date
+    open: float | None
+    high: float | None
+    low: float | None
+    close: float
+    volume: int | None
+    benchmark_open: float | None
+    benchmark_close: float | None
