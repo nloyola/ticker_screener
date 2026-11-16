@@ -3,12 +3,19 @@ The HTTP details every price API shares: timeouts, which errors are worth retryi
 company name is cleaned.
 """
 
+import logging
 import random
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import requests
 
-from app.redaction import redact_api_tokens
+from app.redaction import redact, redact_api_tokens
+
+if TYPE_CHECKING:
+    from app.price_apis import PriceApi
+
+logger = logging.getLogger(__name__)
 
 # seconds to wait for the API to accept the connection, and then for each read of its answer, so a server that stops
 # answering fails the attempt (as a requests.Timeout, which is retried) instead of hanging the run
@@ -82,3 +89,23 @@ def retry_delay(error: Exception, attempt: int, rand: Callable[[], float] = rand
         except ValueError:
             pass  # an HTTP date, which neither API sends: use the backoff
     return min(RETRY_BASE_DELAY * 2 ** (attempt - 1) * (0.5 + rand()), RETRY_MAX_DELAY)
+
+
+def with_retries[T](request: Callable[[], T], *, ticker: str, api: 'PriceApi', sleep: Callable[[float], None]) -> T:
+    """
+    Makes the ticker's request, retrying transient errors (is_transient) up to RETRY_ATTEMPTS times in all, waiting
+    retry_delay between attempts; raises the last error once the attempts run out, and any other error at once.
+    """
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return request()
+        except Exception as e:
+            if attempt == RETRY_ATTEMPTS or not is_transient(e):
+                raise
+            delay = retry_delay(e, attempt)
+            logger.info(
+                f'{api.name} request for {ticker} failed (attempt {attempt} of {RETRY_ATTEMPTS}), '
+                f'retrying in {delay:.1f} s: {redact(error_detail(e), api.api_key)}'
+            )
+            sleep(delay)
+    raise AssertionError('unreachable')

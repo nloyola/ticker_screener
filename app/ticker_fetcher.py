@@ -9,7 +9,7 @@ from app.container import Container
 from app.markets import BENCHMARKS, MARKETS, UnsupportedTicker, market_of
 from app.models import PriceData
 from app.price_apis import PriceApi
-from app.price_apis.http import RETRY_ATTEMPTS, error_detail, is_transient, response_of, retry_delay
+from app.price_apis.http import error_detail, response_of, with_retries
 from app.progress import NO_PRICES, NOT_FOUND, report_flagged, report_progress
 from app.redaction import redact
 from app.services.sector_service import normalize_ticker
@@ -343,19 +343,7 @@ class TickerFetcher:
 
     def _retrying[T](self, ticker: str, request: Callable[[], T]) -> T:
         """Makes the ticker's request, retrying transient errors; raises the last error once the attempts run out."""
-        for attempt in range(1, RETRY_ATTEMPTS + 1):
-            try:
-                return request()
-            except Exception as e:
-                if attempt == RETRY_ATTEMPTS or not is_transient(e):
-                    raise
-                delay = retry_delay(e, attempt)
-                logger.info(
-                    f'{self.api.name} request for {ticker} failed (attempt {attempt} of {RETRY_ATTEMPTS}), '
-                    f'retrying in {delay:.1f} s: {self._redact(e)}'
-                )
-                self.sleep(delay)
-        raise AssertionError('unreachable')
+        return with_retries(request, ticker=ticker, api=self.api, sleep=self.sleep)
 
     def _redact(self, error: Exception) -> str:
         # never let the key reach the log: in EODHD's URLs, or quoted back in a body
