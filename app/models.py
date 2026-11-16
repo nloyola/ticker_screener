@@ -218,3 +218,36 @@ class BackfillRun:
     screener_version: str
     git_commit: str | None
     id: int | None = None
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    """
+    One finding of a BreakoutIQ analysis run (analysis_result in schema.sql): its section, the finding within it, the
+    horizon it is about (None when it covers every horizon) and its figures, a JSON object whose shape
+    payload_version names.
+    """
+
+    section: str
+    finding: str
+    horizon: int | None
+    payload_version: int
+    payload: dict
+
+
+@dataclass(frozen=True)
+class AnalysisRun:
+    """
+    One finished BreakoutIQ analysis run (analysis_run in schema.sql): when it ran, the signal sessions its data
+    covered, the signals it read, the settings it ran with and the screener that ran it.
+    """
+
+    started_at: datetime
+    finished_at: datetime
+    first_session: date | None
+    last_session: date | None
+    signals: int
+    settings: dict
+    screener_version: str
+    git_commit: str | None
+    id: int | None = None

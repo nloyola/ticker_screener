@@ -517,6 +517,39 @@ def _add_backfill_run(con: sqlite3.Connection) -> None:
         )""")
 
 
+def _add_analysis(con: sqlite3.Connection) -> None:
+    """
+    Version 14: analysis_run and analysis_result, BreakoutIQ's analysis runs and their findings, which schema.sql
+    only creates when db-init runs.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_run (
+               id INTEGER PRIMARY KEY,
+               started_at TIMESTAMP NOT NULL,
+               finished_at TIMESTAMP NOT NULL,
+               first_session TEXT CHECK (date(first_session) IS first_session),
+               last_session TEXT CHECK (date(last_session) IS last_session),
+               signals INTEGER NOT NULL CHECK (signals >= 0),
+               settings TEXT NOT NULL CHECK (json_valid(settings)),
+               screener_version TEXT NOT NULL,
+               git_commit TEXT,
+               CHECK ((first_session IS NULL) = (last_session IS NULL)),
+               CHECK ((first_session IS NULL) = (signals = 0))
+        )""")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_result (
+               id INTEGER PRIMARY KEY,
+               run_id INTEGER NOT NULL REFERENCES analysis_run (id),
+               section TEXT NOT NULL,
+               finding TEXT NOT NULL,
+               horizon INTEGER CHECK (horizon IN (5, 10, 20, 40, 60, 120)),
+               payload_version INTEGER NOT NULL CHECK (payload_version > 0),
+               payload TEXT NOT NULL CHECK (json_valid(payload)),
+               UNIQUE (run_id, section, finding, horizon)
+        )""")
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -531,6 +564,7 @@ UPGRADES = (
     _add_signal,
     _add_signal_tracking,
     _add_backfill_run,
+    _add_analysis,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

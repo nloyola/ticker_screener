@@ -391,6 +391,39 @@ CREATE TABLE IF NOT EXISTS backfill_run (
        CHECK ((first_session IS NULL) = (sessions = 0))
 );
 
+-- BreakoutIQ's analysis runs (app/breakoutiq/): one row per run, stored with its results in one transaction once the
+-- run has finished, with the signal sessions its data covered (first_session to last_session, NULL with no signals),
+-- the signals it read and its settings (the methods' constants, as JSON). Not market data: db-init never touches it.
+-- The fourteenth upgrade in app/db.py creates it and analysis_result in databases from before them; change both
+-- together.
+CREATE TABLE IF NOT EXISTS analysis_run (
+       id INTEGER PRIMARY KEY,
+       started_at TIMESTAMP NOT NULL,
+       finished_at TIMESTAMP NOT NULL,
+       first_session TEXT CHECK (date(first_session) IS first_session),
+       last_session TEXT CHECK (date(last_session) IS last_session),
+       signals INTEGER NOT NULL CHECK (signals >= 0),
+       settings TEXT NOT NULL CHECK (json_valid(settings)),
+       screener_version TEXT NOT NULL,
+       git_commit TEXT,
+       CHECK ((first_session IS NULL) = (last_session IS NULL)),
+       CHECK ((first_session IS NULL) = (signals = 0))
+);
+
+-- One finding of an analysis run: its section (the baseline, an indicator ranking and the like), the finding it is
+-- within the section, the horizon it is about (NULL when it covers every horizon) and its figures as a JSON payload
+-- whose shape payload_version names, so a reader can tell an old payload from a new one. Not market data.
+CREATE TABLE IF NOT EXISTS analysis_result (
+       id INTEGER PRIMARY KEY,
+       run_id INTEGER NOT NULL REFERENCES analysis_run (id),
+       section TEXT NOT NULL,
+       finding TEXT NOT NULL,
+       horizon INTEGER CHECK (horizon IN (5, 10, 20, 40, 60, 120)),
+       payload_version INTEGER NOT NULL CHECK (payload_version > 0),
+       payload TEXT NOT NULL CHECK (json_valid(payload)),
+       UNIQUE (run_id, section, finding, horizon)
+);
+
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
 -- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in
 -- app/db.py creates it in databases from before it; change both together.
