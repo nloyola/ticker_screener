@@ -28,10 +28,12 @@ from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
+from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
+from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
@@ -83,6 +85,8 @@ def container(path) -> SimpleNamespace:
     container.signal_repo = SignalRepo(container)
     container.signal_path_repo = SignalPathRepo(container)
     container.signal_paths = SignalPaths(container)
+    container.signal_outcome_repo = SignalOutcomeRepo(container)
+    container.signal_outcome_updates = SignalOutcomeUpdates(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     return container
 
@@ -307,6 +311,12 @@ def test_run_refresh_keeps_each_signals_path_and_ends_those_it_got_no_prices_for
             'GROUP BY signal_id ORDER BY signal_id'
         ).fetchall()
     assert ended == [(1002, 'not_found', 6), (1003, 'no_prices', 6), (1004, REMOVED, len(HORIZONS))]
+    # and last the outcomes: AAA's path reaches session 10, so its 5- and 10-session horizons are complete
+    with sqlite3.connect(path) as con:
+        complete = con.execute(
+            "SELECT signal_id, horizon FROM signal_outcome WHERE status = 'complete' ORDER BY signal_id, horizon"
+        ).fetchall()
+    assert complete == [(1001, 5), (1001, 10)]
 
 
 def frozen_rows(ticker: str, flat: int, n: int = 100, volume_on: int | None = None) -> list[PriceData]:

@@ -61,27 +61,27 @@ class BreakoutFailure:
 
 @dataclass(frozen=True)
 class SignalOutcomes:
-    """One outcome per horizon in HORIZONS, in that order, and the breakout failure."""
+    """One outcome per horizon in HORIZONS, in that order, and the breakout failure, None when the level is unknown."""
 
     horizons: list[HorizonOutcome]
-    failure: BreakoutFailure
+    failure: BreakoutFailure | None
 
 
-def breakout_level(high_20d: float, high_60d: float, breakout_60d: bool) -> float:
+def breakout_level(high_20d: float | None, high_60d: float | None, breakout_60d: bool) -> float | None:
     """The level a breakout cleared: the prior 60-day high when the 60-day breakout passed, the prior 20-day high
-    otherwise."""
+    otherwise; None when the signal lacks that high."""
     return high_60d if breakout_60d else high_20d
 
 
 def compute_outcomes(
-    path: Sequence[PathSession], signal_close: float, level: float, cost_bps: int = COST_BPS
+    path: Sequence[PathSession], signal_close: float, level: float | None, cost_bps: int = COST_BPS
 ) -> SignalOutcomes:
     """
     The outcomes of a signal from its path (index 0 the signal session, in index order with no gaps), its close on
     the signal session and its breakout level, both as the signal was archived with them, and the round-trip cost.
 
     The level is rescaled by the ratio of the path's signal session close to 'signal_close', so a split or dividend
-    restated after the signal compares the closes with the level on one basis.
+    restated after the signal compares the closes with the level on one basis. With no level, the failure is None.
 
     When the entry session has no open, its close is the entry, and that session's high and low, which may have come
     before it, are left out of MFE and MAE; the benchmark's entry follows the same rule. A session missing its high
@@ -91,7 +91,7 @@ def compute_outcomes(
     scale = path[0].close / signal_close
     return SignalOutcomes(
         horizons=[_horizon(path, h, cost_bps) for h in HORIZONS],
-        failure=_failure(path, level * scale),
+        failure=None if level is None else _failure(path, level * scale),
     )
 
 

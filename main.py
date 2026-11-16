@@ -7,6 +7,7 @@ import sys
 from app.commands.analyzer import AnalyzerCommand
 from app.commands.backfill_cmd import BackfillCmd
 from app.commands.base_command import BaseCommand, CLI_Interface
+from app.commands.compute_outcomes_cmd import ComputeOutcomesCmd
 from app.commands.db_init import DbInit
 from app.commands.db_upgrade import DbUpgrade
 from app.commands.importer import ImporterCommand
@@ -114,6 +115,7 @@ def main() -> None:
     AnalyzerCommand().add_to_cli(cli)
     RunRefreshCmd().add_to_cli(cli)
     BackfillCmd().add_to_cli(cli)
+    ComputeOutcomesCmd().add_to_cli(cli)
     cli.execute()
 
 

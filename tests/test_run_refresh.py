@@ -83,7 +83,7 @@ class FakeFetcher:
 
 def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleNamespace, FakeFetcher, list[object]]:
     fetcher = FakeFetcher(stats)
-    # analyze appends its call, and path updates theirs, to the same list, so a test sees their order
+    # analyze appends its call, and path and outcome updates theirs, to the same list, so a test sees their order
     analyzed = []
     container = SimpleNamespace(
         db_path=db_path,
@@ -98,6 +98,7 @@ def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleName
         signal_paths=SimpleNamespace(
             update=lambda markets, flagged, started_at: analyzed.append(('paths', markets, flagged, started_at))
         ),
+        signal_outcome_updates=SimpleNamespace(update=lambda: analyzed.append('outcomes')),
     )
     return RunRefreshCmd(), container, fetcher, analyzed
 
@@ -119,10 +120,11 @@ def test_fetches_strictly_then_analyzes(db_path, monkeypatch):
     # analyze scores only the markets this run's API fetched, does not flag again what the fetch flagged, and
     # judges which sessions are complete by when the run started; it records the sessions with the runner's run id
     # then the signal paths of the markets fetched, ending the signals of each ticker flagged, by the fetch's reason
-    # where both flagged it
+    # where both flagged it, and last the outcomes from those paths
     assert analyzed == [
         (fetcher.api, fetcher.flagged, STARTED_AT, 5),
         ('paths', fetcher.api.markets, {'GONE': 'not_found', 'BOTH': 'no_prices', 'OLD': 'stale'}, STARTED_AT),
+        'outcomes',
     ]
 
 

@@ -13,12 +13,14 @@ from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
+from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.repositories.subsector_repo import SubsectorRepo
 from app.repositories.ticker_repo import TickerRepo
 from app.services.sector_service import SectorService
+from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import SignalPaths
 from app.ticker_fetcher import TickerFetcher
 from app.ticker_sync_tiingo import TickerSync
@@ -47,6 +49,7 @@ def build_container(config: Config) -> Container:
     c.register('screened_session_repo', Singleton(lambda: ScreenedSessionRepo(c)))
     c.register('signal_repo', Singleton(lambda: SignalRepo(c)))
     c.register('signal_path_repo', Singleton(lambda: SignalPathRepo(c)))
+    c.register('signal_outcome_repo', Singleton(lambda: SignalOutcomeRepo(c)))
 
     c.register('price_api_client', Singleton(lambda: price_api_client(c)))
     c.register('sector_service', Singleton(lambda: SectorService(c)))
@@ -55,6 +58,7 @@ def build_container(config: Config) -> Container:
     c.register('analyzer', Singleton(lambda: Analyzer(c)))
     c.register('backfill', Singleton(lambda: Backfill(c)))
     c.register('signal_paths', Singleton(lambda: SignalPaths(c)))
+    c.register('signal_outcome_updates', Singleton(lambda: SignalOutcomeUpdates(c)))
     return c
 
 
