@@ -10,7 +10,9 @@ EODHD_API_KEY = 'EODHD_API_KEY'
 DB_NAME = 'DB_NAME'
 # the price API to fetch prices from; a command that requires it also requires that API's key
 PRICE_API = 'PRICE_API'
-KEYS = (TIINGO_API_KEY, EODHD_API_KEY, DB_NAME, PRICE_API)
+# the price history database's path (app/repositories/history_repo.py): years of daily prices, kept out of DB_NAME
+HISTORY_DATABASE_FILE = 'HISTORY_DATABASE_FILE'
+KEYS = (TIINGO_API_KEY, EODHD_API_KEY, DB_NAME, PRICE_API, HISTORY_DATABASE_FILE)
 
 TIINGO = 'tiingo'
 EODHD = 'eodhd'
@@ -32,6 +34,7 @@ class Config:
     eodhd_api_key: str | None
     # one of PRICE_API_KEYS, when the command requires PRICE_API
     price_api: str | None = None
+    history_database_file: str | None = None
 
 
 def load_config(require: Iterable[str]) -> Config:
@@ -77,6 +80,7 @@ def load_config(require: Iterable[str]) -> Config:
         tiingo_api_key=values[TIINGO_API_KEY],
         eodhd_api_key=values[EODHD_API_KEY],
         price_api=price_api,
+        history_database_file=values[HISTORY_DATABASE_FILE],
     )
 
 

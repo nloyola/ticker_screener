@@ -10,6 +10,7 @@ from app.commands.base_command import BaseCommand, CLI_Interface
 from app.commands.compute_outcomes_cmd import ComputeOutcomesCmd
 from app.commands.db_init import DbInit
 from app.commands.db_upgrade import DbUpgrade
+from app.commands.history_fetch_cmd import HistoryFetchCmd
 from app.commands.importer import ImporterCommand
 from app.commands.run_refresh_cmd import RunRefreshCmd
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
@@ -116,6 +117,7 @@ def main() -> None:
     RunRefreshCmd().add_to_cli(cli)
     BackfillCmd().add_to_cli(cli)
     ComputeOutcomesCmd().add_to_cli(cli)
+    HistoryFetchCmd().add_to_cli(cli)
     cli.execute()
 
 
