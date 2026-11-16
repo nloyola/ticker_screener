@@ -106,6 +106,13 @@ def settings(thresholds: Thresholds = DEFAULTS) -> dict:
         'model_categories': list(predictive.CATEGORIES),
         'model_l2_penalty': predictive.L2_PENALTY,
         'calibration_bins': predictive.CALIBRATION_BINS,
+        'model_tree_iterations': predictive.TREE_ITERATIONS,
+        'model_tree_max_depth': predictive.TREE_MAX_DEPTH,
+        'model_tree_min_leaf': predictive.TREE_MIN_LEAF,
+        'model_tree_learning_rate': predictive.TREE_LEARNING_RATE,
+        'model_tree_l2_penalty': predictive.TREE_L2_PENALTY,
+        'attribution_repeats': predictive.ATTRIBUTION_REPEATS,
+        'attribution_seed': predictive.ATTRIBUTION_SEED,
         'payload_versions': {s.name: s.payload_version for s in SECTIONS},
     }
 

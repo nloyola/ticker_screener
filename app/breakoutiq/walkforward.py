@@ -23,7 +23,8 @@ A model is compared with each baseline on the dates both ranked: the mean over t
 baseline's, with a confidence interval bootstrapped by blocks of signal dates as long as the horizon
 (stats.block_bootstrap), since signals a few sessions apart share most of their window. A comparison on fewer than
 the run's min_signal_dates dates is not shown. A model beats a baseline when the interval lies above zero, and beats
-the rules when it beats every baseline, which needs no correction for the several comparisons.
+the rules when it beats every baseline, which needs no correction for the several comparisons. A model can be
+compared with other models the same way, on every date both ranked.
 
 The folds cover the dataset's periods without regard to them, and each fold reports its signals by period. A rule was
 found on development, so it is in sample there: a model is compared with a rule only on the dates none of whose
@@ -142,20 +143,25 @@ def session_lifts(test: pd.DataFrame, scores: np.ndarray) -> pd.DataFrame:
     row per date with complete outcomes on at least two signals, with the signals ranked, the mean net excess return
     of the TOP_SHARE ranked highest (top_mean), of them all (mean) and the difference (lift), oldest first.
     """
-    y = pd.to_numeric(test[OUTCOMES[MAIN_OUTCOME].column], errors='coerce').to_numpy(dtype=float)
-    observed = (test['outcome_status'] == COMPLETE).to_numpy() & ~np.isnan(y)
-    score = np.where(np.isnan(scores), -np.inf, scores)
-    dates = pd.to_datetime(test['session_date']).to_numpy()[observed]
-    y, score = y[observed], score[observed]
+    y, score, sessions = _judged(test, scores)
     records = []
-    for date in np.unique(dates):
-        at = dates == date
-        if at.sum() < 2:
-            continue
+    for date, at in sessions:
         top_mean = _top_mean(y[at], score[at])
         mean = float(y[at].mean())
         records.append((pd.Timestamp(date), int(at.sum()), top_mean, mean, top_mean - mean))
     return pd.DataFrame(records, columns=['session_date', 'signals', 'top_mean', 'mean', 'lift'])
+
+
+def lift_matrix(test: pd.DataFrame, scores: np.ndarray) -> np.ndarray:
+    """
+    The lift of each ranking in 'scores' (one column per ranking, one row per row of 'test') on each date
+    session_lifts judges, oldest first: one row per date, one column per ranking.
+    """
+    y, score, sessions = _judged(test, scores)
+    lifts = np.empty((len(sessions), score.shape[1]))
+    for i, (_, at) in enumerate(sessions):
+        lifts[i] = _top_means(y[at], score[at]) - y[at].mean()
+    return lifts
 
 
 def walk_forward(
@@ -166,6 +172,7 @@ def walk_forward(
     thresholds: Thresholds = DEFAULTS,
     calendars: dict[str, pd.DatetimeIndex] | None = None,
     predictions: dict[str, pd.DataFrame] | None = None,
+    versus: dict[str, tuple[str, ...]] | None = None,
 ) -> dict:
     """
     Every model in 'models', by name, against the statuses and 'rules' (validated_rules), walk-forward on the
@@ -174,6 +181,9 @@ def walk_forward(
 
     When 'predictions' is given, it is filled with each model's out-of-sample scores, by name: one row per test row
     of a trained fold, with its fold, signal, date, ticker, market, outcome status, main outcome and score.
+
+    'versus' names, for a model, the other models it is compared with as well, on every date both ranked; each
+    model's comparison holds them under 'models', none for a model 'versus' does not name.
     """
     at = indicator_frame(rows[rows['horizon'] == horizon].reset_index(drop=True))
     rankers = {name: (MODEL, model) for name, model in models.items()} | baselines(rules)
@@ -203,7 +213,13 @@ def walk_forward(
         'folds': fold_payloads,
         'rankers': {name: {'kind': kind, **_ranker_payload(by_ranker[name])} for name, (kind, _) in rankers.items()},
         'comparisons': {
-            name: _comparisons(by_ranker[name], by_ranker, baselines(rules), development, horizon, thresholds)
+            name: {
+                **_comparisons(by_ranker[name], by_ranker, baselines(rules), development, horizon, thresholds),
+                'models': {
+                    other: _compare(by_ranker[name], by_ranker[other], EVERY_DATE, horizon, thresholds)
+                    for other in (versus or {}).get(name, ())
+                },
+            }
             for name in models
         },
         'initial_train_share': INITIAL_TRAIN_SHARE,
@@ -214,13 +230,31 @@ def walk_forward(
     }
 
 
+def _judged(test: pd.DataFrame, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray, list[tuple]]:
+    """
+    The complete outcomes of 'test' and their 'scores' (a missing score lowest), with each date judged, oldest first,
+    and the mask of its rows: the dates with complete outcomes on at least two signals.
+    """
+    y = pd.to_numeric(test[OUTCOMES[MAIN_OUTCOME].column], errors='coerce').to_numpy(dtype=float)
+    observed = (test['outcome_status'] == COMPLETE).to_numpy() & ~np.isnan(y)
+    score = np.where(np.isnan(scores), -np.inf, scores)
+    dates = pd.to_datetime(test['session_date']).to_numpy()[observed]
+    sessions = [(date, dates == date) for date in np.unique(dates)]
+    return y[observed], score[observed], [(date, at) for date, at in sessions if at.sum() >= 2]
+
+
 def _top_mean(y: np.ndarray, score: np.ndarray) -> float:
     """The mean of 'y' over the TOP_SHARE of its rows 'score' ranks highest, tied rows sharing the places they span."""
+    return float(_top_means(y, score[:, None])[0])
+
+
+def _top_means(y: np.ndarray, scores: np.ndarray) -> np.ndarray:
+    """_top_mean of each ranking in 'scores', one column per ranking."""
     k = TOP_SHARE * len(y)
-    cut = np.sort(score)[::-1][int(np.ceil(k)) - 1]
-    above, tied = score > cut, score == cut
-    weights = above + tied * (k - above.sum()) / tied.sum()
-    return float((weights * y).sum() / k)
+    cut = -np.sort(-scores, axis=0)[int(np.ceil(k)) - 1]
+    above, tied = scores > cut, scores == cut
+    weights = above + tied * (k - above.sum(axis=0)) / tied.sum(axis=0)
+    return (weights * y[:, None]).sum(axis=0) / k
 
 
 def _window_ends(rows: pd.DataFrame) -> np.ndarray:

@@ -2,8 +2,8 @@
 BreakoutIQ's walk-forward framework: a model ranks a session's signals better than the statuses and the rules when a
 nonlinear effect is planted, and not in the large majority of simulations with no effect; each fold trains only on
 signals whose outcomes were over GAP_SESSIONS sessions before it; a ranking that cannot tell a session's signals apart
-lifts it by exactly zero, tied scores sharing their places; a fold with nothing to train on is left out; and the rules
-validated in a run are read back from its results.
+lifts it by exactly zero, tied scores sharing their places, many rankings at once judged alike; a fold with nothing to
+train on is left out; and the rules validated in a run are read back from its results.
 """
 
 import numpy as np
@@ -18,6 +18,7 @@ from app.breakoutiq.walkforward import (
     INITIAL_TRAIN_SHARE,
     STATUS,
     folds,
+    lift_matrix,
     session_lifts,
     validated_rules,
     walk_forward,
@@ -211,3 +212,17 @@ def test_the_validated_rules_are_read_from_a_runs_results():
     ]
     assert validated_rules(results, HORIZON) == [pair]
     assert validated_rules(results, 60) == [_RULE]
+
+
+def test_the_lift_matrix_judges_each_ranking_as_session_lifts_does():
+    rows = _dataset(12)[:400].reset_index(drop=True)
+    rows.loc[::7, 'outcome_status'] = 'ended'
+    rng = np.random.default_rng(12)
+    scores = rng.normal(0, 1, (len(rows), 3))
+    scores[::5, 1] = np.nan
+    scores[:, 2] = 1.0
+
+    matrix = lift_matrix(rows, scores)
+    for column in range(scores.shape[1]):
+        assert np.allclose(matrix[:, column], session_lifts(rows, scores[:, column])['lift'].to_numpy())
+    assert np.allclose(matrix[:, 2], 0)
