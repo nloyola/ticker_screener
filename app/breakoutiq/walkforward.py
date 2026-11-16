@@ -5,8 +5,9 @@ trained only on what was known before, against the strategy's statuses and the v
 The signal dates of one horizon's rows are cut in order: the oldest INITIAL_TRAIN_SHARE of them only ever train, and
 the rest into FOLDS consecutive test folds of about equal dates. Each fold trains on the signals dated before its
 first date whose outcome was over before it: at least GAP_SESSIONS sessions of the signal's market lie strictly
-between the two dates, the same gap the dataset's periods keep (dataset.assign_periods), and the signal's known outcome
-window (its exit, or for an ended horizon its last session) ends before the fold's first date. A fold left with no
+between the two dates, the same gap the dataset's periods keep (dataset.assign_periods), counted on the market's
+calendar through the dataset's gap_date (dataset.gap_dates), and the signal's known outcome window (its exit, or for
+an ended horizon its last session) ends before the fold's first date. A fold left with no
 complete outcome to train on is reported, and left out of every comparison.
 
 A ranker scores a fold's test signals, higher better, from the fold's training rows: a model fits them, while the
@@ -77,11 +78,11 @@ class Fold:
     test: np.ndarray
 
 
-def folds(rows: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex] | None = None) -> list[Fold]:
+def folds(rows: pd.DataFrame) -> list[Fold]:
     """
     The test folds of one horizon's rows (dataset.build_dataset's columns), oldest first, their masks aligned with
-    'rows'. A market's sessions are its calendar in 'calendars' when given, else every business day (holidays
-    included, which can only count more sessions than the market had; the window end check still holds then).
+    'rows'. The gap is counted on each market's calendar through the rows' gap_date; rows without that column count
+    every business day as a session.
     """
     dates = np.sort(pd.to_datetime(rows['session_date']).unique())
     first_test = int(np.ceil(len(dates) * INITIAL_TRAIN_SHARE))
@@ -93,8 +94,7 @@ def folds(rows: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex] | None = No
     for number, block in enumerate(np.array_split(dates[first_test:], FOLDS), start=1):
         first, last = block[0], block[-1]
         before = session_dates < first
-        between = _sessions_between(rows, session_dates, first, calendars)
-        train = before & (between >= GAP_SESSIONS) & ~(window_end >= first)
+        train = before & _gapped(rows, session_dates, first) & (window_end < first)
         test = (session_dates >= first) & (session_dates <= last)
         result.append(Fold(number, pd.Timestamp(first), pd.Timestamp(last), train, test))
     return result
@@ -170,7 +170,6 @@ def walk_forward(
     models: dict[str, Ranker],
     rules: list[Rule],
     thresholds: Thresholds = DEFAULTS,
-    calendars: dict[str, pd.DatetimeIndex] | None = None,
     predictions: dict[str, pd.DataFrame] | None = None,
     versus: dict[str, tuple[str, ...]] | None = None,
 ) -> dict:
@@ -180,17 +179,19 @@ def walk_forward(
     each model's comparison with each baseline, judged by 'thresholds'.
 
     When 'predictions' is given, it is filled with each model's out-of-sample scores, by name: one row per test row
-    of a trained fold, with its fold, signal, date, ticker, market, outcome status, main outcome and score.
+    of a trained fold, with its fold, signal, date, ticker, market, outcome status, main outcome and score, and the
+    share of the fold's complete training outcomes above zero (train_beat_share).
 
     'versus' names, for a model, the other models it is compared with as well, on every date both ranked; each
     model's comparison holds them under 'models', none for a model 'versus' does not name.
     """
     at = indicator_frame(rows[rows['horizon'] == horizon].reset_index(drop=True))
-    rankers = {name: (MODEL, model) for name, model in models.items()} | baselines(rules)
+    against = baselines(rules)
+    rankers = {name: (MODEL, model) for name, model in models.items()} | against
     lifts: dict[str, list[pd.DataFrame]] = {name: [] for name in rankers}
     scored: dict[str, list[pd.DataFrame]] = {name: [] for name in models}
     fold_payloads = []
-    for fold in folds(at, calendars):
+    for fold in folds(at):
         train, test = at[fold.train].reset_index(drop=True), at[fold.test].reset_index(drop=True)
         trained = bool((train['outcome_status'] == COMPLETE).any())
         fold_payloads.append(_fold_payload(fold, train, test, trained))
@@ -200,11 +201,13 @@ def walk_forward(
             scores = np.asarray(ranker(train, test), dtype=float)
             lifts[name].append(session_lifts(test, scores).assign(fold=fold.number))
             if name in scored:
-                scored[name].append(_scored(test, scores, fold.number))
+                scored[name].append(_scored(test, scores, fold.number, train))
     by_ranker = {name: pd.concat(parts, ignore_index=True) if parts else _no_lifts() for name, parts in lifts.items()}
     if predictions is not None:
         for name, parts in scored.items():
-            predictions[name] = pd.concat(parts, ignore_index=True) if parts else _scored(at.iloc[:0], np.array([]), 0)
+            predictions[name] = (
+                pd.concat(parts, ignore_index=True) if parts else _scored(at.iloc[:0], np.array([]), 0, at.iloc[:0])
+            )
     development = _development_dates(at)
     return {
         'horizon': horizon,
@@ -214,7 +217,7 @@ def walk_forward(
         'rankers': {name: {'kind': kind, **_ranker_payload(by_ranker[name])} for name, (kind, _) in rankers.items()},
         'comparisons': {
             name: {
-                **_comparisons(by_ranker[name], by_ranker, baselines(rules), development, horizon, thresholds),
+                **_comparisons(by_ranker[name], by_ranker, against, development, horizon, thresholds),
                 'models': {
                     other: _compare(by_ranker[name], by_ranker[other], EVERY_DATE, horizon, thresholds)
                     for other in (versus or {}).get(name, ())
@@ -258,29 +261,28 @@ def _top_means(y: np.ndarray, scores: np.ndarray) -> np.ndarray:
 
 
 def _window_ends(rows: pd.DataFrame) -> np.ndarray:
-    """Each row's known outcome window end: its exit when complete, its last session when ended, else NaT."""
-    if 'exit_date' not in rows or 'last_session_date' not in rows:
-        return np.full(len(rows), np.datetime64('NaT'), dtype='datetime64[ns]')
+    """
+    Each row's known outcome window end: its exit when complete, its last session when ended, else NaT. Without the
+    columns no window could be checked, so it refuses rather than train on outcomes that may not be over.
+    """
+    missing = {'exit_date', 'last_session_date'} - set(rows.columns)
+    if missing:
+        raise ValueError(f'the rows lack {sorted(missing)}, so no outcome window can be checked')
     ends = pd.to_datetime(rows['exit_date']).where(rows['outcome_status'] == COMPLETE)
     ends = ends.fillna(pd.to_datetime(rows['last_session_date']).where(rows['outcome_status'] == ENDED))
     return ends.to_numpy(dtype='datetime64[ns]')
 
 
-def _sessions_between(
-    rows: pd.DataFrame, session_dates: np.ndarray, boundary: np.datetime64, calendars: dict | None
-) -> np.ndarray:
-    """The sessions of each row's market strictly between its date and 'boundary' (0 for a row on or after it)."""
-    if calendars is None:
-        days = session_dates.astype('datetime64[D]')
-        return np.maximum(np.busday_count(days, np.datetime64(boundary, 'D')) - 1, 0)
-    between = np.zeros(len(rows), dtype=int)
-    for market, index in rows.groupby('market').indices.items():
-        calendar = calendars.get(market, pd.DatetimeIndex([]))
-        counted = calendar.searchsorted(boundary, side='left') - calendar.searchsorted(
-            session_dates[index], side='right'
-        )
-        between[index] = np.maximum(counted, 0)
-    return between
+def _gapped(rows: pd.DataFrame, session_dates: np.ndarray, boundary: np.datetime64) -> np.ndarray:
+    """
+    Whether at least GAP_SESSIONS sessions of each row's market lie strictly between its date and 'boundary': its
+    gap_date (dataset.gap_dates) is before 'boundary', none when it has no gap_date, or, for rows without that column,
+    at least GAP_SESSIONS business days lie between.
+    """
+    if 'gap_date' in rows:
+        return (pd.to_datetime(rows['gap_date']) < boundary).to_numpy()
+    days = session_dates.astype('datetime64[D]')
+    return np.busday_count(days, np.datetime64(boundary, 'D')) - 1 >= GAP_SESSIONS
 
 
 def _fold_payload(fold: Fold, train: pd.DataFrame, test: pd.DataFrame, trained: bool) -> dict:
@@ -377,10 +379,14 @@ def _development_dates(rows: pd.DataFrame) -> np.ndarray:
     return pd.to_datetime(rows.loc[rows['period'] == DEVELOPMENT, 'session_date']).unique()
 
 
-def _scored(test: pd.DataFrame, scores: np.ndarray, fold: int) -> pd.DataFrame:
+def _scored(test: pd.DataFrame, scores: np.ndarray, fold: int, train: pd.DataFrame) -> pd.DataFrame:
     """A model's scores of one fold's test rows, with what judging them needs."""
-    columns = ['signal_id', 'session_date', 'ticker', 'market', 'outcome_status', OUTCOMES[MAIN_OUTCOME].column]
-    return test[columns].reset_index(drop=True).assign(fold=fold, score=scores)
+    column = OUTCOMES[MAIN_OUTCOME].column
+    y = pd.to_numeric(train[column], errors='coerce')
+    y = y[(train['outcome_status'] == COMPLETE) & y.notna()]
+    share = float((y > 0).mean()) if len(y) else np.nan
+    columns = ['signal_id', 'session_date', 'ticker', 'market', 'outcome_status', column]
+    return test[columns].reset_index(drop=True).assign(fold=fold, score=scores, train_beat_share=share)
 
 
 def _no_lifts() -> pd.DataFrame:

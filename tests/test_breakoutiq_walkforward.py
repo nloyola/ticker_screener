@@ -8,10 +8,11 @@ train on is left out; and the rules validated in a run are read back from its re
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.analyzer import CONFIRMED, HIGH_CONVICTION
 from app.breakoutiq.candidates import ABOVE, AT_MOST, PRELIMINARY, RULE, SECTION, VALIDATED, Condition, rule_key
-from app.breakoutiq.dataset import GAP_SESSIONS
+from app.breakoutiq.dataset import GAP_SESSIONS, gap_dates
 from app.breakoutiq.indicators import FLAGS, VALUES, band_edges, bands
 from app.breakoutiq.walkforward import (
     FOLDS,
@@ -134,14 +135,31 @@ def test_each_fold_trains_only_on_outcomes_over_a_gap_before_it():
         assert (fold.train == ready.to_numpy()).all()
 
 
-def test_the_folds_count_a_markets_own_sessions_when_given():
+def test_the_folds_count_a_markets_own_sessions_through_the_gap_date():
     rows = _dataset(3)
     calendar = pd.DatetimeIndex(SESSIONS[::2])  # a market open every other business day
-    plain, sparse = folds(rows), folds(rows, {'US': calendar})
+    plain = folds(rows)
+    rows['gap_date'] = gap_dates(rows, {'US': calendar})
+    sparse = folds(rows)
     for a, b in zip(plain, sparse, strict=True):
         assert b.train.sum() < a.train.sum()
         last = rows[b.train]['session_date'].max()
         assert calendar.searchsorted(b.first) - calendar.searchsorted(last, side='right') >= GAP_SESSIONS
+        # every signal with GAP_SESSIONS of the market's sessions between it and the fold, and over in time, trains
+        between = calendar.searchsorted(b.first) - calendar.searchsorted(rows['session_date'], side='right')
+        ready = (between >= GAP_SESSIONS) & (pd.to_datetime(rows['exit_date']) < b.first).to_numpy()
+        assert (b.train == ready).all()
+
+
+def test_the_gap_date_is_the_markets_gap_sessions_th_session_after_and_none_past_its_calendar():
+    calendar = pd.DatetimeIndex(SESSIONS[:200])
+    signals = pd.DataFrame({'session_date': [SESSIONS[0], SESSIONS[79], SESSIONS[80]], 'market': 'US'})
+    assert gap_dates(signals, {'US': calendar}).tolist() == [SESSIONS[GAP_SESSIONS], SESSIONS[199], pd.NaT]
+
+
+def test_rows_with_no_known_outcome_window_are_refused():
+    with pytest.raises(ValueError, match='outcome window'):
+        folds(_dataset(3).drop(columns='last_session_date'))
 
 
 def test_a_ranking_that_cannot_tell_signals_apart_lifts_nothing():

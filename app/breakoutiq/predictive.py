@@ -16,9 +16,10 @@ The trees are kept only when they leave the simple models behind: when, against 
 ranked, the interval of their lift less its lift lies above zero and the difference reaches the economic bar. Trees
 that are not kept are never more than PRELIMINARY (NOT_KEPT), however they fare against the rules, so a proposal
 comes from them only when the simple models leave signal on the table. Their attributions say what they read: for
-each indicator and category, the lift lost, out of sample, when its values are shuffled among a fold's test signals
-(ATTRIBUTION_REPEATS times, averaged over every date ranked), read from the very trees each fold of the
-walk-forward fitted.
+each indicator and category, the lift lost, out of sample, when its values are shuffled among the signals of each of a
+fold's test sessions (ATTRIBUTION_REPEATS times, averaged over every date ranked), read from the very trees each fold
+of the walk-forward fitted. The shuffle stays within a session since the lift is judged within one: shuffled across
+sessions, a value every signal of a session shares, such as the regime, would seem to carry a ranking it cannot.
 
 The simple models read the same design: every indicator the confounders section regresses (confounders.INDICATORS: each
 secondary indicator's raw value but secondary_passed, and each mandatory strength), standardized by the training rows'
@@ -32,11 +33,12 @@ class) scores nothing, so it ranks no signal above another.
 At each horizon the section reports, per model:
 - its ranking quality: its lift per fold and over every fold, and the mean net excess return of the signals it ranks
   highest (top_mean), beside each baseline's, and its comparison with each baseline (walkforward.walk_forward);
-- its calibration, on its pooled out-of-sample predictions of complete outcomes: CALIBRATION_BINS quantile bins of the
-  prediction, each with its predicted and realized mean, and, for LINEAR and TREES, the slope of the realized outcome on
-  the prediction (1 when calibrated, 0 when it says nothing), with errors clustered by date and ticker, for LOGISTIC its
-  Brier score beside that of predicting each fold's training share of signals that beat the benchmark. Calibration is
-  across sessions, so the market's shared move weighs on it, while the ranking is within each session;
+- its calibration, on its pooled out-of-sample predictions of complete outcomes (a fold it could not fit adds none):
+  CALIBRATION_BINS quantile bins of the prediction, each with its predicted and realized mean, and, for LINEAR and
+  TREES, the slope of the realized outcome on the prediction (1 when calibrated, 0 when it says nothing), with errors
+  clustered by date and ticker, for LOGISTIC its Brier score beside that of predicting each fold's training share of
+  signals that beat the benchmark. Calibration is across sessions, so the market's shared move weighs on it, while the
+  ranking is within each session;
 - for a simple model, its coefficients fitted on every complete outcome of the horizon, per standard deviation,
   descriptive; for TREES, their comparison with each simple model, whether they are kept, and their attributions;
 - its label: UNTESTED when a comparison with a baseline (or for TREES, a simple model) could not be made (too few
@@ -48,10 +50,13 @@ Every figure carries its sample size. Ended (censored) horizons are counted, nev
 is a ranking proposal: nothing here changes the live screener.
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from sklearn.ensemble import HistGradientBoostingRegressor
+from threadpoolctl import threadpool_limits
 
 from app.breakoutiq.candidates import BELOW_ECONOMIC_BAR, PRELIMINARY, VALIDATED
 from app.breakoutiq.confounders import INDICATORS
@@ -59,8 +64,10 @@ from app.breakoutiq.dataset import COMPLETE, ENDED
 from app.breakoutiq.indicators import MAIN_OUTCOME, OUTCOMES, value_frame
 from app.breakoutiq.stats import CLUSTERS, cluster_codes, clustered_ols
 from app.breakoutiq.thresholds import DEFAULTS, Thresholds
-from app.breakoutiq.walkforward import Ranker, folds, lift_matrix, validated_rules, walk_forward
+from app.breakoutiq.walkforward import Ranker, lift_matrix, validated_rules, walk_forward
 from app.models import AnalysisResult
+
+logger = logging.getLogger(__name__)
 
 SECTION = 'models'
 PAYLOAD_VERSION = 1
@@ -203,7 +210,10 @@ def fit_logistic(x: np.ndarray, y: np.ndarray, penalty: float = L2_PENALTY) -> n
     share = np.clip(y.mean(), 1e-6, 1 - 1e-6)
     start = np.zeros(a.shape[1])
     start[0] = np.log(share / (1 - share))
-    return minimize(loss, start, jac=True, method='L-BFGS-B').x
+    fit = minimize(loss, start, jac=True, method='L-BFGS-B')
+    if not fit.success:
+        logger.warning('the logistic fit on %d rows did not converge: %s', len(a), fit.message)
+    return fit.x
 
 
 def linear(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
@@ -218,7 +228,7 @@ def logistic(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
 
 def trees(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
     """The TREES ranker: each test signal's predicted net excess return."""
-    return _rank(train, test, TREES)
+    return FoldTrees()(train, test)
 
 
 class FoldTrees:
@@ -246,6 +256,14 @@ def predictive(
     The section's results from the analysis dataset (dataset.build_dataset), against the rules 'earlier' (the run's
     results before this section) validated: per horizon, the WALK_FORWARD finding, then one 'model:<name>' per model.
     """
+    # the fits are small, so sklearn's and the BLAS threads would only spin: one thread each is several times faster
+    with threadpool_limits(limits=1):
+        return _predictive(rows, thresholds, earlier)
+
+
+def _predictive(
+    rows: pd.DataFrame, thresholds: Thresholds, earlier: list[AnalysisResult] | None
+) -> list[AnalysisResult]:
     results = []
     for horizon in sorted(int(h) for h in rows['horizon'].unique()):
         raw = rows[rows['horizon'] == horizon].reset_index(drop=True)
@@ -311,7 +329,7 @@ def _model(
         'top_mean': ranking['top_mean'],
         'min_net_excess_return': bar,
         'clears_bar': ranking['top_mean'] is not None and ranking['top_mean'] >= bar,
-        'calibration': _calibration(name, rows, predicted, thresholds),
+        'calibration': _calibration(name, predicted, thresholds),
         'coefficients': _coefficients(name, rows),
         **_settings(thresholds),
     }
@@ -352,8 +370,8 @@ def _attributions(
 ) -> dict:
     """
     What the trees read, out of sample, from each fold's 'fits' (FoldTrees.fits): for each indicator and category, the
-    lift lost when its values are shuffled among the fold's test signals, ATTRIBUTION_REPEATS times, averaged over
-    every date the trees ranked.
+    lift lost when its values are shuffled among the signals of each of the fold's test sessions, ATTRIBUTION_REPEATS
+    times, averaged over every date the trees ranked.
     """
     rng = np.random.default_rng(ATTRIBUTION_SEED)
     columns = [*FEATURES, *CATEGORIES]
@@ -363,10 +381,11 @@ def _attributions(
         x = design.matrix(test)
         base = lift_matrix(test, model.predict(x)[:, None])[:, 0]
         dates += len(base)
+        sessions = pd.factorize(test['session_date'])[0]
         # a column the fold's trees left out loses nothing when shuffled
         for j, column in enumerate(design.columns):
             shuffled = np.tile(x, (ATTRIBUTION_REPEATS, 1))
-            shuffled[:, j] = np.concatenate([rng.permutation(x[:, j]) for _ in range(ATTRIBUTION_REPEATS)])
+            shuffled[:, j] = np.concatenate([x[_within(sessions, rng), j] for _ in range(ATTRIBUTION_REPEATS)])
             scores = model.predict(shuffled).reshape(ATTRIBUTION_REPEATS, len(test)).T
             lost[column] += float((base[:, None] - lift_matrix(test, scores)).sum()) / ATTRIBUTION_REPEATS
     shown = dates >= thresholds.min_signal_dates
@@ -378,6 +397,15 @@ def _attributions(
         'shown': shown,
         'columns': {c: lost[c] / dates for c in columns} if shown else {},
     }
+
+
+def _within(groups: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """A permutation of the rows that moves each row only within its group: row i takes the value of row result[i]."""
+    by_group = np.argsort(groups, kind='stable')
+    shuffled = np.lexsort((rng.random(len(groups)), groups))
+    result = np.empty(len(groups), dtype=int)
+    result[by_group] = shuffled
+    return result
 
 
 def _label(
@@ -405,12 +433,12 @@ def _label(
     return VALIDATED, None
 
 
-def _calibration(name: str, rows: pd.DataFrame, predicted: pd.DataFrame, thresholds: Thresholds) -> dict:
+def _calibration(name: str, predicted: pd.DataFrame, thresholds: Thresholds) -> dict:
     """
     A model's calibration on its out-of-sample predictions of complete outcomes: the bins, and for LINEAR the slope,
     for LOGISTIC the Brier scores.
     """
-    at = predicted[_observed(predicted)].reset_index(drop=True)
+    at = predicted[_observed(predicted) & np.isfinite(predicted['score'].to_numpy(dtype=float))].reset_index(drop=True)
     y = at[OUTCOMES[MAIN_OUTCOME].column].to_numpy(dtype=float)
     realized = (y > 0).astype(float) if name == LOGISTIC else y
     score = at['score'].to_numpy(dtype=float)
@@ -425,7 +453,7 @@ def _calibration(name: str, rows: pd.DataFrame, predicted: pd.DataFrame, thresho
     if name != LOGISTIC:
         result['slope'] = _slope(at, score, realized, thresholds) if result['shown'] else None
     else:
-        base = _training_shares(rows, at)
+        base = at['train_beat_share'].to_numpy(dtype=float)
         result['brier'] = float(np.mean((score - realized) ** 2)) if result['shown'] else None
         result['brier_base'] = float(np.mean((base - realized) ** 2)) if result['shown'] else None
     return result
@@ -471,17 +499,6 @@ def _slope(at: pd.DataFrame, score: np.ndarray, realized: np.ndarray, thresholds
     return {'estimate': slope.estimate, 'se': slope.se, 'ci_low': slope.ci_low, 'ci_high': slope.ci_high}
 
 
-def _training_shares(rows: pd.DataFrame, at: pd.DataFrame) -> np.ndarray:
-    """Each prediction's fold's training share of complete outcomes that beat the benchmark, aligned with 'at'."""
-    shares = {}
-    for fold in folds(rows):
-        train = rows[fold.train]
-        y = pd.to_numeric(train[OUTCOMES[MAIN_OUTCOME].column], errors='coerce')
-        y = y[(train['outcome_status'] == COMPLETE) & y.notna()]
-        shares[fold.number] = float((y > 0).mean()) if len(y) else np.nan
-    return at['fold'].map(shares).to_numpy(dtype=float)
-
-
 def _coefficients(name: str, rows: pd.DataFrame) -> dict | None:
     """
     The model fitted on every complete outcome of the horizon: its sample and coefficients, by column; None for the
@@ -507,9 +524,6 @@ def _rank(train: pd.DataFrame, test: pd.DataFrame, name: str) -> np.ndarray:
     fitted = _fit(name, _complete(train))
     if fitted is None:
         return np.full(len(test), np.nan)
-    if name == TREES:
-        design, model = fitted
-        return model.predict(design.matrix(test))
     design, beta = fitted
     logits = beta[0] + design.matrix(test) @ beta[1:]
     return logits if name == LINEAR else _sigmoid(logits)

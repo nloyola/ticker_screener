@@ -49,7 +49,7 @@ from app.breakoutiq.predictive import (
     trees,
 )
 from app.breakoutiq.thresholds import DEFAULTS
-from app.breakoutiq.walkforward import AFTER_DEVELOPMENT, EVERY_DATE, STATUS, walk_forward
+from app.breakoutiq.walkforward import AFTER_DEVELOPMENT, EVERY_DATE, STATUS, folds, walk_forward
 from app.models import AnalysisResult
 from tests.test_breakoutiq_walkforward import HORIZON, SESSIONS, _dataset
 
@@ -255,9 +255,13 @@ def test_the_design_is_set_from_the_training_rows_alone():
     # a level unseen in training adds nothing, and a test row is scaled by the training statistics
     test = train.iloc[:2].copy()
     test['sector'] = 'Utilities'
-    dummies = design.matrix(test)[:, len(design.features) :]
+    test['rsi'] = [5.0, -5.0]
+    x = design.matrix(test)
+    dummies = x[:, len(design.features) :]
     sector = [i for i, c in enumerate(design.columns[len(design.features) :]) if c.startswith('sector=')]
     assert (dummies[:, sector] == 0).all()
+    rsi = train['rsi']
+    assert np.allclose(x[:, design.features.index('rsi')], (test['rsi'] - rsi.mean()) / rsi.std())
 
 
 def test_the_fits_match_their_closed_forms():
@@ -283,6 +287,28 @@ def test_a_fold_the_logistic_model_cannot_fit_scores_nothing():
     assert np.isnan(logistic(train, test)).all()
     assert np.isfinite(linear(train, test)).all()
     assert np.isfinite(trees(train, test)).all()
+
+
+def test_a_fold_a_model_cannot_fit_adds_nothing_to_its_calibration():
+    rows = _rows(10, size=3.0)
+    first = folds(rows)[0].first
+    early = rows['session_date'] < first
+    rows.loc[early, 'excess_return_pct'] = rows.loc[early, 'excess_return_pct'].abs() + 0.1  # one class before fold 1
+    models = _models(predictive(rows))
+
+    calibration = models[LOGISTIC]['calibration']
+    assert 0 < calibration['n'] < models[LINEAR]['calibration']['n'], 'fold 1 adds no logistic prediction'
+    assert calibration['shown'] and np.isfinite([calibration['brier'], calibration['brier_base']]).all()
+    for payload in models.values():
+        json.dumps(payload, allow_nan=False)
+
+
+def test_an_attribution_shuffles_within_each_session():
+    rows = _interaction(12)
+    rows['regime'] = np.where(rows['session_date'].dt.dayofweek < 2, 'above', 'below')  # one value per session
+    columns = _models(predictive(rows))[TREES]['attributions']['columns']
+    assert columns['regime'] == 0, 'a value a whole session shares cannot change its ranking'
+    assert columns['rsi'] > 0 and columns['volume_ratio'] > 0
 
 
 def test_the_section_reads_only_the_rules_validated_at_its_horizon():

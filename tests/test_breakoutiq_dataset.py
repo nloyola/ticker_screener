@@ -236,6 +236,8 @@ def test_the_dataset_has_one_row_per_signal_and_resolved_horizon(db):
     assert 'rule_settings' not in rows.columns
     assert first['regime'] is None  # no benchmark closes
     assert set(rows['period']) <= {*PERIODS, GAP}
+    # the market's calendar here is the signals' one session, so no gap date is known
+    assert rows['gap_date'].isna().all()
 
 
 def test_a_pending_horizon_is_left_out(db):

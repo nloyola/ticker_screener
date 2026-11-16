@@ -96,6 +96,7 @@ def build_dataset(
     - regime: ABOVE or BELOW, from the market's benchmark on the signal's session (or the latest before it), None
       without REGIME_SMA_DAYS closes by then
     - period: DEVELOPMENT, VALIDATION, TEST or GAP (assign_periods)
+    - gap_date: the GAP_SESSIONS-th session of its market after the signal's (gap_dates)
     - censored: True for an ended horizon
     """
     signals = signals.copy()
@@ -117,6 +118,7 @@ def build_dataset(
     calendars = _calendars(signals, benchmarks, path_sessions)
     signals['window_end'] = signals['signal_id'].map(window_ends(outcomes))
     signals['period'] = assign_periods(signals, calendars)
+    signals['gap_date'] = gap_dates(signals, calendars)
     signals = signals.drop(columns='window_end')
 
     rows = signals.merge(outcomes, on='signal_id', how='inner', validate='one_to_many')
@@ -169,6 +171,21 @@ def assign_periods(signals: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex]
             crosses = (between < GAP_SESSIONS) | (group['window_end'] >= boundary).to_numpy()
             periods.loc[group.index[crosses]] = GAP
     return periods
+
+
+def gap_dates(signals: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex]) -> pd.Series:
+    """
+    Each signal's GAP_SESSIONS-th session of its market's calendar after its date, aligned with 'signals' (columns
+    session_date and market): a later date has at least GAP_SESSIONS sessions strictly between it and the signal's
+    exactly when it is after this one. NaT when the calendar ends first.
+    """
+    result = pd.Series(pd.NaT, index=signals.index, dtype='datetime64[ns]')
+    for market, group in signals.groupby('market'):
+        calendar = pd.DatetimeIndex(calendars.get(market, pd.DatetimeIndex([])))
+        position = calendar.searchsorted(group['session_date'].to_numpy(), side='right') - 1 + GAP_SESSIONS
+        inside = position < len(calendar)
+        result.loc[group.index[inside]] = calendar[position[inside]]
+    return result
 
 
 def window_ends(outcomes: pd.DataFrame) -> pd.Series:
