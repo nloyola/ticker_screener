@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from app.container import Container
-from app.db import connect
+from app.db import connect, open_connection
 from app.price_apis import DailyPrice
 
 # what 'history_fetch.kind' says a row is about, and the table each kind's prices are in
@@ -72,7 +72,7 @@ class Coverage:
 
 def init_history_db(db_path: str) -> None:
     """Creates the history database's tables that are missing; the file too, when there is none."""
-    con = sqlite3.connect(db_path)
+    con = open_connection(db_path)
     try:
         con.executescript(HISTORY_SCHEMA)
     finally:
