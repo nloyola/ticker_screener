@@ -1,9 +1,10 @@
 """
 BreakoutIQ's candidate rule search: a rule planted in a synthetic dataset comes out validated, a rule that only fits
 development's noise stays preliminary, a rule that holds but keeps too small a return stays below the economic bar,
-a pair is scored on what its second condition adds, so a noise partner of a real condition is never validated, a
-period that cannot test a rule says so, the search on development reads neither validation nor test nor the gap, and
-no rule is ever scored on test more than once per horizon in an analysis run.
+a rule that holds on validation only is not confirmed on test, a pair is scored on what its second condition adds, so
+a noise partner of a real condition is never validated, a period that cannot test a rule says so, the search on
+development reads neither validation nor test nor the gap, and no rule is ever scored on test more than once per
+horizon in an analysis run.
 """
 
 import numpy as np
@@ -16,6 +17,7 @@ from app.breakoutiq.candidates import (
     CONDITION_INDICATORS,
     MAX_CANDIDATES,
     MIN_NET_EXCESS_RETURN,
+    NOT_CONFIRMED_ON_TEST,
     NOT_CONFIRMED_ON_VALIDATION,
     NOT_TESTED_ON_TEST,
     NOT_TESTED_ON_VALIDATION,
@@ -303,3 +305,17 @@ def test_each_threshold_is_one_test_in_the_development_family():
     splits = (search['conditions'] - passing) // 2
     assert search['development_family'] <= passing + splits + search['pairs']
     assert search['development_family'] < search['tested_on_development']
+
+
+def test_a_rule_that_holds_on_validation_only_is_not_confirmed_on_test():
+    rows = _dataset(1)
+    # the planted effect is in development and validation, gone on test
+    earlier = rows['period'].isin([DEVELOPMENT, VALIDATION])
+    rows.loc[earlier, 'excess_return_pct'] += 4.0 * (rows.loc[earlier, 'volume_ratio'] > _PLANTED_VOLUME)
+
+    best = _rules(candidates(rows))[0]
+
+    assert _indicators(best) == {'volume_ratio'}
+    assert best['periods'][VALIDATION]['significant'] and best['scored_on_test']
+    assert best['periods'][TEST]['shown'] and not best['periods'][TEST]['significant']
+    assert best['label'] == PRELIMINARY and best['reason'] == NOT_CONFIRMED_ON_TEST
