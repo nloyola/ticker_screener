@@ -135,22 +135,22 @@ def indicators(rows: pd.DataFrame) -> list[AnalysisResult]:
     edges = {name: band_edges(frame, name) for name in VALUES}
     results = []
     for horizon, at_horizon in frame.groupby('horizon', sort=True):
-        context = _Horizon.of(at_horizon)
+        context = Horizon.of(at_horizon)
         payloads = []
         for kind, names in ((VALUE, VALUES), (FLAG, FLAGS), (SECONDARY, COMPOSITES)):
             for name in names:
                 if kind == VALUE:
-                    groups, labels = _bands(at_horizon[name], edges[name]), None
+                    groups, labels = bands(at_horizon[name], edges[name]), None
                 else:
                     groups, labels = _flag_groups(at_horizon[name]), _FLAG_GROUPS
                 for outcome in OUTCOMES:
-                    payload = _comparison(context, groups.to_numpy(dtype=float), labels, outcome)
+                    payload = comparison(context, groups.to_numpy(dtype=float), labels, outcome)
                     payload = {'kind': kind, 'indicator': name, 'outcome': outcome, **payload}
                     if kind == VALUE:
                         payload['edges'] = edges[name]
                     payloads.append(payload)
-        _correct(payloads)
-        _rank(payloads)
+        correct(payloads)
+        rank(payloads)
         results += [
             AnalysisResult(SECTION, f'{p["kind"]}:{p["indicator"]}:{p["outcome"]}', int(horizon), PAYLOAD_VERSION, p)
             for p in payloads
@@ -159,7 +159,7 @@ def indicators(rows: pd.DataFrame) -> list[AnalysisResult]:
 
 
 @dataclass(frozen=True)
-class _Horizon:
+class Horizon:
     """A horizon's rows as the comparisons read them, each array aligned with the rows."""
 
     dates: np.ndarray  # each row's signal date, as a code
@@ -169,7 +169,7 @@ class _Horizon:
     outcomes: dict[str, np.ndarray]  # each of OUTCOMES' observations, NaN on a row it does not read
 
     @classmethod
-    def of(cls, rows: pd.DataFrame) -> '_Horizon':
+    def of(cls, rows: pd.DataFrame) -> 'Horizon':
         complete = (rows['outcome_status'] == COMPLETE).to_numpy()
         outcomes = {}
         for name, spec in OUTCOMES.items():
@@ -209,7 +209,7 @@ def band_edges(frame: pd.DataFrame, name: str) -> list[float]:
     return [float(e) for e in edges] if len(edges) >= 2 else []
 
 
-def _bands(values: pd.Series, edges: list[float]) -> pd.Series:
+def bands(values: pd.Series, edges: list[float]) -> pd.Series:
     """Each row's band, 1 for the lowest, aligned with 'values'; NaN without a value. A band holds the values above
     its lower edge up to its upper one, the lowest band its lower edge too."""
     if not edges:
@@ -223,7 +223,7 @@ def _flag_groups(values: pd.Series) -> pd.Series:
     return pd.to_numeric(values, errors='coerce') + 1
 
 
-def _comparison(context: _Horizon, groups: np.ndarray, labels: tuple[str, ...] | None, outcome: str) -> dict:
+def comparison(context: Horizon, groups: np.ndarray, labels: tuple[str, ...] | None, outcome: str) -> dict:
     """
     One indicator's comparison on 'outcome' at a horizon: every group's counts and mean, and the effect of the
     highest group over the lowest, with its clustered interval and raw p-value when both meet the minimum sample.
@@ -296,7 +296,7 @@ def _distinct(codes: np.ndarray, mask: np.ndarray) -> int:
     return len(np.unique(codes[mask]))
 
 
-def _correct(payloads: list[dict]) -> None:
+def correct(payloads: list[dict]) -> None:
     """Sets each tested payload's adjusted p-value over the family 'payloads' (one horizon), and whether it is
     significant at FDR."""
     tested = [p for p in payloads if p['p_value'] is not None]
@@ -305,11 +305,11 @@ def _correct(payloads: list[dict]) -> None:
         payload['significant'] = adjusted <= FDR
 
 
-def _rank(payloads: list[dict]) -> None:
+def rank(payloads: list[dict]) -> None:
     """Ranks the tested payloads of each outcome, 1 for the strongest evidence: the smallest raw p-value, then the
     largest effect relative to its standard error."""
     for outcome in OUTCOMES:
         tested = [p for p in payloads if p['outcome'] == outcome and p['p_value'] is not None]
         tested.sort(key=lambda p: (p['p_value'], -abs(p['effect']['estimate'] / p['effect']['se'])))
-        for rank, payload in enumerate(tested, start=1):
-            payload['rank'] = rank
+        for position, payload in enumerate(tested, start=1):
+            payload['rank'] = position
