@@ -2,7 +2,7 @@
 
 import argparse
 import hashlib
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +10,7 @@ import pytest
 from app.commands.history_fetch_cmd import HistoryFetchCmd
 from app.db import init_db
 from app.history_fetch import HISTORY_YEARS, SHORT_HISTORY_SLACK, HistoryFetch, history_start
-from app.markets import CANADA, US
+from app.markets import CANADA, MARKET_CLOSES, US
 from app.price_apis import DailyPrice, PriceApiStop
 from app.price_apis.eodhd import EodhdPrices
 from app.price_apis.http import RETRY_ATTEMPTS
@@ -18,6 +18,7 @@ from app.repositories.history_repo import BENCHMARK, TICKER, HistoryRepo
 from tests.test_ticker_fetcher import FakeSectorService, http_error
 
 TODAY = date(2026, 11, 16)
+NEW_YORK = MARKET_CLOSES[US][0]
 START = history_start(TODAY)
 
 
@@ -60,12 +61,15 @@ def history(tmp_path) -> HistoryRepo:
     return HistoryRepo(SimpleNamespace(history_db_path=str(tmp_path / 'history.db')))
 
 
-def make_fetch(history: HistoryRepo, api, subsectors: dict[int, list[str]], today: date = TODAY) -> HistoryFetch:
+def make_fetch(
+    history: HistoryRepo, api, subsectors: dict[int, list[str]], today: date = TODAY, at: time = time(21)
+) -> HistoryFetch:
+    """A fetch on 'today' at 'at' New York time: by default after the day's candles are final."""
     fetch = HistoryFetch(
         SimpleNamespace(price_api_client=api, sector_service=FakeSectorService(subsectors), history_repo=history)
     )
     fetch.sleep = lambda seconds: None
-    fetch.today = lambda: today
+    fetch.now = lambda: datetime.combine(today, at, tzinfo=NEW_YORK)
     return fetch
 
 
@@ -161,6 +165,34 @@ def test_unknown_or_empty_is_reported_as_no_history_and_not_requested_again_toda
     api.calls.clear()
     run(make_fetch(history, api, {1: ['GONE']}))
     assert api.calls == []
+
+
+def test_a_candle_not_yet_final_is_not_stored(history):
+    # Tuesday's candle is in the answer from the open on, but final only 3 hours after the close
+    tuesday = date(2026, 11, 17)
+    answer = [prices(tuesday - timedelta(days=4), 5)]
+    api = FakeApi({'CVX': answer, 'SPY': answer})
+
+    report = run(make_fetch(history, api, {1: ['CVX']}, today=tuesday, at=time(12)))
+
+    assert [p.date for p in history.prices(TICKER, 'CVX')][-1] == tuesday - timedelta(days=1)
+    assert [p.date for p in history.prices(BENCHMARK, 'SPY')][-1] == tuesday - timedelta(days=1)
+    assert report.tickers_with_history == 1
+
+    run(make_fetch(history, api, {1: ['CVX']}, today=tuesday + timedelta(days=1), at=time(12)))
+    assert [p.date for p in history.prices(TICKER, 'CVX')][-1] == tuesday
+
+
+def test_an_answer_holding_only_a_candle_not_yet_final_keeps_the_stored_history(history):
+    api = FakeApi({'CVX': full(), 'SPY': full()})
+    run(make_fetch(history, api, {1: ['CVX']}))
+
+    tomorrow = TODAY + timedelta(days=1)
+    api.answers['CVX'] = [prices(tomorrow, 1)]
+    report = run(make_fetch(history, api, {1: ['CVX']}, today=tomorrow, at=time(12)))
+
+    assert history.prices(TICKER, 'CVX') == prices(START, 5)
+    assert (report.failed, report.no_history) == ([], [])
 
 
 def test_a_late_start_is_reported_as_short_history(history):

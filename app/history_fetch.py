@@ -2,11 +2,11 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from app.container import Container
-from app.markets import BENCHMARKS, MARKETS, UnsupportedTicker, market_of
+from app.markets import BENCHMARKS, MARKET_CLOSES, MARKETS, US, UnsupportedTicker, last_complete_session, market_of
 from app.price_apis import DailyPrice, PriceApi
 from app.price_apis.http import error_detail, response_of, with_retries
 from app.redaction import redact
@@ -23,6 +23,8 @@ HISTORY_YEARS = 10
 # A history that starts more than this after the requested start is short: the API has fewer years of the ticker,
 # usually because it listed later. The slack covers a start that falls on a weekend or a run of holidays.
 SHORT_HISTORY_SLACK = timedelta(days=14)
+# the time zone of a fetch's day, which ends the range it requests and records each ticker as fetched on
+FETCH_ZONE = MARKET_CLOSES[US][0]
 
 
 def history_start(today: date) -> date:
@@ -65,6 +67,8 @@ class HistoryPlan:
     benchmarks: list[str] = field(default_factory=list)
     # (kind, ticker) pairs, tickers first: history_repo's TICKER or BENCHMARK
     todo: list[tuple[str, str]] = field(default_factory=list)
+    # each market's last session whose candle is final: the newest day stored
+    last_sessions: dict[str, date] = field(default_factory=dict)
 
 
 class HistoryFetch:
@@ -75,7 +79,9 @@ class HistoryFetch:
 
     One request per ticker and benchmark on either API, however long the range: the count is printed, and checked
     against the API's quota (PriceApi.check_quota), before the first request. The prices are those the fetcher stores
-    (app/price_apis): the adjusted close, with the open, high and low on its basis, so a split leaves no jump.
+    (app/price_apis): the adjusted close, with the open, high and low on its basis, so a split leaves no jump. Only
+    final candles are stored: a day after its market's last complete session (last_complete_session) is dropped, as
+    the API answers with a day's candle before it is final, and a fetch the same day would not replace it.
 
     Each ticker's prices replace its stored ones, and the ticker is recorded as fetched today from the API, in one
     transaction. Run again the same day, a fetch skips the tickers and benchmarks already fetched today from the same
@@ -95,12 +101,17 @@ class HistoryFetch:
         self.sector_service: SectorService = container.sector_service
         self.history_repo: HistoryRepo = container.history_repo
         self.sleep: Callable[[float], None] = time.sleep
-        self.today: Callable[[], date] = date.today
+        # the clock, timezone aware: the fetch's day in FETCH_ZONE, and which candles are final
+        self.now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     def plan(self) -> HistoryPlan:
         """What a fetch started now would request, and what it leaves out."""
-        today = self.today()
-        plan = HistoryPlan(report=HistoryReport(api=self.api.name, start=history_start(today), end=today))
+        now = self.now()
+        today = now.astimezone(FETCH_ZONE).date()
+        plan = HistoryPlan(
+            report=HistoryReport(api=self.api.name, start=history_start(today), end=today),
+            last_sessions={market: last_complete_session(market, now) for market in MARKETS},
+        )
         report = plan.report
 
         for ticker in self._universe():
@@ -135,15 +146,15 @@ class HistoryFetch:
             self.api.check_quota(report.requests)
 
         for done, (kind, ticker) in enumerate(plan.todo, start=1):
-            if not self._fetch(kind, ticker, report):
+            if not self._fetch(kind, ticker, report, plan.last_sessions[market_of(ticker)]):
                 report.failed.append(ticker)
             logger.info(f'history {done}/{report.requests}: {ticker}')
 
         self._report_coverage(report, {TICKER: plan.tickers, BENCHMARK: plan.benchmarks})
         return report
 
-    def _fetch(self, kind: str, ticker: str, report: HistoryReport) -> bool:
-        """Fetches and stores one ticker's history; False when the request failed."""
+    def _fetch(self, kind: str, ticker: str, report: HistoryReport, last_session: date) -> bool:
+        """Fetches and stores one ticker's history up to 'last_session'; False when the request failed."""
         assert report.start is not None and report.end is not None
         start, end = report.start, report.end
         try:
@@ -164,8 +175,9 @@ class HistoryFetch:
                 f'{redact(error_detail(e), self.api.api_key)}'
             )
             return False
+        prices = [p for p in prices if p.date <= last_session]
         if not prices:
-            logger.warning(f'no prices for {ticker} from {self.api.name} since {start}, stored history kept')
+            logger.warning(f'no final prices for {ticker} from {self.api.name} since {start}, stored history kept')
             self.history_repo.mark_fetched(kind, ticker, end, self.api.setting)
             return True
         self.history_repo.store(kind, ticker, prices, end, self.api.setting)
