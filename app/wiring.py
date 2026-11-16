@@ -1,6 +1,7 @@
 # wiring.py
 from app.analyzer import Analyzer
 from app.backfill import Backfill
+from app.breakoutiq.run import Analysis
 from app.config import DB_NAME, EODHD, EODHD_API_KEY, HISTORY_DATABASE_FILE, PRICE_API, TIINGO, TIINGO_API_KEY, Config
 from app.container import Container, Required, Singleton
 from app.db import SQLite
@@ -74,6 +75,7 @@ def build_container(config: Config) -> Container:
     c.register('history_fetch', Singleton(lambda: HistoryFetch(c)))
     c.register('history_paths', Singleton(lambda: HistoryPaths(c)))
     c.register('history_backfill', Singleton(lambda: HistoryBackfill(c)))
+    c.register('breakoutiq_analysis', Singleton(lambda: Analysis(c)))
     return c
 
 
