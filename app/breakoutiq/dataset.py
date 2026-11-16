@@ -96,9 +96,9 @@ def build_dataset(
 
     level = np.where(signals['breakout_60d'] == 1, signals['high_60d'], signals['high_20d']).astype(float)
     signals['breakout_level'] = level
-    signals['breakout_margin_pct'] = _pct_change(signals['close'], level)
-    signals['sma50_distance_pct'] = _pct_change(signals['close'], signals['dma_50'])
-    signals['sma50_slope_pct'] = _pct_change(signals['dma_50'], signals['dma_50_prev_15d'])
+    signals['breakout_margin_pct'] = pct_change(signals['close'], level)
+    signals['sma50_distance_pct'] = pct_change(signals['close'], signals['dma_50'])
+    signals['sma50_slope_pct'] = pct_change(signals['dma_50'], signals['dma_50_prev_15d'])
 
     signals['regime'] = regimes(signals, benchmarks)
     calendars = _calendars(signals, benchmarks, path_sessions)
@@ -204,7 +204,7 @@ def _calendars(
     return calendars
 
 
-def _pct_change(value: pd.Series, base) -> pd.Series:
+def pct_change(value: pd.Series, base) -> pd.Series:
     """value over base less one, in percent; NaN where the base is missing or not positive."""
     base = pd.Series(base, index=value.index, dtype=float)
     return (value.astype(float) / base.where(base > 0) - 1) * 100

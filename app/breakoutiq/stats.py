@@ -11,9 +11,12 @@ rather than by copying rows, so a draw costs the same for a hundred thousand sig
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
+from statsmodels.stats.multitest import multipletests
 
 # a result needs complete outcomes on at least this many distinct signal dates to be shown at all
 MIN_SIGNAL_DATES = 30
@@ -21,6 +24,11 @@ MIN_SIGNAL_DATES = 30
 CONFIDENCE = 0.95
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 51
+# the false discovery rate every family of tests (one per section and horizon) is corrected to, by Benjamini-Hochberg
+FDR = 0.10
+# the columns a regression's standard errors are clustered by, two-way: signals of one date share the market's
+# move, and signals of one ticker share its own
+CLUSTERS = ('session_date', 'ticker')
 
 # the draws computed at once, which bounds the memory a figure's draws take
 _CHUNK = 200
@@ -136,3 +144,57 @@ def block_median(values: np.ndarray, blocks: np.ndarray) -> Figure:
         return np.where(total > 0, (lower + upper) / 2, np.nan)
 
     return figure
+
+
+@dataclass(frozen=True)
+class Coefficient:
+    """One regression coefficient: its estimate, standard error, CONFIDENCE interval and two-sided p-value."""
+
+    estimate: float
+    se: float
+    ci_low: float
+    ci_high: float
+    p_value: float
+
+
+def cluster_codes(rows: pd.DataFrame) -> np.ndarray:
+    """Each row's CLUSTERS as integer codes, one column per cluster (rows x 2), as clustered_ols takes them."""
+    return np.column_stack([pd.factorize(rows[column])[0] for column in CLUSTERS])
+
+
+def clustered_ols(y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray) -> dict[str, Coefficient] | None:
+    """
+    The least-squares fit of 'y' on the columns of 'exog' (which must include any constant), with standard errors
+    clustered two-way by the two columns of 'clusters' (integer codes, cluster_codes), Cameron, Gelbach and Miller's
+    sum of the two one-way covariances less the one by their intersection, with statsmodels' small-sample
+    correction. Intervals and p-values use Student's t with one degree of freedom fewer than the smaller cluster
+    count.
+
+    Each column's Coefficient, or None when the fit cannot be clustered: fewer than two clusters on a side, or a
+    variance that comes out not positive (the two-way sum is not always positive semi-definite).
+    """
+    codes = np.asarray(clusters)
+    if min(len(np.unique(codes[:, i])) for i in range(2)) < 2:
+        return None
+    fit = sm.OLS(np.asarray(y, dtype=float), exog.astype(float)).fit(
+        cov_type='cluster', cov_kwds={'groups': codes}, use_t=True
+    )
+    se = np.asarray(fit.bse, dtype=float)
+    if not np.all(np.isfinite(se)) or np.any(se <= 0):
+        return None
+    interval = np.asarray(fit.conf_int(alpha=1 - CONFIDENCE), dtype=float)
+    params, pvalues = np.asarray(fit.params, dtype=float), np.asarray(fit.pvalues, dtype=float)
+    return {
+        name: Coefficient(*(float(v) for v in (params[i], se[i], interval[i, 0], interval[i, 1], pvalues[i])))
+        for i, name in enumerate(exog.columns)
+    }
+
+
+def benjamini_hochberg(p_values: list[float]) -> list[float]:
+    """
+    Each p-value adjusted by Benjamini-Hochberg over the family 'p_values'; a finding is significant at FDR when its
+    adjusted value is at most FDR.
+    """
+    if not p_values:
+        return []
+    return [float(p) for p in multipletests(p_values, alpha=FDR, method='fdr_bh')[1]]
