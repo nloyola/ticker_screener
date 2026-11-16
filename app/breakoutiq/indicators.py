@@ -187,12 +187,18 @@ class Horizon:
 def indicator_frame(rows: pd.DataFrame) -> pd.DataFrame:
     """'rows' with the derived VALUES and the COMPOSITES added: each composite 1 when it passes, else 0, an empty flag
     counting as not passed, as SECONDARY_INDICATORS judges it."""
-    frame = rows.copy()
-    for name, (value, base) in _DERIVED.items():
-        frame[name] = pct_change(frame[value], frame[base])
+    frame = value_frame(rows)
     flags = frame[[*FLAGS, 'price_gt_50dma']]
     for name in COMPOSITES:
         frame[name] = [int(SECONDARY_INDICATORS[name](row)) for row in flags.itertuples(index=False)]
+    return frame
+
+
+def value_frame(rows: pd.DataFrame) -> pd.DataFrame:
+    """'rows' with the VALUES derived from the close and the averages added."""
+    frame = rows.copy()
+    for name, (value, base) in _DERIVED.items():
+        frame[name] = pct_change(frame[value], frame[base])
     return frame
 
 
