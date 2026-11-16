@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime
 import pandas as pd
 
 from app.analyzer import SCREENER_VERSION
-from app.breakoutiq import baseline, candidates, confounders, indicators, mandatory, stats
+from app.breakoutiq import baseline, candidates, confounders, indicators, mandatory, predictive, stats, walkforward
 from app.breakoutiq import dataset as data
 from app.breakoutiq.thresholds import DEFAULTS, Thresholds
 from app.container import Container
@@ -33,18 +33,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Section:
+    """
+    A section: its name, payload version and analysis, which takes the dataset and the thresholds, and, when
+    'reads_earlier', the results of the sections before it in the run.
+    """
+
     name: str
     payload_version: int
-    analyse: Callable[[pd.DataFrame, Thresholds], list[AnalysisResult]]
+    analyse: Callable[..., list[AnalysisResult]]
+    reads_earlier: bool = False
 
 
-# every section, in the order it runs and its results are stored
+# every section, in the order it runs and its results are stored; the models read the rules candidates validated
 SECTIONS = (
     Section(baseline.SECTION, baseline.PAYLOAD_VERSION, baseline.baseline),
     Section(indicators.SECTION, indicators.PAYLOAD_VERSION, indicators.indicators),
     Section(mandatory.SECTION, mandatory.PAYLOAD_VERSION, mandatory.mandatory),
     Section(confounders.SECTION, confounders.PAYLOAD_VERSION, confounders.confounders),
     Section(candidates.SECTION, candidates.PAYLOAD_VERSION, candidates.candidates),
+    Section(predictive.SECTION, predictive.PAYLOAD_VERSION, predictive.predictive, reads_earlier=True),
 )
 
 
@@ -91,6 +98,14 @@ def settings(thresholds: Thresholds = DEFAULTS) -> dict:
         'strengths': list(mandatory.STRENGTHS),
         'confounder_indicators': list(confounders.INDICATORS),
         'confounder_controls': list(confounders.CONTROLS),
+        'initial_train_share': walkforward.INITIAL_TRAIN_SHARE,
+        'folds': walkforward.FOLDS,
+        'top_share': walkforward.TOP_SHARE,
+        'models': list(predictive.MODELS),
+        'model_features': list(predictive.FEATURES),
+        'model_categories': list(predictive.CATEGORIES),
+        'model_l2_penalty': predictive.L2_PENALTY,
+        'calibration_bins': predictive.CALIBRATION_BINS,
         'payload_versions': {s.name: s.payload_version for s in SECTIONS},
     }
 
@@ -107,7 +122,11 @@ def analyse(
     results = []
     for section in SECTIONS:
         start = time.monotonic()
-        found = section.analyse(rows, thresholds)
+        found = (
+            section.analyse(rows, thresholds, list(results))
+            if section.reads_earlier
+            else section.analyse(rows, thresholds)
+        )
         elapsed = time.monotonic() - start
         if seconds is not None:
             seconds[section.name] = elapsed

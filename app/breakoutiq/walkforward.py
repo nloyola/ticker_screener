@@ -25,8 +25,10 @@ baseline's, with a confidence interval bootstrapped by blocks of signal dates as
 the run's min_signal_dates dates is not shown. A model beats a baseline when the interval lies above zero, and beats
 the rules when it beats every baseline, which needs no correction for the several comparisons.
 
-The folds cover the dataset's periods without regard to them, so a rule found on development is in sample on the
-folds that hold development signals; each fold reports its signals by period. Nothing here changes the live screener.
+The folds cover the dataset's periods without regard to them, and each fold reports its signals by period. A rule was
+found on development, so it is in sample there: a model is compared with a rule only on the dates none of whose
+signals is in development (AFTER_DEVELOPMENT), and with the statuses, which nothing was fitted to, on every date both
+ranked (EVERY_DATE). Rows with no period are all compared. Nothing here changes the live screener.
 """
 
 from collections.abc import Callable
@@ -37,7 +39,7 @@ import pandas as pd
 
 from app.analyzer import HIGH_CONVICTION
 from app.breakoutiq.candidates import RULE, SECTION, VALIDATED, Condition, Rule, rule_key
-from app.breakoutiq.dataset import COMPLETE, ENDED, GAP_SESSIONS, PERIODS
+from app.breakoutiq.dataset import COMPLETE, DEVELOPMENT, ENDED, GAP_SESSIONS, PERIODS
 from app.breakoutiq.indicators import MAIN_OUTCOME, OUTCOMES, indicator_frame
 from app.breakoutiq.stats import block_bootstrap, block_mean, date_blocks
 from app.breakoutiq.thresholds import DEFAULTS, Thresholds
@@ -54,6 +56,10 @@ TOP_SHARE = 0.5
 MODEL = 'model'
 STATUS = 'status'
 RULE_RANKER = 'rule'
+
+# the dates a model is compared with a baseline on: every date both ranked, or those with no development signal
+EVERY_DATE = 'every date'
+AFTER_DEVELOPMENT = 'after development'
 
 # a ranker: from a fold's training rows and its test rows, each test row's score, higher better, NaN for none
 Ranker = Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]
@@ -159,15 +165,20 @@ def walk_forward(
     rules: list[Rule],
     thresholds: Thresholds = DEFAULTS,
     calendars: dict[str, pd.DatetimeIndex] | None = None,
+    predictions: dict[str, pd.DataFrame] | None = None,
 ) -> dict:
     """
     Every model in 'models', by name, against the statuses and 'rules' (validated_rules), walk-forward on the
     dataset's rows (dataset.build_dataset) at 'horizon': the folds, each ranker's lift per fold and over them all, and
     each model's comparison with each baseline, judged by 'thresholds'.
+
+    When 'predictions' is given, it is filled with each model's out-of-sample scores, by name: one row per test row
+    of a trained fold, with its fold, signal, date, ticker, market, outcome status, main outcome and score.
     """
     at = indicator_frame(rows[rows['horizon'] == horizon].reset_index(drop=True))
     rankers = {name: (MODEL, model) for name, model in models.items()} | baselines(rules)
     lifts: dict[str, list[pd.DataFrame]] = {name: [] for name in rankers}
+    scored: dict[str, list[pd.DataFrame]] = {name: [] for name in models}
     fold_payloads = []
     for fold in folds(at, calendars):
         train, test = at[fold.train].reset_index(drop=True), at[fold.test].reset_index(drop=True)
@@ -178,7 +189,13 @@ def walk_forward(
         for name, (_, ranker) in rankers.items():
             scores = np.asarray(ranker(train, test), dtype=float)
             lifts[name].append(session_lifts(test, scores).assign(fold=fold.number))
+            if name in scored:
+                scored[name].append(_scored(test, scores, fold.number))
     by_ranker = {name: pd.concat(parts, ignore_index=True) if parts else _no_lifts() for name, parts in lifts.items()}
+    if predictions is not None:
+        for name, parts in scored.items():
+            predictions[name] = pd.concat(parts, ignore_index=True) if parts else _scored(at.iloc[:0], np.array([]), 0)
+    development = _development_dates(at)
     return {
         'horizon': horizon,
         'outcome': MAIN_OUTCOME,
@@ -186,7 +203,7 @@ def walk_forward(
         'folds': fold_payloads,
         'rankers': {name: {'kind': kind, **_ranker_payload(by_ranker[name])} for name, (kind, _) in rankers.items()},
         'comparisons': {
-            name: _comparisons(by_ranker[name], by_ranker, list(baselines(rules)), horizon, thresholds)
+            name: _comparisons(by_ranker[name], by_ranker, baselines(rules), development, horizon, thresholds)
             for name in models
         },
         'initial_train_share': INITIAL_TRAIN_SHARE,
@@ -269,20 +286,41 @@ def _ranker_payload(lifts: pd.DataFrame) -> dict:
 def _comparisons(
     model: pd.DataFrame,
     by_ranker: dict[str, pd.DataFrame],
-    baseline_names: list[str],
+    against: dict[str, tuple[str, Ranker]],
+    development: np.ndarray,
     horizon: int,
     thresholds: Thresholds,
 ) -> dict:
-    """A model's comparison with each baseline, and whether it beats them all."""
-    against = {name: _compare(model, by_ranker[name], horizon, thresholds) for name in baseline_names}
-    return {'baselines': against, 'beats_rules': all(c['beats'] for c in against.values())}
+    """
+    A model's comparison with each baseline, a rule's on the dates with no development signal ('development' lists
+    those that have one), and whether it beats them all.
+    """
+    compared = {}
+    for name, (kind, _) in against.items():
+        if kind == RULE_RANKER:
+            window = AFTER_DEVELOPMENT
+            outside = ~model['session_date'].isin(development).to_numpy(dtype=bool)
+            compared[name] = _compare(model[outside], by_ranker[name], window, horizon, thresholds)
+        else:
+            compared[name] = _compare(model, by_ranker[name], EVERY_DATE, horizon, thresholds)
+    return {'baselines': compared, 'beats_rules': all(c['beats'] for c in compared.values())}
 
 
-def _compare(model: pd.DataFrame, baseline: pd.DataFrame, horizon: int, thresholds: Thresholds) -> dict:
-    """The model's lift less the baseline's, over the dates both ranked, with its block-bootstrap interval."""
+def _compare(model: pd.DataFrame, baseline: pd.DataFrame, window: str, horizon: int, thresholds: Thresholds) -> dict:
+    """
+    The model's lift less the baseline's, over the dates both ranked (the model's lifts already cut to 'window'), with
+    its block-bootstrap interval.
+    """
     both = model.merge(baseline, on=['fold', 'session_date'], suffixes=('_model', '_baseline'))
     difference = (both['lift_model'] - both['lift_baseline']).to_numpy(dtype=float)
-    result = {'signal_dates': len(both), 'shown': False, 'estimate': None, 'ci_low': None, 'ci_high': None}
+    result = {
+        'window': window,
+        'signal_dates': len(both),
+        'shown': False,
+        'estimate': None,
+        'ci_low': None,
+        'ci_high': None,
+    }
     if len(both) < thresholds.min_signal_dates:
         return {**result, 'beats': False}
     blocks = date_blocks(both['session_date'], horizon)
@@ -296,6 +334,19 @@ def _compare(model: pd.DataFrame, baseline: pd.DataFrame, horizon: int, threshol
         'ci_high': float(high[0]) if shown_interval else None,
         'beats': bool(shown_interval and low[0] > 0),
     }
+
+
+def _development_dates(rows: pd.DataFrame) -> np.ndarray:
+    """The dates with a development signal, none when the rows have no period."""
+    if 'period' not in rows:
+        return np.array([], dtype='datetime64[ns]')
+    return pd.to_datetime(rows.loc[rows['period'] == DEVELOPMENT, 'session_date']).unique()
+
+
+def _scored(test: pd.DataFrame, scores: np.ndarray, fold: int) -> pd.DataFrame:
+    """A model's scores of one fold's test rows, with what judging them needs."""
+    columns = ['signal_id', 'session_date', 'ticker', 'market', 'outcome_status', OUTCOMES[MAIN_OUTCOME].column]
+    return test[columns].reset_index(drop=True).assign(fold=fold, score=scores)
 
 
 def _no_lifts() -> pd.DataFrame:
