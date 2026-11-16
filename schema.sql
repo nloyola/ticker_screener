@@ -354,6 +354,41 @@ CREATE TABLE IF NOT EXISTS signal_track (
        CHECK ((breakout_failed IS NULL) = (failure_decided_at IS NULL))
 );
 
+-- One row per backfill-history run that finished, what it covered and the biases it carries, for the report on the
+-- backfilled signals to state. universe_date is the day the sectors page was read: the run replays the tickers listed
+-- that day, each in the subsector that lists it first, so delisted and removed tickers are missing and sector
+-- membership is that day's. first_session and last_session are the range of sessions it replayed, NULL when there
+-- were none. price_api is the price API the replayed tickers' histories were fetched from, the APIs comma separated
+-- when they differ, NULL when no ticker had one. tickers_listed counts the tickers listed, tickers_replayed those
+-- with a history and tickers_scored those scored on at least one session. left_out maps each listed ticker never
+-- scored to why: no_history, unsupported (an exchange suffix no market has), short_history (a history that starts
+-- late and leaves no session to score it on) or never_scored (a history that starts on time but leaves no session
+-- to score it on, such as one stale or frozen throughout). The short_history column maps each replayed ticker whose
+-- history starts late, more than two weeks after the 10 years the fetch asked for, scored ones included, to its first
+-- day. signals and relinked count the signals it archived and relinked. Not market data: db-init never touches it.
+-- The thirteenth upgrade in app/db.py creates it in databases from before it; change both together.
+CREATE TABLE IF NOT EXISTS backfill_run (
+       id INTEGER PRIMARY KEY,
+       started_at TIMESTAMP NOT NULL,
+       finished_at TIMESTAMP NOT NULL,
+       universe_date TEXT NOT NULL CHECK (date(universe_date) IS universe_date),
+       first_session TEXT CHECK (date(first_session) IS first_session),
+       last_session TEXT CHECK (date(last_session) IS last_session),
+       sessions INTEGER NOT NULL CHECK (sessions >= 0),
+       price_api TEXT,
+       tickers_listed INTEGER NOT NULL CHECK (tickers_listed >= 0),
+       tickers_replayed INTEGER NOT NULL CHECK (tickers_replayed >= 0),
+       tickers_scored INTEGER NOT NULL CHECK (tickers_scored >= 0),
+       left_out TEXT NOT NULL CHECK (json_valid(left_out)),
+       short_history TEXT NOT NULL CHECK (json_valid(short_history)),
+       signals INTEGER NOT NULL CHECK (signals >= 0),
+       relinked INTEGER NOT NULL CHECK (relinked >= 0),
+       screener_version TEXT NOT NULL,
+       git_commit TEXT,
+       CHECK ((first_session IS NULL) = (last_session IS NULL)),
+       CHECK ((first_session IS NULL) = (sessions = 0))
+);
+
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
 -- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in
 -- app/db.py creates it in databases from before it; change both together.

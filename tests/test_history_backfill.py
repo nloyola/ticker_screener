@@ -16,15 +16,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.analyzer import SIGNAL_STATUSES, Analyzer
+from app.analyzer import SCREENER_VERSION, SIGNAL_STATUSES, Analyzer
 from app.backfill import Backfill, market_dates, replayable_sessions
 from app.commands.backfill_history_cmd import BackfillHistoryCmd
 from app.db import init_db
 from app.history_backfill import HistoryBackfill
 from app.history_paths import HISTORY_ENDED, HistoryPaths
 from app.markets import BENCHMARKS, CANADA, US
+from app.models import NEVER_SCORED, NO_HISTORY, SHORT_HISTORY, UNSUPPORTED
 from app.price_apis import DailyPrice
 from app.replay import flat_days, run_lengths, unscored
+from app.repositories.backfill_run_repo import BackfillRunRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.history_repo import BENCHMARK, TICKER, HistoryRepo
 from app.repositories.price_data_repo import PriceDataRepo
@@ -161,6 +163,7 @@ def container(path, tmp_path, prices, benchmarks) -> SimpleNamespace:
     container.signal_outcome_repo = SignalOutcomeRepo(container)
     container.signal_outcome_updates = SignalOutcomeUpdates(container)
     container.history_paths = HistoryPaths(container)
+    container.backfill_run_repo = BackfillRunRepo(container)
     container.history_backfill = HistoryBackfill(container, now=lambda: EVENING)
     return container
 
@@ -268,6 +271,8 @@ def test_command_prints_a_summary(container, capsys):
     assert 'backfill-history: replayed' in out
     assert 'no history, not replayed: NOHIST' in out
     assert 'signal paths from the history' in out
+    assert 'history starts late: AAA (2024-01-01)' in out
+    assert 'recorded as backfill run 1' in out
 
 
 def rows_of(path: str, sql: str, *params) -> list[tuple]:
@@ -406,3 +411,53 @@ def test_a_second_backfill_leaves_the_paths_and_outcomes_as_they_were(path, cont
     assert rows_of(path, 'SELECT * FROM signal_price ORDER BY signal_id, session_index') == paths
     assert rows_of(path, outcomes_sql) == outcomes
     assert rows_of(path, 'SELECT * FROM signal_track ORDER BY signal_id') == tracks
+
+
+# The listed tickers the test histories have, all fetched on FETCHED, so all start late: 10 years before FETCHED is
+# 2016, and they start in 2024
+REPLAYED = ['AAA', 'BBB', 'CCC', 'DDD', 'RY.TO', 'EEE', 'FFF', 'GGG', 'SHOP.TO', 'TD.TO', 'HHH']
+
+
+def test_the_run_is_recorded_with_its_range_universe_and_the_tickers_it_left_out(path, container, prices):
+    # NEW listed 30 sessions before the end, too late to be scored; IDLE fetched 10 years after FIRST, so its history
+    # starts on time, but never trades
+    with sqlite3.connect(path) as con:
+        con.execute("INSERT INTO subsector (id, sector_id, subsector, tickers) VALUES (4, 1, 'sub4', 'NEW,IDLE')")
+    container.history_repo.store(TICKER, 'NEW', prices['AAA'][-30:], FETCHED, 'eodhd')
+    idle = [DailyPrice(day, 10.0, 0, 10.0, 10.0, 10.0) for day in US_DAYS]
+    container.history_repo.store(TICKER, 'IDLE', idle, date(2034, 1, 1), 'tiingo')
+
+    result = container.history_backfill.run()
+
+    [run] = container.backfill_run_repo.all()
+    assert run == result.run
+    assert (run.first_session, run.last_session, run.sessions) == (result.first, result.last, result.sessions)
+    assert run.sessions > 0
+    assert (run.started_at, run.finished_at, run.universe_date) == (EVENING, EVENING, DAYS[-1])
+    assert (run.tickers_listed, run.tickers_replayed, run.tickers_scored) == (15, 13, 11)
+    assert run.left_out == {
+        'NOHIST': NO_HISTORY,
+        'BAD.XX': UNSUPPORTED,
+        'NEW': SHORT_HISTORY,
+        'IDLE': NEVER_SCORED,
+    }
+    assert run.short_history == {
+        **{ticker: prices[ticker][0].date for ticker in REPLAYED},
+        'NEW': prices['AAA'][-30].date,
+    }
+    assert run.short_history['GGG'] == US_DAYS[120]
+    assert run.price_api == 'eodhd,tiingo'
+    assert (run.signals, run.relinked) == (result.signals, result.relinked)
+    assert run.signals > 0
+    assert run.screener_version == SCREENER_VERSION
+
+
+def test_every_run_is_recorded_a_second_one_archiving_nothing(container):
+    first = container.history_backfill.run()
+    again = container.history_backfill.run()
+
+    runs = container.backfill_run_repo.all()
+    assert [r.id for r in runs] == [first.run.id, again.run.id]
+    assert [r.signals for r in runs] == [first.signals, 0]
+    assert runs[1].price_api == 'eodhd'
+    assert runs[1].left_out == {'NOHIST': NO_HISTORY, 'BAD.XX': UNSUPPORTED}

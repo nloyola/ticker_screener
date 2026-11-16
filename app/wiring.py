@@ -10,6 +10,7 @@ from app.history_paths import HistoryPaths
 from app.price_apis import PriceApi
 from app.price_apis.eodhd import EodhdPrices
 from app.price_apis.tiingo import TiingoPrices
+from app.repositories.backfill_run_repo import BackfillRunRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.history_repo import HistoryRepo
@@ -56,6 +57,7 @@ def build_container(config: Config) -> Container:
     c.register('signal_path_repo', Singleton(lambda: SignalPathRepo(c)))
     c.register('signal_outcome_repo', Singleton(lambda: SignalOutcomeRepo(c)))
     c.register('history_repo', Singleton(lambda: HistoryRepo(c)))
+    c.register('backfill_run_repo', Singleton(lambda: BackfillRunRepo(c)))
 
     c.register('price_api_client', Singleton(lambda: price_api_client(c)))
     c.register('sector_service', Singleton(lambda: SectorService(c)))

@@ -186,3 +186,35 @@ class PathSession:
     volume: int | None
     benchmark_open: float | None
     benchmark_close: float | None
+
+
+# why backfill-history left a listed ticker out (BackfillRun.left_out)
+NO_HISTORY = 'no_history'
+UNSUPPORTED = 'unsupported'
+SHORT_HISTORY = 'short_history'
+NEVER_SCORED = 'never_scored'
+
+
+@dataclass(frozen=True)
+class BackfillRun:
+    """One finished backfill-history run: what it covered and the biases it carries (backfill_run in schema.sql)."""
+
+    started_at: datetime
+    finished_at: datetime
+    universe_date: date
+    first_session: date | None
+    last_session: date | None
+    sessions: int
+    price_api: str | None
+    tickers_listed: int
+    tickers_replayed: int
+    tickers_scored: int
+    # each listed ticker never scored, with why: NO_HISTORY, UNSUPPORTED, SHORT_HISTORY or NEVER_SCORED
+    left_out: dict[str, str]
+    # each replayed ticker whose history starts late, with its first day
+    short_history: dict[str, date]
+    signals: int
+    relinked: int
+    screener_version: str
+    git_commit: str | None
+    id: int | None = None

@@ -487,6 +487,36 @@ def _add_signal_tracking(con: sqlite3.Connection) -> None:
         )""")
 
 
+def _add_backfill_run(con: sqlite3.Connection) -> None:
+    """
+    Version 13: backfill_run, each backfill-history run's coverage and biases, which schema.sql only creates when
+    db-init runs.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS backfill_run (
+               id INTEGER PRIMARY KEY,
+               started_at TIMESTAMP NOT NULL,
+               finished_at TIMESTAMP NOT NULL,
+               universe_date TEXT NOT NULL CHECK (date(universe_date) IS universe_date),
+               first_session TEXT CHECK (date(first_session) IS first_session),
+               last_session TEXT CHECK (date(last_session) IS last_session),
+               sessions INTEGER NOT NULL CHECK (sessions >= 0),
+               price_api TEXT,
+               tickers_listed INTEGER NOT NULL CHECK (tickers_listed >= 0),
+               tickers_replayed INTEGER NOT NULL CHECK (tickers_replayed >= 0),
+               tickers_scored INTEGER NOT NULL CHECK (tickers_scored >= 0),
+               left_out TEXT NOT NULL CHECK (json_valid(left_out)),
+               short_history TEXT NOT NULL CHECK (json_valid(short_history)),
+               signals INTEGER NOT NULL CHECK (signals >= 0),
+               relinked INTEGER NOT NULL CHECK (relinked >= 0),
+               screener_version TEXT NOT NULL,
+               git_commit TEXT,
+               CHECK ((first_session IS NULL) = (last_session IS NULL)),
+               CHECK ((first_session IS NULL) = (sessions = 0))
+        )""")
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -500,6 +530,7 @@ UPGRADES = (
     _add_screened_session,
     _add_signal,
     _add_signal_tracking,
+    _add_backfill_run,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

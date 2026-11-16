@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
@@ -16,6 +16,7 @@ import pandas as pd
 
 from app.analyzer import (
     BACKFILL,
+    SCREENER_VERSION,
     SIGNAL_STATUSES,
     Analyzer,
     Scored,
@@ -27,8 +28,10 @@ from app.analyzer import (
 )
 from app.backfill import quiet, replayable_sessions
 from app.container import Container
+from app.history_fetch import SHORT_HISTORY_SLACK, history_start
 from app.history_paths import HistoryPathUpdate
-from app.markets import BENCHMARKS, MARKETS, UnsupportedTicker, market_of
+from app.markets import BENCHMARKS, MARKET_CLOSES, MARKETS, US, UnsupportedTicker, market_of
+from app.models import NEVER_SCORED, NO_HISTORY, SHORT_HISTORY, UNSUPPORTED, BackfillRun
 from app.provenance import git_commit
 from app.replay import TickerReplay, ticker_replay
 from app.repositories.history_repo import BENCHMARK, TICKER
@@ -37,18 +40,22 @@ from app.signal_outcome_updates import OutcomeUpdate
 if TYPE_CHECKING:
     from app.backfill import Backfill
     from app.history_paths import HistoryPaths
+    from app.repositories.backfill_run_repo import BackfillRunRepo
     from app.repositories.history_repo import HistoryRepo
     from app.services.sector_service import SectorService
     from app.signal_outcome_updates import SignalOutcomeUpdates
 
 logger = logging.getLogger(__name__)
 
+# the time zone of a run's universe date, the day the sectors page was read
+UNIVERSE_ZONE = MARKET_CLOSES[US][0]
+
 
 @dataclass
 class HistoryBackfillResult:
     """
-    What a history backfill replayed and archived, the listed tickers it could not replay, and the paths and outcomes
-    it stored for the backfill signals.
+    What a history backfill replayed and archived, the listed tickers it could not replay or score, and the paths and
+    outcomes it stored for the backfill signals. 'run' is the backfill_run row it stored.
     """
 
     sessions: int = 0
@@ -60,9 +67,13 @@ class HistoryBackfillResult:
     # listed tickers with no stored history, and those with an exchange suffix no market has
     no_history: list[str] = field(default_factory=list)
     unsupported: list[str] = field(default_factory=list)
+    # replayed tickers scored on no session, and those whose history starts late, with its first day
+    never_scored: list[str] = field(default_factory=list)
+    short_history: dict[str, date] = field(default_factory=dict)
     paths: HistoryPathUpdate = field(default_factory=HistoryPathUpdate)
     outcomes: OutcomeUpdate = field(default_factory=OutcomeUpdate)
     seconds: float = 0.0
+    run: BackfillRun | None = None
 
 
 class HistoryBackfill:
@@ -83,6 +94,10 @@ class HistoryBackfill:
 
     Then every backfill signal's path not yet frozen is written from the history (HistoryPaths), and the outcomes of
     every signal are stored from the paths (SignalOutcomeUpdates), as run-refresh stores them from its own.
+
+    Last, the run's coverage and biases are stored in backfill_run: its sessions, universe date, ticker counts, the
+    listed tickers it never scored and why, the tickers whose history starts late (more than SHORT_HISTORY_SLACK after
+    the start the fetch asked for on the day it fetched them), and the price API their histories came from.
     """
 
     def __init__(self, container: Container, now: Callable[[], datetime] = utc_now) -> None:
@@ -92,20 +107,28 @@ class HistoryBackfill:
         self.backfill: Backfill = container.backfill
         self.history_paths: HistoryPaths = container.history_paths
         self.signal_outcome_updates: SignalOutcomeUpdates = container.signal_outcome_updates
+        self.backfill_run_repo: BackfillRunRepo = container.backfill_run_repo
         # the clock that decides which sessions are complete, timezone aware
         self.now = now
 
     def run(self) -> HistoryBackfillResult:
         """
-        Replays the history, printing a line per subsector, stores the backfill signals' paths and outcomes, and
-        returns what it did.
+        Replays the history, printing a line per subsector, stores the backfill signals' paths and outcomes and the
+        run's coverage, and returns what it did.
         """
+        started_at = self.now()
         started = time.monotonic()
         result = HistoryBackfillResult()
         universe = self._universe(result)
+        listed = len(universe) + len(result.unsupported)
         stored = self.history_repo.coverage(TICKER)
         result.no_history = [ticker for ticker in universe if ticker not in stored]
         universe = {ticker: subsector for ticker, subsector in universe.items() if ticker in stored}
+        fetches = self.history_repo.fetches(TICKER)
+        for ticker in universe:
+            fetched = fetches.get(ticker)
+            if fetched is not None and stored[ticker].first > history_start(fetched[0]) + SHORT_HISTORY_SLACK:
+                result.short_history[ticker] = stored[ticker].first
 
         sessions = replayable_sessions(self._market_dates(universe), self.now())
         result.sessions = len(sessions)
@@ -127,8 +150,9 @@ class HistoryBackfill:
         settings = json.dumps(rule_settings(), sort_keys=True)
         commit = git_commit()
         archived_tickers: set[str] = set()
+        scored: set[str] = set()
         for done, (subsector_id, tickers) in enumerate(by_subsector.items(), start=1):
-            signals = self._subsector_signals(subsector_id, tickers, replayable, benchmarks)
+            signals = self._subsector_signals(subsector_id, tickers, replayable, benchmarks, scored)
             result.tickers += len(tickers)
             stored_count = self._archive(signals, settings, commit, archived_tickers)
             result.signals += stored_count
@@ -142,8 +166,45 @@ class HistoryBackfill:
         result.relinked = self.backfill.relink(archived_tickers, self._dates)
         result.paths = self.history_paths.update(self.now())
         result.outcomes = self.signal_outcome_updates.update()
+        result.never_scored = [ticker for ticker in universe if ticker not in scored]
+        price_api = ','.join(sorted({fetches[ticker][1] for ticker in universe if ticker in fetches})) or None
+        result.run = self._store_run(result, started_at, listed, len(scored), price_api, commit)
         result.seconds = time.monotonic() - started
         return result
+
+    def _store_run(
+        self,
+        result: HistoryBackfillResult,
+        started_at: datetime,
+        listed: int,
+        scored: int,
+        price_api: str | None,
+        commit: str | None,
+    ) -> BackfillRun:
+        """Stores the run's coverage and biases in backfill_run and returns the row stored."""
+        left_out = {ticker: NO_HISTORY for ticker in result.no_history}
+        left_out.update({ticker: UNSUPPORTED for ticker in result.unsupported})
+        for ticker in result.never_scored:
+            left_out[ticker] = SHORT_HISTORY if ticker in result.short_history else NEVER_SCORED
+        run = BackfillRun(
+            started_at=started_at,
+            finished_at=self.now(),
+            universe_date=started_at.astimezone(UNIVERSE_ZONE).date(),
+            first_session=result.first,
+            last_session=result.last,
+            sessions=result.sessions,
+            price_api=price_api,
+            tickers_listed=listed,
+            tickers_replayed=result.tickers,
+            tickers_scored=scored,
+            left_out=left_out,
+            short_history=result.short_history,
+            signals=result.signals,
+            relinked=result.relinked,
+            screener_version=SCREENER_VERSION,
+            git_commit=commit,
+        )
+        return replace(run, id=self.backfill_run_repo.add(run))
 
     def _universe(self, result: HistoryBackfillResult) -> dict[str, int]:
         """Every listed ticker of a known market with the subsector that lists it first, as the fetcher stores it."""
@@ -177,11 +238,13 @@ class HistoryBackfill:
         tickers: list[str],
         replayable: dict[str, np.ndarray],
         benchmarks: dict[str, dict[date, float]],
+        scored: set[str],
     ) -> list[Scored]:
         """
-        The signals of the subsector's tickers on every replayable session, oldest first: each ticker scored on
-        each session of its market it can be scored on, compared with the median returns of the subsector's tickers
-        scored on that session, and kept when its status makes it a signal.
+        The signals of the subsector's tickers on every replayable session, oldest first; adds the tickers scored on
+        at least one session to 'scored'. Each ticker is scored on each session of its market it can be scored on,
+        compared with the median returns of the subsector's tickers scored on that session, and kept when its status
+        makes it a signal.
         """
         replays: list[tuple[str, TickerReplay, np.ndarray]] = []
         # the rows meeting the core conditions, the only ones that can be signals: (replay index, row)
@@ -191,6 +254,8 @@ class HistoryBackfill:
             replay = ticker_replay(ticker, subsector_id, self.history_repo.prices(TICKER, ticker))
             ordinals = np.array([d.toordinal() for d in replay.dates], dtype=np.int64)
             included = replay.scorable & np.isin(ordinals, replayable[market])
+            if included.any():
+                scored.add(ticker)
             replays.append((market, replay, ordinals))
             candidates.extend((len(replays) - 1, int(row)) for row in np.flatnonzero(included & replay.core))
         if not candidates:
@@ -262,3 +327,10 @@ def summarize(result: HistoryBackfillResult) -> None:
         print(f'backfill-history: no history, not replayed: {", ".join(result.no_history)}')
     if result.unsupported:
         print(f'backfill-history: unsupported exchange suffix, not replayed: {", ".join(result.unsupported)}')
+    if result.never_scored:
+        print(f'backfill-history: scored on no session: {", ".join(result.never_scored)}')
+    if result.short_history:
+        late = ', '.join(f'{ticker} ({first})' for ticker, first in result.short_history.items())
+        print(f'backfill-history: history starts late: {late}')
+    if result.run is not None:
+        print(f'backfill-history: recorded as backfill run {result.run.id}')

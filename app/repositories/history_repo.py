@@ -114,6 +114,12 @@ class HistoryRepo:
         with connect(self.db_path) as con:
             self._record(con, kind, ticker, day, api)
 
+    def fetches(self, kind: str) -> dict[str, tuple[date, str]]:
+        """Each recorded ticker of 'kind' with the day it was last fetched and the price API it was fetched from."""
+        with connect(self.db_path) as con:
+            rows = con.execute('SELECT ticker, fetched_on, api FROM history_fetch WHERE kind = ?', (kind,)).fetchall()
+        return {row['ticker']: (date.fromisoformat(row['fetched_on']), row['api']) for row in rows}
+
     def coverage(self, kind: str) -> dict[str, Coverage]:
         """Each stored ticker of 'kind' with its stored history."""
         with connect(self.db_path) as con:
