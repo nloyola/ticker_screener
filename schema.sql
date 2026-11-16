@@ -305,7 +305,8 @@ CREATE TABLE IF NOT EXISTS signal_price (
 -- and has no row: the screener never writes status pending. It is complete once its session is in the path, and then
 -- never recomputed, or ended when the ticker stopped getting prices first, with the reason and the last session it
 -- had prices for, a row deleted again when a later run has prices for the ticker. Not market data: db-init and the
--- dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from before it; change both together.
+-- dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from before
+-- it; change both together.
 CREATE TABLE IF NOT EXISTS signal_outcome (
        signal_id INTEGER NOT NULL REFERENCES signal (id),
        horizon INTEGER NOT NULL CHECK (horizon IN (5, 10, 20, 40, 60, 120)),
