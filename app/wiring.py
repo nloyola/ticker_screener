@@ -4,6 +4,7 @@ from app.backfill import Backfill
 from app.config import DB_NAME, EODHD, EODHD_API_KEY, HISTORY_DATABASE_FILE, PRICE_API, TIINGO, TIINGO_API_KEY, Config
 from app.container import Container, Required, Singleton
 from app.db import SQLite
+from app.history_backfill import HistoryBackfill
 from app.history_fetch import HistoryFetch
 from app.price_apis import PriceApi
 from app.price_apis.eodhd import EodhdPrices
@@ -64,6 +65,7 @@ def build_container(config: Config) -> Container:
     c.register('signal_paths', Singleton(lambda: SignalPaths(c)))
     c.register('signal_outcome_updates', Singleton(lambda: SignalOutcomeUpdates(c)))
     c.register('history_fetch', Singleton(lambda: HistoryFetch(c)))
+    c.register('history_backfill', Singleton(lambda: HistoryBackfill(c)))
     return c
 
 

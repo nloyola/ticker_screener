@@ -23,6 +23,7 @@ Under `app/`, wired together by a small dependency-injection container:
 - **services/** - Logic over the repositories (`SectorService`).
 - **analyzer.py**, **ticker_fetcher.py**, **ticker_sync_tiingo.py**, **backfill.py** - The work behind the `analyze`, `ticker-fetcher`, `ticker-sync` and `backfill-signals` commands (README.md, "Seeding the signal archive").
 - **history_fetch.py** - `HistoryFetch`, the work behind `history-fetch`: years of each listed ticker's and benchmark's prices into the separate history database (`repositories/history_repo.py`, which creates its own tables), resumable the same day (README.md, "Fetching the price history").
+- **history_backfill.py**, **replay.py** - `HistoryBackfill`, the work behind `backfill-history`: every session of the history replayed and its signals archived as backfill (README.md, "Replaying the price history"), with each ticker's indicators computed once over its whole history by `ticker_replay` (`replay.py`), giving the values `Analyzer.score_as_of` gives session by session.
 - **signal_paths.py** - `SignalPaths`, which `run-refresh` runs after `analyze`: each archived signal's own price path in `signal_price`, rewritten whole from the run's prices until it reaches 120 sessions and is frozen, and the horizons it cannot reach marked ended when the ticker gets no prices (README.md, "Refreshing the database"). `HORIZONS` and `PATH_SESSIONS` are defined here.
 - **signal_outcome_updates.py** - `SignalOutcomeUpdates`, which `run-refresh` runs after the paths and `compute-outcomes` runs on demand: each signal's newly complete horizons in `signal_outcome` and its breakout failure, once decided, in `signal_track`, computed from its stored path, never changing a complete row or a decided failure.
 - **signal_outcomes.py** - `compute_outcomes`, a pure function of a signal's path: per horizon the entry, exit, gross and net returns (`COST_BPS`), benchmark and excess returns, MFE and MAE, and the breakout failure (`FAILURE_SESSIONS`), with the breakout level rescaled to the path's adjustment basis.
@@ -52,6 +53,7 @@ uv run python main.py run-refresh              # under screener.lock: ticker-fet
 uv run python main.py backfill-signals         # under screener.lock: archive the signals of every replayable stored session
 uv run python main.py compute-outcomes         # under screener.lock: every signal's outcomes from its stored path
 uv run python main.py history-fetch            # 10 years of prices into HISTORY_DATABASE_FILE, resumable
+uv run python main.py backfill-history         # under screener.lock: archive the signals of every session of the history
 uv run pytest                                  # tests
 uv run ruff check .                            # lint
 uv run ruff format .                           # format

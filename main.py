@@ -6,6 +6,7 @@ import sys
 
 from app.commands.analyzer import AnalyzerCommand
 from app.commands.backfill_cmd import BackfillCmd
+from app.commands.backfill_history_cmd import BackfillHistoryCmd
 from app.commands.base_command import BaseCommand, CLI_Interface
 from app.commands.compute_outcomes_cmd import ComputeOutcomesCmd
 from app.commands.db_init import DbInit
@@ -118,6 +119,7 @@ def main() -> None:
     BackfillCmd().add_to_cli(cli)
     ComputeOutcomesCmd().add_to_cli(cli)
     HistoryFetchCmd().add_to_cli(cli)
+    BackfillHistoryCmd().add_to_cli(cli)
     cli.execute()
 
 

@@ -7,6 +7,7 @@ Only this module touches it, and it creates its own tables: the dashboard never 
 describe it.
 """
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -124,6 +125,16 @@ class HistoryRepo:
             row['ticker']: Coverage(date.fromisoformat(row['first']), date.fromisoformat(row['last']), row['days'])
             for row in rows
         }
+
+    def days(self, kind: str, tickers: Iterable[str]) -> list[date]:
+        """The days, oldest first, on which any of 'tickers' of 'kind' has a stored price."""
+        with connect(self.db_path) as con:
+            rows = con.execute(
+                f'SELECT DISTINCT date FROM {PRICE_TABLES[kind]} '
+                f'WHERE ticker IN (SELECT value FROM json_each(?)) ORDER BY date',
+                (json.dumps(list(tickers)),),
+            ).fetchall()
+        return [date.fromisoformat(row['date']) for row in rows]
 
     def prices(self, kind: str, ticker: str) -> list[DailyPrice]:
         """The ticker's stored days, oldest first."""
