@@ -27,22 +27,29 @@ from app.analyzer import (
 )
 from app.backfill import quiet, replayable_sessions
 from app.container import Container
+from app.history_paths import HistoryPathUpdate
 from app.markets import BENCHMARKS, MARKETS, UnsupportedTicker, market_of
 from app.provenance import git_commit
 from app.replay import TickerReplay, ticker_replay
 from app.repositories.history_repo import BENCHMARK, TICKER
+from app.signal_outcome_updates import OutcomeUpdate
 
 if TYPE_CHECKING:
     from app.backfill import Backfill
+    from app.history_paths import HistoryPaths
     from app.repositories.history_repo import HistoryRepo
     from app.services.sector_service import SectorService
+    from app.signal_outcome_updates import SignalOutcomeUpdates
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class HistoryBackfillResult:
-    """What a history backfill replayed and archived, and the listed tickers it could not replay."""
+    """
+    What a history backfill replayed and archived, the listed tickers it could not replay, and the paths and outcomes
+    it stored for the backfill signals.
+    """
 
     sessions: int = 0
     first: date | None = None
@@ -53,6 +60,8 @@ class HistoryBackfillResult:
     # listed tickers with no stored history, and those with an exchange suffix no market has
     no_history: list[str] = field(default_factory=list)
     unsupported: list[str] = field(default_factory=list)
+    paths: HistoryPathUpdate = field(default_factory=HistoryPathUpdate)
+    outcomes: OutcomeUpdate = field(default_factory=OutcomeUpdate)
     seconds: float = 0.0
 
 
@@ -71,6 +80,9 @@ class HistoryBackfill:
     A signal already archived for the ticker, session and version, live or backfill, is left as it was, so a second
     backfill adds nothing. Each ticker's signals are archived oldest first, each linked to the ticker's previous one,
     and a signal archived before the backfill, on a session after one it archived, is relinked (Backfill.relink).
+
+    Then every backfill signal's path not yet frozen is written from the history (HistoryPaths), and the outcomes of
+    every signal are stored from the paths (SignalOutcomeUpdates), as run-refresh stores them from its own.
     """
 
     def __init__(self, container: Container, now: Callable[[], datetime] = utc_now) -> None:
@@ -78,11 +90,16 @@ class HistoryBackfill:
         self.sector_service: SectorService = container.sector_service
         self.analyzer: Analyzer = container.analyzer
         self.backfill: Backfill = container.backfill
+        self.history_paths: HistoryPaths = container.history_paths
+        self.signal_outcome_updates: SignalOutcomeUpdates = container.signal_outcome_updates
         # the clock that decides which sessions are complete, timezone aware
         self.now = now
 
     def run(self) -> HistoryBackfillResult:
-        """Replays the history, prints a line per subsector and a summary, and returns what it did."""
+        """
+        Replays the history, printing a line per subsector, stores the backfill signals' paths and outcomes, and
+        returns what it did.
+        """
         started = time.monotonic()
         result = HistoryBackfillResult()
         universe = self._universe(result)
@@ -123,6 +140,8 @@ class HistoryBackfill:
             )
 
         result.relinked = self.backfill.relink(archived_tickers, self._dates)
+        result.paths = self.history_paths.update(self.now())
+        result.outcomes = self.signal_outcome_updates.update()
         result.seconds = time.monotonic() - started
         return result
 
@@ -219,7 +238,10 @@ class HistoryBackfill:
 
 
 def summarize(result: HistoryBackfillResult) -> None:
-    """Prints what a history backfill replayed and archived, and the listed tickers it could not replay."""
+    """
+    Prints what a history backfill replayed and archived, the paths and outcomes it stored, and the listed tickers
+    it could not replay.
+    """
     sessions = f'{result.sessions} session{"" if result.sessions == 1 else "s"}'
     if result.first is not None:
         sessions += f' ({result.first} to {result.last})'
@@ -228,6 +250,13 @@ def summarize(result: HistoryBackfillResult) -> None:
         f'archived {result.signals} new signal{"" if result.signals == 1 else "s"}, '
         f'relinked {result.relinked} later signal{"" if result.relinked == 1 else "s"}, '
         f'in {result.seconds:.0f}s'
+    )
+    paths, outcomes = result.paths, result.outcomes
+    print(
+        f'backfill-history: wrote {paths.written} signal path{"" if paths.written == 1 else "s"} from the history, '
+        f"froze {paths.frozen}, ended {paths.ended} whose ticker's history stops early; "
+        f'completed {outcomes.completed} horizon{"" if outcomes.completed == 1 else "s"}, '
+        f'decided {outcomes.decided} breakout failure{"" if outcomes.decided == 1 else "s"}'
     )
     if result.no_history:
         print(f'backfill-history: no history, not replayed: {", ".join(result.no_history)}')

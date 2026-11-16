@@ -6,6 +6,7 @@ from app.container import Container, Required, Singleton
 from app.db import SQLite
 from app.history_backfill import HistoryBackfill
 from app.history_fetch import HistoryFetch
+from app.history_paths import HistoryPaths
 from app.price_apis import PriceApi
 from app.price_apis.eodhd import EodhdPrices
 from app.price_apis.tiingo import TiingoPrices
@@ -65,6 +66,7 @@ def build_container(config: Config) -> Container:
     c.register('signal_paths', Singleton(lambda: SignalPaths(c)))
     c.register('signal_outcome_updates', Singleton(lambda: SignalOutcomeUpdates(c)))
     c.register('history_fetch', Singleton(lambda: HistoryFetch(c)))
+    c.register('history_paths', Singleton(lambda: HistoryPaths(c)))
     c.register('history_backfill', Singleton(lambda: HistoryBackfill(c)))
     return c
 

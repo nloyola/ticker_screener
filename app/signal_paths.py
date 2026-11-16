@@ -14,6 +14,7 @@ from datetime import date, datetime
 from app.container import Container
 from app.markets import BENCHMARKS, last_complete_session
 from app.models import PathSession, PriceData
+from app.price_apis import DailyPrice
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.signal_path_repo import SignalPathRepo, TrackedSignal
@@ -32,15 +33,15 @@ REMOVED = 'removed'
 
 def build_path(
     session_date: date,
-    rows: Sequence[PriceData],
+    rows: Sequence[PriceData] | Sequence[DailyPrice],
     benchmark: Mapping[date, tuple[float | None, float]],
     last_session: date,
 ) -> list[PathSession] | None:
     """
-    The path of a signal on 'session_date' from its ticker's price rows (oldest first) and its benchmark's open and
-    close by date: the rows from the signal session up to PATH_SESSIONS sessions after it, leaving out rows dated after
-    'last_session', the market's last complete session, and rows with no close. None when the rows do not hold the
-    signal session, so the whole path cannot be written from them.
+    The path of a signal on 'session_date' from its ticker's price rows (price_data's or the history's, oldest first)
+    and its benchmark's open and close by date: the rows from the signal session up to PATH_SESSIONS sessions after
+    it, leaving out rows dated after 'last_session', the market's last complete session, and rows with no close.
+    None when the rows do not hold the signal session, so the whole path cannot be written from them.
     """
     usable = [r for r in rows if r.close is not None and r.date <= last_session]
     start = next((i for i, r in enumerate(usable) if r.date == session_date), None)

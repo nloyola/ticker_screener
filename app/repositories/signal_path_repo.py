@@ -40,8 +40,8 @@ class SignalPathRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def unfrozen(self, markets: Collection[str]) -> list[TrackedSignal]:
-        """Every signal of 'markets' whose path is not frozen, oldest session first."""
+    def unfrozen(self, markets: Collection[str], source: str | None = None) -> list[TrackedSignal]:
+        """Every signal of 'markets' whose path is not frozen, of 'source' alone when given, oldest session first."""
         markets = list(markets)
         if not markets:
             return []
@@ -54,9 +54,10 @@ class SignalPathRepo:
                 FROM signal s
                 LEFT JOIN signal_track t ON t.signal_id = s.id
                 WHERE t.path_frozen_at IS NULL AND s.market IN ({','.join('?' * len(markets))})
+                  AND (? IS NULL OR s.source = ?)
                 ORDER BY s.session_date, s.id
                 """,
-                markets,
+                [*markets, source, source],
             ).fetchall()
         return [
             TrackedSignal(
@@ -84,38 +85,47 @@ class SignalPathRepo:
         In one transaction: replaces the signal's whole path with 'path', freezes it when 'frozen', and deletes the
         signal's ended horizons, since its ticker has prices again; a complete horizon is never touched.
         """
+        self.write_all([(signal_id, path, frozen)])
+
+    def write_all(self, paths: Iterable[tuple[int, Iterable[PathSession], bool]]) -> None:
+        """As write, for each (signal id, path, frozen) of 'paths', all in one transaction."""
         with connect(self.db_path) as con:
-            con.execute('DELETE FROM signal_price WHERE signal_id = ?', (signal_id,))
-            con.executemany(
-                f'INSERT INTO signal_price (signal_id, {",".join(_COLUMNS)}) VALUES (?{", ?" * len(_COLUMNS)})',
-                [
-                    (
-                        signal_id,
-                        p.session_index,
-                        p.session_date.isoformat(),
-                        p.open,
-                        p.high,
-                        p.low,
-                        p.close,
-                        p.volume,
-                        p.benchmark_open,
-                        p.benchmark_close,
-                    )
-                    for p in path
-                ],
-            )
-            con.execute('INSERT OR IGNORE INTO signal_track (signal_id) VALUES (?)', (signal_id,))
-            if frozen:
-                con.execute(
-                    "UPDATE signal_track SET path_frozen_at = datetime('now') WHERE signal_id = ?", (signal_id,)
+            for signal_id, path, frozen in paths:
+                con.execute('DELETE FROM signal_price WHERE signal_id = ?', (signal_id,))
+                con.executemany(
+                    f'INSERT INTO signal_price (signal_id, {",".join(_COLUMNS)}) VALUES (?{", ?" * len(_COLUMNS)})',
+                    [
+                        (
+                            signal_id,
+                            p.session_index,
+                            p.session_date.isoformat(),
+                            p.open,
+                            p.high,
+                            p.low,
+                            p.close,
+                            p.volume,
+                            p.benchmark_open,
+                            p.benchmark_close,
+                        )
+                        for p in path
+                    ],
                 )
-            con.execute("DELETE FROM signal_outcome WHERE signal_id = ? AND status = 'ended'", (signal_id,))
+                con.execute('INSERT OR IGNORE INTO signal_track (signal_id) VALUES (?)', (signal_id,))
+                if frozen:
+                    con.execute(
+                        "UPDATE signal_track SET path_frozen_at = datetime('now') WHERE signal_id = ?", (signal_id,)
+                    )
+                con.execute("DELETE FROM signal_outcome WHERE signal_id = ? AND status = 'ended'", (signal_id,))
 
     def end(self, signal_id: int, horizons: Iterable[int], reason: str, last_session_date: date) -> None:
         """
         Marks each of the signal's 'horizons' ended, with the reason and the last session its path has, leaving a
         complete horizon as it was.
         """
+        self.end_all([(signal_id, horizons, reason, last_session_date)])
+
+    def end_all(self, ends: Iterable[tuple[int, Iterable[int], str, date]]) -> None:
+        """As end, for each (signal id, horizons, reason, last session date) of 'ends', all in one transaction."""
         with connect(self.db_path) as con:
             con.executemany(
                 """
@@ -126,5 +136,9 @@ class SignalPathRepo:
                     last_session_date = excluded.last_session_date, updated_at = datetime('now')
                 WHERE signal_outcome.status <> 'complete'
                 """,
-                [(signal_id, h, reason, last_session_date.isoformat()) for h in horizons],
+                [
+                    (signal_id, h, reason, last_session_date.isoformat())
+                    for signal_id, horizons, reason, last_session_date in ends
+                    for h in horizons
+                ],
             )

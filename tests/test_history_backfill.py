@@ -1,7 +1,8 @@
 """
 backfill-history (app/history_backfill.py) replays the screener over the price history, with each indicator computed
 once over a ticker's whole history (app/replay.py), and archives the same signals, with the same values, as
-Analyzer.score_as_of gives on the history session by session.
+Analyzer.score_as_of gives on the history session by session; then it writes each backfill signal's path from the
+history (app/history_paths.py) and stores its outcomes from it.
 """
 
 import argparse
@@ -20,6 +21,7 @@ from app.backfill import Backfill, market_dates, replayable_sessions
 from app.commands.backfill_history_cmd import BackfillHistoryCmd
 from app.db import init_db
 from app.history_backfill import HistoryBackfill
+from app.history_paths import HISTORY_ENDED, HistoryPaths
 from app.markets import BENCHMARKS, CANADA, US
 from app.price_apis import DailyPrice
 from app.replay import flat_days, run_lengths, unscored
@@ -28,11 +30,16 @@ from app.repositories.history_repo import BENCHMARK, TICKER, HistoryRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
+from app.repositories.signal_outcome_repo import SignalOutcomeRepo
+from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import _ARCHIVED, _ARCHIVED_AT, SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo, row_values
 from app.repositories.subsector_repo import SubsectorRepo
 from app.screener_lock import screener_lock
 from app.services.sector_service import SectorService
+from app.signal_outcome_updates import SignalOutcomeUpdates
+from app.signal_outcomes import COST_BPS
+from app.signal_paths import HORIZONS, PATH_SESSIONS
 
 NEW_YORK = ZoneInfo('America/New_York')
 # a Monday
@@ -150,6 +157,10 @@ def container(path, tmp_path, prices, benchmarks) -> SimpleNamespace:
     container.signal_repo = SignalRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     container.backfill = Backfill(container, now=lambda: EVENING)
+    container.signal_path_repo = SignalPathRepo(container)
+    container.signal_outcome_repo = SignalOutcomeRepo(container)
+    container.signal_outcome_updates = SignalOutcomeUpdates(container)
+    container.history_paths = HistoryPaths(container)
     container.history_backfill = HistoryBackfill(container, now=lambda: EVENING)
     return container
 
@@ -256,3 +267,142 @@ def test_command_prints_a_summary(container, capsys):
     out = capsys.readouterr().out
     assert 'backfill-history: replayed' in out
     assert 'no history, not replayed: NOHIST' in out
+    assert 'signal paths from the history' in out
+
+
+def rows_of(path: str, sql: str, *params) -> list[tuple]:
+    with sqlite3.connect(path) as con:
+        return con.execute(sql, params).fetchall()
+
+
+def test_every_backfill_signal_120_sessions_old_has_six_completed_outcomes(path, container, prices):
+    result = container.history_backfill.run()
+
+    archived = signals(path)
+    assert result.paths.written == len(archived)
+    old = 0
+    for s in archived:
+        days = [p.date.isoformat() for p in prices[s['ticker']]]
+        after = len(days) - 1 - days.index(s['session_date'])
+        complete = rows_of(
+            path, "SELECT horizon FROM signal_outcome WHERE signal_id = ? AND status = 'complete' ORDER BY 1", s['id']
+        )
+        frozen = rows_of(path, 'SELECT path_frozen_at FROM signal_track WHERE signal_id = ?', s['id'])[0][0]
+        stored = rows_of(path, 'SELECT session_date FROM signal_price WHERE signal_id = ? ORDER BY 1', s['id'])
+        assert [d for (d,) in stored] == days[days.index(s['session_date']) :][: PATH_SESSIONS + 1]
+        if after >= PATH_SESSIONS:
+            old += 1
+            assert [h for (h,) in complete] == list(HORIZONS)
+            assert frozen is not None
+        else:
+            # a path reaching the history's last session is left for run-refresh to carry on, nothing ended
+            assert [h for (h,) in complete] == [h for h in HORIZONS if h <= after]
+            assert frozen is None
+    assert old > 0
+    assert old < len(archived)
+    assert rows_of(path, "SELECT COUNT(*) FROM signal_outcome WHERE status = 'ended'") == [(0,)]
+    assert (
+        result.outcomes.completed
+        == rows_of(path, "SELECT COUNT(*) FROM signal_outcome WHERE status = 'complete'")[0][0]
+    )
+
+
+def test_a_spot_checked_signals_outcomes_match_its_prices_in_the_history(path, container, prices, benchmarks):
+    container.history_backfill.run()
+
+    # the oldest signal, with every horizon in its path
+    s = next(s for s in signals(path) if s['ticker'] == 'CCC')
+    assert s['session_date'] == '2024-12-19'
+    rows = prices['CCC']
+    start = [p.date.isoformat() for p in rows].index(s['session_date'])
+    bench = {p.date: p for p in benchmarks[BENCHMARKS[US]]}
+    entry = rows[start + 1]
+    for horizon in HORIZONS:
+        exit_ = rows[start + horizon]
+        held = rows[start + 1 : start + horizon + 1]
+        gross = (exit_.close / entry.open - 1) * 100
+        net = gross - COST_BPS / 100
+        benchmark = (bench[exit_.date].close / bench[entry.date].open - 1) * 100
+        expected = (
+            entry.date.isoformat(),
+            entry.open,
+            exit_.date.isoformat(),
+            exit_.close,
+            gross,
+            net,
+            benchmark,
+            net - benchmark,
+            (max(p.high for p in held) / entry.open - 1) * 100,
+            (min(p.low for p in held) / entry.open - 1) * 100,
+        )
+        actual = rows_of(
+            path,
+            'SELECT entry_date, entry_price, exit_date, exit_price, gross_return_pct, net_return_pct, '
+            'benchmark_return_pct, excess_return_pct, mfe_pct, mae_pct FROM signal_outcome '
+            "WHERE signal_id = ? AND horizon = ? AND status = 'complete'",
+            s['id'],
+            horizon,
+        )
+        assert actual == [pytest.approx(expected)]
+
+
+def test_a_signal_whose_tickers_history_stops_early_is_ended(path, container, prices):
+    # CCC's history stops 50 sessions before its market's
+    container.history_repo.store(TICKER, 'CCC', prices['CCC'][:-50], FETCHED, 'eodhd')
+    last = prices['CCC'][-51].date
+
+    container.history_backfill.run()
+
+    days = [p.date.isoformat() for p in prices['CCC'][:-50]]
+    young = [s for s in signals(path) if s['ticker'] == 'CCC' and len(days) - 1 - days.index(s['session_date']) < 120]
+    assert len(young) == 3
+    for s in young:
+        reached = len(days) - 1 - days.index(s['session_date'])
+        ended = rows_of(
+            path,
+            'SELECT horizon, ended_reason, last_session_date FROM signal_outcome '
+            "WHERE signal_id = ? AND status = 'ended' ORDER BY horizon",
+            s['id'],
+        )
+        assert ended == [(h, HISTORY_ENDED, last.isoformat()) for h in HORIZONS if h > reached]
+    # every other ticker's history reaches its market's last session: nothing else is ended
+    others = rows_of(
+        path,
+        "SELECT COUNT(*) FROM signal_outcome o JOIN signal s ON s.id = o.signal_id WHERE o.status = 'ended' "
+        "AND s.ticker <> 'CCC'",
+    )
+    assert others == [(0,)]
+
+
+def test_live_signals_and_tickers_without_history_are_left_to_run_refresh(path, container):
+    with sqlite3.connect(path) as con:
+        for signal_id, ticker, source in ((9001, 'AAA', 'live'), (9002, 'NOHIST', 'backfill')):
+            con.execute(
+                'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
+                "rule_settings, source) VALUES (?, ?, 'US', 'America/New_York', ?, 1.0, 'confirmed', '0.0.1', '{}', ?)",
+                (signal_id, ticker, DAYS[250].isoformat(), source),
+            )
+
+    container.history_backfill.run()
+
+    assert rows_of(path, 'SELECT COUNT(*) FROM signal_price WHERE signal_id IN (9001, 9002)') == [(0,)]
+
+
+def test_a_second_backfill_leaves_the_paths_and_outcomes_as_they_were(path, container, prices):
+    container.history_repo.store(TICKER, 'CCC', prices['CCC'][:-50], FETCHED, 'eodhd')
+    container.history_backfill.run()
+    assert rows_of(path, "SELECT COUNT(*) FROM signal_outcome WHERE status = 'ended'")[0][0] > 0
+    paths = rows_of(path, 'SELECT * FROM signal_price ORDER BY signal_id, session_index')
+    outcomes_sql = (
+        'SELECT signal_id, horizon, status, entry_price, exit_price, net_return_pct, ended_reason, last_session_date, '
+        'completed_at FROM signal_outcome ORDER BY signal_id, horizon'
+    )
+    outcomes = rows_of(path, outcomes_sql)
+    tracks = rows_of(path, 'SELECT * FROM signal_track ORDER BY signal_id')
+
+    again = container.history_backfill.run()
+
+    assert (again.outcomes.completed, again.outcomes.decided) == (0, 0)
+    assert rows_of(path, 'SELECT * FROM signal_price ORDER BY signal_id, session_index') == paths
+    assert rows_of(path, outcomes_sql) == outcomes
+    assert rows_of(path, 'SELECT * FROM signal_track ORDER BY signal_id') == tracks
