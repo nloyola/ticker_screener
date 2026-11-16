@@ -18,6 +18,7 @@ import pytest
 from app.breakoutiq.dataset import load_dataset
 from app.breakoutiq.indicators import FLAGS
 from app.breakoutiq.run import SECTIONS, Analysis, analyse, settings
+from app.breakoutiq.thresholds import DEFAULTS, Thresholds
 from app.db import init_db
 from app.repositories.analysis_data_repo import AnalysisDataRepo
 from app.repositories.analysis_repo import AnalysisRepo
@@ -112,12 +113,12 @@ def _archive(path: str, seed: int = 7) -> int:
     return len(signals)
 
 
-def _run(db: SimpleNamespace) -> subprocess.CompletedProcess:
+def _run(db: SimpleNamespace, *options: str) -> subprocess.CompletedProcess:
     env = {**os.environ, 'DB_NAME': db.db_path, 'HISTORY_DATABASE_FILE': db.history_db_path}
     for key in ('TIINGO_API_KEY', 'EODHD_API_KEY', 'PRICE_API'):
         env.pop(key, None)
     return subprocess.run(
-        [sys.executable, str(MAIN), 'breakoutiq-analysis'],
+        [sys.executable, str(MAIN), 'breakoutiq-analysis', *options],
         env=env,
         capture_output=True,
         text=True,
@@ -182,3 +183,44 @@ def test_an_archive_with_no_resolved_outcome_stores_an_empty_run(db):
     assert (summary.run_id, summary.signals, summary.rows) == (run.id, 0, 0)
     assert (run.signals, run.first_session, run.last_session) == (0, None, None)
     assert db.analysis_repo.results(run.id) == []
+
+
+def test_the_command_runs_by_the_thresholds_it_is_given_and_records_them(db):
+    count = _archive(db.db_path)
+
+    done = _run(db, '--min-signal-dates', str(len(SESSIONS) + 1), '--fdr', '0.2', '--min-net-excess-return', '20=0.1')
+
+    assert done.returncode == 0, done.stderr
+    run = db.analysis_repo.runs()[0]
+    given = Thresholds(min_signal_dates=len(SESSIONS) + 1, fdr=0.2).with_bars({20: 0.1})
+    assert run.settings == json.loads(json.dumps(settings(given)))
+    assert run.settings['min_net_excess_return']['20'] == 0.1
+    assert run.settings['min_net_excess_return']['5'] == DEFAULTS.min_net_excess_return[5]
+    stored = db.analysis_repo.results(run.id)
+    # more signal dates than the archive has: the baseline keeps its counts, and nothing is shown
+    overall = next(r.payload for r in stored if r.section == 'baseline' and r.finding == 'all' and r.horizon == 20)
+    assert overall['signals'] == count and overall['min_signal_dates'] == len(SESSIONS) + 1
+    assert not overall['shown'] and overall['measures'] == {}
+    assert all(not r.payload['shown'] for r in stored if 'shown' in r.payload)
+    assert all(r.payload['fdr'] == 0.2 for r in stored if 'fdr' in r.payload)
+    search = next(r.payload for r in stored if r.section == 'candidates' and r.finding == 'search' and r.horizon == 20)
+    assert search['min_net_excess_return'] == 0.1
+    assert done.stdout.splitlines()[0].startswith('breakoutiq-analysis: thresholds changed from the defaults: ')
+
+
+@pytest.mark.parametrize(
+    ('options', 'message'),
+    [
+        (('--fdr', '1.5'), 'fdr must lie strictly between 0 and 1'),
+        (('--min-net-excess-return', '7=1.0'), 'min_net_excess_return: no horizon [7]'),
+        (('--min-net-excess-return', '20'), 'expected HORIZON=PERCENT'),
+    ],
+)
+def test_an_out_of_range_threshold_stops_the_command_storing_nothing(db, options, message):
+    _archive(db.db_path)
+
+    done = _run(db, *options)
+
+    assert done.returncode == 2
+    assert message in done.stderr
+    assert db.analysis_repo.runs() == []

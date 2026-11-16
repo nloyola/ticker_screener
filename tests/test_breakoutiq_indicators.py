@@ -28,7 +28,8 @@ from app.breakoutiq.indicators import (
     indicator_frame,
     indicators,
 )
-from app.breakoutiq.stats import FDR, MIN_SIGNAL_DATES, cluster_codes, clustered_ols
+from app.breakoutiq.stats import cluster_codes, clustered_ols
+from app.breakoutiq.thresholds import FDR, MIN_SIGNAL_DATES
 
 SESSIONS = pd.bdate_range('2016-01-04', periods=600)
 # the stored raw values the synthetic signals draw at random, besides those VALUES derives from close and the averages

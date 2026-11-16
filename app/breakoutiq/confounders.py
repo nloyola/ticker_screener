@@ -8,10 +8,10 @@ strength together (INDICATORS), each standardized so its effect is per standard 
 fixed effects and the regime, and with errors clustered two-way by signal date and ticker (stats.clustered_ols). Each
 indicator's adjusted effect is reported beside its unadjusted one, the slope of the outcome on it alone over the same
 rows, so a reader sees how much of an effect the others explain. Every adjusted effect of a horizon is one family,
-corrected by Benjamini-Hochberg at stats.FDR.
+corrected by Benjamini-Hochberg at the run's fdr. The thresholds named here are the run's (thresholds.py).
 
 Redundancy is read from the correlations between the indicators, with each one's variance inflation factor (VIF)
-reported beside them. Indicators correlated at least REDUNDANT_CORRELATION say the same thing, and their adjusted
+reported beside them. Indicators correlated at least redundant_correlation say the same thing, and their adjusted
 effects share it: collinearity widens both errors, so neither may be significant alone though together they matter.
 Each indicator with correlated ones is therefore also tested jointly with them (a Wald test of their effects all
 being zero, with the clustered covariance), so an effect they share is not lost. An indicator whose adjusted effect is
@@ -23,7 +23,7 @@ Each indicator's effect is also compared across sectors and regimes: the same re
 each regime's rows alone, with the indicators on the pooled scale so the subgroup effects compare with the pooled one.
 The subgroup effects are descriptive, with intervals and no tests.
 
-A regression is fitted only on MIN_SIGNAL_DATES distinct signal dates and MIN_ROWS_PER_COLUMN rows per column of its
+A regression is fitted only on min_signal_dates distinct signal dates and min_rows_per_column rows per column of its
 design; a model or subgroup not fitted says why (its 'reason').
 
 Like the ranking, the section describes the whole archive, gap included, and chooses no rule. The regression reads
@@ -37,16 +37,8 @@ import pandas as pd
 from app.breakoutiq.dataset import COMPLETE, ENDED
 from app.breakoutiq.indicators import MAIN_OUTCOME, OUTCOMES, VALUE, VALUES, correct, rank, value_frame
 from app.breakoutiq.mandatory import STRENGTH, STRENGTHS
-from app.breakoutiq.stats import (
-    CLUSTERS,
-    CONFIDENCE,
-    FDR,
-    MIN_SIGNAL_DATES,
-    Coefficient,
-    cluster_codes,
-    clustered_fit,
-    clustered_ols,
-)
+from app.breakoutiq.stats import CLUSTERS, Coefficient, cluster_codes, clustered_fit, clustered_ols
+from app.breakoutiq.thresholds import DEFAULTS, Thresholds
 from app.models import AnalysisResult
 
 SECTION = 'confounders'
@@ -71,21 +63,10 @@ SPLITS = ('sector', 'regime')
 # the level of a control a row has no value for
 UNKNOWN = 'unknown'
 
-# an indicator missing on more than this share of a horizon's complete outcomes is left out of its regression, so
-# one sparse indicator does not drop most rows from it
-MAX_MISSING_SHARE = 0.2
-# two indicators correlated at least this much (in absolute value) are named as saying the same thing
-REDUNDANT_CORRELATION = 0.8
-# an indicator whose variance inflation factor is at least this is mostly explained by the others
-REDUNDANT_VIF = 5.0
-
 # why an indicator is left out of a horizon's regression
 MISSING = 'missing'
 CONSTANT = 'constant'
 COLLINEAR = 'collinear'
-
-# a regression needs at least this many rows per column of its design (constant, fixed effects and indicators)
-MIN_ROWS_PER_COLUMN = 10
 
 # why a model or subgroup was not fitted
 NO_OUTCOMES = 'no complete outcomes'
@@ -98,7 +79,7 @@ NO_INDICATOR = 'no indicator to regress'
 _COLLINEAR_TOLERANCE = 1e-6
 
 
-def confounders(rows: pd.DataFrame) -> list[AnalysisResult]:
+def confounders(rows: pd.DataFrame, thresholds: Thresholds = DEFAULTS) -> list[AnalysisResult]:
     """
     The section's results from the analysis dataset (dataset.build_dataset): per horizon, the MODEL finding, then one
     'adjusted:<indicator>' finding per indicator of INDICATORS, in order, including those left out of the regression.
@@ -106,7 +87,7 @@ def confounders(rows: pd.DataFrame) -> list[AnalysisResult]:
     frame = value_frame(rows)
     results = []
     for horizon, at_horizon in frame.groupby('horizon', sort=True):
-        model, payloads = _horizon(at_horizon.reset_index(drop=True))
+        model, payloads = _horizon(at_horizon.reset_index(drop=True), thresholds)
         results.append(AnalysisResult(SECTION, MODEL, int(horizon), PAYLOAD_VERSION, model))
         results += [
             AnalysisResult(SECTION, f'{ADJUSTED}:{p["indicator"]}', int(horizon), PAYLOAD_VERSION, p) for p in payloads
@@ -114,7 +95,7 @@ def confounders(rows: pd.DataFrame) -> list[AnalysisResult]:
     return results
 
 
-def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
+def _horizon(rows: pd.DataFrame, thresholds: Thresholds) -> tuple[dict, list[dict]]:
     """One horizon's model payload and its indicators' payloads."""
     y = pd.to_numeric(rows[OUTCOMES[MAIN_OUTCOME].column], errors='coerce').to_numpy(dtype=float)
     complete = (rows['outcome_status'] == COMPLETE).to_numpy()
@@ -125,7 +106,7 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
     missing_share = {
         name: float(values.loc[observed, name].isna().mean()) if observed.any() else None for name in INDICATORS
     }
-    left_out = {name: MISSING for name in INDICATORS if (missing_share[name] or 0) > MAX_MISSING_SHARE}
+    left_out = {name: MISSING for name in INDICATORS if (missing_share[name] or 0) > thresholds.max_missing_share}
     candidates = [name for name in INDICATORS if name not in left_out]
     used = observed & values[candidates].notna().all(axis=1).to_numpy()
 
@@ -140,7 +121,7 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
     z = pd.DataFrame(index=fitted.index)
     if not observed.any():
         reason = NO_OUTCOMES
-    elif dates < MIN_SIGNAL_DATES:
+    elif dates < thresholds.min_signal_dates:
         reason = TOO_FEW_DATES
     else:
         for name in candidates:
@@ -149,7 +130,7 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
         scaled = [name for name in candidates if name not in left_out]
         z = (x[scaled] - means[scaled]) / sds[scaled]
         design = pd.concat([_fixed_effects(fixed, CONTROLS), z], axis=1)
-        if len(design) < MIN_ROWS_PER_COLUMN * design.shape[1]:
+        if len(design) < thresholds.min_rows_per_column * design.shape[1]:
             reason = TOO_FEW_ROWS
         else:
             kept = _independent(design)
@@ -160,7 +141,9 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
             if not regressed:
                 reason = NO_INDICATOR
             else:
-                fit = clustered_fit(y_used, design[kept], cluster_codes(fitted), of=regressed)
+                fit = clustered_fit(
+                    y_used, design[kept], cluster_codes(fitted), of=regressed, confidence=thresholds.confidence
+                )
                 reason = NOT_CLUSTERED if fit is None else None
     shown = fit is not None
     if not shown:
@@ -185,17 +168,17 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
         'correlations': {'indicators': regressed, 'matrix': correlations},
         'vif': vif,
         'scale': 'per standard deviation',
-        'max_missing_share': MAX_MISSING_SHARE,
-        'redundant_correlation': REDUNDANT_CORRELATION,
-        'redundant_vif': REDUNDANT_VIF,
-        'min_rows_per_column': MIN_ROWS_PER_COLUMN,
-        'min_signal_dates': MIN_SIGNAL_DATES,
-        'confidence': CONFIDENCE,
-        'fdr': FDR,
+        'max_missing_share': thresholds.max_missing_share,
+        'redundant_correlation': thresholds.redundant_correlation,
+        'redundant_vif': thresholds.redundant_vif,
+        'min_rows_per_column': thresholds.min_rows_per_column,
+        'min_signal_dates': thresholds.min_signal_dates,
+        'confidence': thresholds.confidence,
+        'fdr': thresholds.fdr,
         'clusters': list(CLUSTERS),
     }
 
-    subgroups = {split: _subgroups(fitted, y_used, z, fixed, split) for split in SPLITS}
+    subgroups = {split: _subgroups(fitted, y_used, z, fixed, split, thresholds) for split in SPLITS}
     payloads = []
     for name, kind in INDICATORS.items():
         payload = {
@@ -219,7 +202,7 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
             'significant': False,
             'rank': None,
             'vif': vif.get(name),
-            'high_vif': vif[name] >= REDUNDANT_VIF if name in vif else None,
+            'high_vif': vif[name] >= thresholds.redundant_vif if name in vif else None,
             'correlated': [],
             'joint': None,
             'redundant': None,
@@ -227,13 +210,19 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
             'by_sector': [],
             'by_regime': [],
             'sign_agreement': {split: None for split in SPLITS},
-            'min_signal_dates': MIN_SIGNAL_DATES,
-            'confidence': CONFIDENCE,
-            'fdr': FDR,
+            'min_signal_dates': thresholds.min_signal_dates,
+            'confidence': thresholds.confidence,
+            'fdr': thresholds.fdr,
             'clusters': list(CLUSTERS),
         }
         if shown and name in regressed:
-            alone = clustered_ols(y_used, pd.DataFrame({'const': 1.0, name: z[name]}), cluster_codes(fitted), of=[name])
+            alone = clustered_ols(
+                y_used,
+                pd.DataFrame({'const': 1.0, name: z[name]}),
+                cluster_codes(fitted),
+                of=[name],
+                confidence=thresholds.confidence,
+            )
             payload['shown'] = True
             payload['adjusted'] = _effect(fit.coefficients[name])
             payload['unadjusted'] = _effect(alone[name]) if alone else None
@@ -242,7 +231,7 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
             payload['correlated'] = [
                 {'indicator': other, 'r': correlations[index][j]}
                 for j, other in enumerate(regressed)
-                if j != index and abs(correlations[index][j]) >= REDUNDANT_CORRELATION
+                if j != index and abs(correlations[index][j]) >= thresholds.redundant_correlation
             ]
             if payload['correlated']:
                 block = [name, *(c['indicator'] for c in payload['correlated'])]
@@ -254,7 +243,7 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
                 payload['sign_agreement'][split] = _sign_agreement(payload['adjusted'], payload[f'by_{split}'])
         payloads.append(payload)
 
-    correct(payloads)
+    correct(payloads, thresholds.fdr)
     rank(payloads, effect='adjusted')
     _name_redundant(payloads)
     return model, payloads
@@ -263,7 +252,9 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
 _NO_EFFECT = {'estimate': None, 'se': None, 'ci_low': None, 'ci_high': None}
 
 
-def _subgroups(rows: pd.DataFrame, y: np.ndarray, z: pd.DataFrame, fixed: pd.DataFrame, split: str) -> list[dict]:
+def _subgroups(
+    rows: pd.DataFrame, y: np.ndarray, z: pd.DataFrame, fixed: pd.DataFrame, split: str, thresholds: Thresholds
+) -> list[dict]:
     """
     The regression fitted on each level of 'split' alone, holding the other controls fixed: each level's counts
     and, when it meets the minimum sample, each indicator's effect there.
@@ -286,14 +277,18 @@ def _subgroups(rows: pd.DataFrame, y: np.ndarray, z: pd.DataFrame, fixed: pd.Dat
         design = pd.concat(
             [_fixed_effects(fixed[mask].reset_index(drop=True), others), z[mask].reset_index(drop=True)], axis=1
         )
-        if dates < MIN_SIGNAL_DATES:
+        if dates < thresholds.min_signal_dates:
             counts['reason'] = TOO_FEW_DATES
-        elif len(design) < MIN_ROWS_PER_COLUMN * design.shape[1]:
+        elif len(design) < thresholds.min_rows_per_column * design.shape[1]:
             counts['reason'] = TOO_FEW_ROWS
         else:
             kept = _independent(design)
             reported = [name for name in z.columns if name in kept]
-            fit = clustered_ols(y[mask], design[kept], cluster_codes(at), of=reported) if reported else None
+            fit = (
+                clustered_ols(y[mask], design[kept], cluster_codes(at), of=reported, confidence=thresholds.confidence)
+                if reported
+                else None
+            )
             if fit is None:
                 counts['reason'] = NOT_CLUSTERED if reported else NO_INDICATOR
             else:

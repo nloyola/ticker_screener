@@ -6,8 +6,8 @@ Benjamini-Hochberg correction of a family of tests.
 Signals on the same day move together, and signals a few sessions apart share most of their outcome window, so
 resampling single signals would overstate certainty. The bootstrap resamples whole blocks of consecutive business
 days (Monday to Friday, holidays included) instead, each block as long as the horizon in sessions, so signals whose
-windows overlap are drawn together. An interval needs MIN_BLOCKS blocks: with fewer, the draws can only recombine a
-handful of block means, and the interval would understate the uncertainty.
+windows overlap are drawn together. An interval needs the run's min_blocks blocks (thresholds.py): with fewer, the
+draws can only recombine a handful of block means, and the interval would understate the uncertainty.
 
 A draw is how many times each block was drawn, and a figure's value on a draw is computed from per-block summaries
 rather than by copying rows, so a draw costs the same for a hundred thousand signals as for a hundred.
@@ -21,17 +21,10 @@ import pandas as pd
 import statsmodels.api as sm
 from statsmodels.stats.multitest import multipletests
 
-# a result needs observations (complete outcomes for a return, decided failures for the failure) on at least this
-# many distinct signal dates to be shown at all
-MIN_SIGNAL_DATES = 30
-# a bootstrap interval needs at least this many blocks of signal dates; with fewer, it is left out
-MIN_BLOCKS = 10
-# the confidence level of every interval, and the bootstrap's resamples and seed (fixed, so a run is reproducible)
-CONFIDENCE = 0.95
-BOOTSTRAP_RESAMPLES = 2000
+from app.breakoutiq.thresholds import DEFAULTS, Thresholds
+
+# the bootstrap's seed, fixed so a run is reproducible
 BOOTSTRAP_SEED = 51
-# the false discovery rate every family of tests is corrected to, by Benjamini-Hochberg
-FDR = 0.10
 # the columns a regression's standard errors are clustered by, two-way: signals of one date share the market's
 # move, and signals of one ticker share its own
 CLUSTERS = ('session_date', 'ticker')
@@ -58,16 +51,17 @@ def date_blocks(dates: pd.Series, block_sessions: int) -> np.ndarray:
 
 
 def block_bootstrap(
-    blocks: np.ndarray, figures: list[Figure], resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED
+    blocks: np.ndarray, figures: list[Figure], thresholds: Thresholds = DEFAULTS, seed: int = BOOTSTRAP_SEED
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    The CONFIDENCE percentile interval of each of 'figures', from 'resamples' draws of as many blocks as there are,
-    with replacement. 'blocks' is each row's block (date_blocks). Each figure's bounds are NaN when fewer than
-    MIN_BLOCKS blocks exist or no draw gave it a value.
+    The confidence percentile interval of each of 'figures', from the bootstrap_resamples draws of 'thresholds', each
+    of as many blocks as there are, with replacement. 'blocks' is each row's block (date_blocks). Each figure's bounds
+    are NaN when fewer than min_blocks blocks exist or no draw gave it a value.
     """
+    resamples = thresholds.bootstrap_resamples
     count = int(blocks.max()) + 1 if len(blocks) else 0
     low, high = np.full(len(figures), np.nan), np.full(len(figures), np.nan)
-    if count < MIN_BLOCKS:
+    if count < thresholds.min_blocks:
         return low, high
     rng = np.random.default_rng(seed)
     draws = np.empty((resamples, len(figures)))
@@ -78,7 +72,7 @@ def block_bootstrap(
         np.add.at(counts, (np.repeat(np.arange(k), count), chosen.ravel()), 1)
         for i, figure in enumerate(figures):
             draws[start : start + k, i] = figure(counts)
-    tail = (1 - CONFIDENCE) / 2 * 100
+    tail = (1 - thresholds.confidence) / 2 * 100
     valid = ~np.isnan(draws).all(axis=0)
     if valid.any():
         low[valid] = np.nanpercentile(draws[:, valid], tail, axis=0)
@@ -154,7 +148,7 @@ def block_median(values: np.ndarray, blocks: np.ndarray) -> Figure:
 
 @dataclass(frozen=True)
 class Coefficient:
-    """One regression coefficient: its estimate, standard error, CONFIDENCE interval and two-sided p-value."""
+    """One regression coefficient: its estimate, standard error, confidence interval and two-sided p-value."""
 
     estimate: float
     se: float
@@ -191,14 +185,18 @@ class ClusteredFit:
 
 
 def clustered_fit(
-    y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray, of: list[str] | None = None
+    y: np.ndarray,
+    exog: pd.DataFrame,
+    clusters: np.ndarray,
+    of: list[str] | None = None,
+    confidence: float = DEFAULTS.confidence,
 ) -> ClusteredFit | None:
     """
     The least-squares fit of 'y' on the columns of 'exog' (which must include any constant), with standard errors
     clustered two-way by the two columns of 'clusters' (integer codes, cluster_codes), Cameron, Gelbach and Miller's
     sum of the two one-way covariances less the one by their intersection, with statsmodels' small-sample
-    correction. Intervals and p-values use Student's t with one degree of freedom fewer than the smaller cluster
-    count.
+    correction. Intervals, at 'confidence', and p-values use Student's t with one degree of freedom fewer than the
+    smaller cluster count.
 
     The fit reports the Coefficient of each column of 'of' (every column when None), or is None when it cannot be
     clustered: fewer than two clusters on a side, or a variance of a reported column that comes out not positive
@@ -218,7 +216,7 @@ def clustered_fit(
     at = [columns.index(name) for name in reported]
     if not np.all(np.isfinite(se[at])) or np.any(se[at] <= 0):
         return None
-    interval = np.asarray(result.conf_int(alpha=1 - CONFIDENCE), dtype=float)
+    interval = np.asarray(result.conf_int(alpha=1 - confidence), dtype=float)
     params, pvalues = np.asarray(result.params, dtype=float), np.asarray(result.pvalues, dtype=float)
     coefficients = {
         columns[i]: Coefficient(*(float(v) for v in (params[i], se[i], interval[i, 0], interval[i, 1], pvalues[i])))
@@ -228,18 +226,22 @@ def clustered_fit(
 
 
 def clustered_ols(
-    y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray, of: list[str] | None = None
+    y: np.ndarray,
+    exog: pd.DataFrame,
+    clusters: np.ndarray,
+    of: list[str] | None = None,
+    confidence: float = DEFAULTS.confidence,
 ) -> dict[str, Coefficient] | None:
     """clustered_fit's reported coefficients, by column, or None when the fit cannot be clustered."""
-    fit = clustered_fit(y, exog, clusters, of)
+    fit = clustered_fit(y, exog, clusters, of, confidence)
     return None if fit is None else fit.coefficients
 
 
 def benjamini_hochberg(p_values: list[float]) -> list[float]:
     """
-    Each p-value adjusted by Benjamini-Hochberg over the family 'p_values'; a finding is significant at FDR when its
-    adjusted value is at most FDR.
+    Each p-value adjusted by Benjamini-Hochberg over the family 'p_values'; a finding is significant at the run's fdr
+    when its adjusted value is at most that rate. The adjusted values do not depend on the rate.
     """
     if not p_values:
         return []
-    return [float(p) for p in multipletests(p_values, alpha=FDR, method='fdr_bh')[1]]
+    return [float(p) for p in multipletests(p_values, method='fdr_bh')[1]]

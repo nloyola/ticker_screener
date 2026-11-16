@@ -14,7 +14,8 @@ import pytest
 
 from app.breakoutiq.baseline import ALL, MEASURES, PAYLOAD_VERSION, SECTION, SPLITS, UNKNOWN, baseline
 from app.breakoutiq.dataset import load_dataset
-from app.breakoutiq.stats import MIN_BLOCKS, MIN_SIGNAL_DATES, block_bootstrap, block_mean, block_median, date_blocks
+from app.breakoutiq.stats import block_bootstrap, block_mean, block_median, date_blocks
+from app.breakoutiq.thresholds import MIN_BLOCKS, MIN_SIGNAL_DATES, Thresholds
 from app.db import init_db
 from app.repositories.analysis_data_repo import AnalysisDataRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
@@ -58,7 +59,7 @@ def test_the_measures_are_the_figures_constructed():
     # a repeating pattern of net returns, so every figure is known: three of four positive, mean 1.5, median 2
     net = np.tile([4.0, 2.0, 2.0, -2.0], 20)
     failed = np.tile([1, 0, 0, 0, 0], 16)
-    results = baseline(_rows(net, breakout_failed=failed), resamples=200)
+    results = baseline(_rows(net, breakout_failed=failed), Thresholds(bootstrap_resamples=200))
     m = _payload(results)['measures']
 
     assert m['positive_rate']['estimate'] == pytest.approx(0.75)
@@ -78,7 +79,7 @@ def test_the_measures_are_the_figures_constructed():
 
 
 def test_identical_returns_give_an_interval_of_that_return():
-    m = _payload(baseline(_rows([3.0] * 60), resamples=100))['measures']
+    m = _payload(baseline(_rows([3.0] * 60), Thresholds(bootstrap_resamples=100)))['measures']
 
     assert m['net_return_mean'] == {'estimate': 3.0, 'ci_low': 3.0, 'ci_high': 3.0, 'n': 60}
     assert m['positive_rate']['ci_low'] == m['positive_rate']['ci_high'] == 1.0
@@ -93,7 +94,9 @@ def test_the_interval_covers_the_true_mean_and_median_as_often_as_its_confidence
     sims = 200
     for sim in range(sims):
         net = 1.0 + np.repeat(rng.normal(0, 3, 250), 4) + rng.normal(0, 1, 1000)
-        low, high = block_bootstrap(blocks, [block_mean(net, blocks), block_median(net, blocks)], 200, seed=sim)
+        low, high = block_bootstrap(
+            blocks, [block_mean(net, blocks), block_median(net, blocks)], Thresholds(bootstrap_resamples=200), seed=sim
+        )
         covered += (low <= 1.0) & (1.0 <= high)
         block_widths.append(high[0] - low[0])
         naive_widths.append(2 * 1.96 * net.std(ddof=1) / np.sqrt(len(net)))
@@ -132,7 +135,9 @@ def test_a_draws_mean_and_median_are_numpys_on_the_drawn_rows(size):
 
 
 def test_one_block_gives_no_interval():
-    low, high = block_bootstrap(np.zeros(10, dtype=int), [lambda counts: counts.sum(axis=1)], 50)
+    low, high = block_bootstrap(
+        np.zeros(10, dtype=int), [lambda counts: counts.sum(axis=1)], Thresholds(bootstrap_resamples=50)
+    )
 
     assert np.isnan(low).all() and np.isnan(high).all()
 
@@ -152,7 +157,7 @@ def test_ended_horizons_are_counted_but_never_measured():
         mae_pct=np.nan,
         breakout_failed=1,
     )
-    payload = _payload(baseline(pd.concat([rows, ended], ignore_index=True), resamples=50))
+    payload = _payload(baseline(pd.concat([rows, ended], ignore_index=True), Thresholds(bootstrap_resamples=50)))
 
     assert (payload['signals'], payload['complete'], payload['censored']) == (45, 40, 5)
     assert payload['measures']['net_return_mean']['n'] == 40
@@ -164,7 +169,7 @@ def test_ended_horizons_are_counted_but_never_measured():
 def test_a_group_on_too_few_dates_shows_counts_and_no_measures():
     # two signals a date on one date fewer than the minimum
     dates = np.repeat(SESSIONS[: MIN_SIGNAL_DATES - 1], 2)
-    payload = _payload(baseline(_rows([1.0] * len(dates), dates), resamples=50))
+    payload = _payload(baseline(_rows([1.0] * len(dates), dates), Thresholds(bootstrap_resamples=50)))
 
     assert payload['shown'] is False
     assert payload['measures'] == {}
@@ -178,7 +183,7 @@ def test_a_group_on_too_few_dates_shows_counts_and_no_measures():
 def test_an_undecided_failure_or_missing_benchmark_is_left_out_of_its_rate():
     rows = _rows([1.0] * 40, breakout_failed=[None] * 10 + [1] * 30)
     rows.loc[:19, 'excess_return_pct'] = np.nan
-    m = _payload(baseline(rows, resamples=50))['measures']
+    m = _payload(baseline(rows, Thresholds(bootstrap_resamples=50)))['measures']
 
     assert m['failure_rate']['n'] == 30 and m['failure_rate']['estimate'] == 1.0
     assert m['outperformance_rate']['n'] == 20
@@ -203,7 +208,7 @@ def test_every_split_partitions_the_signals_at_each_horizon():
         ],
         ignore_index=True,
     )
-    results = baseline(rows, resamples=20)
+    results = baseline(rows, Thresholds(bootstrap_resamples=20))
 
     assert {r.section for r in results} == {SECTION}
     assert {r.payload_version for r in results} == {PAYLOAD_VERSION}
@@ -284,7 +289,7 @@ def _archive(path: str, signals: int) -> None:
 
 def test_on_an_archive_the_counts_equal_its_resolved_outcomes(db):
     _archive(db.db_path, 300)
-    results = baseline(load_dataset(db, with_history=False), resamples=20)
+    results = baseline(load_dataset(db, with_history=False), Thresholds(bootstrap_resamples=20))
 
     with sqlite3.connect(db.db_path) as con:
         archive = con.execute(
@@ -308,7 +313,7 @@ def test_a_group_on_too_few_blocks_shows_its_measures_with_no_intervals():
     # 40 consecutive dates at the 120-session horizon: one block, enough dates
     rows = _rows(np.random.default_rng(3).normal(1, 2, 40), horizon=120)
 
-    payload = _payload(baseline(rows, resamples=50), horizon=120)
+    payload = _payload(baseline(rows, Thresholds(bootstrap_resamples=50)), horizon=120)
 
     assert payload['shown'] and payload['blocks'] == 1 < payload['min_blocks'] == MIN_BLOCKS
     mean = payload['measures']['net_return_mean']
@@ -320,7 +325,7 @@ def test_the_bootstrap_needs_min_blocks():
     values = np.arange(40, dtype=float)
     few, enough = np.arange(40) % (MIN_BLOCKS - 1), np.arange(40) % MIN_BLOCKS
 
-    low, _ = block_bootstrap(few, [block_mean(values, few)], resamples=50)
+    low, _ = block_bootstrap(few, [block_mean(values, few)], Thresholds(bootstrap_resamples=50))
     assert np.isnan(low[0])
-    low, high = block_bootstrap(enough, [block_mean(values, enough)], resamples=50)
+    low, high = block_bootstrap(enough, [block_mean(values, enough)], Thresholds(bootstrap_resamples=50))
     assert low[0] < high[0]

@@ -4,26 +4,17 @@ source, market and regime, each measure with a block-bootstrap confidence interv
 
 The baseline describes the whole archive, so it covers every period, gap included; the sections that compare periods
 leave the gap out. Returns are measured on complete outcomes only; ended (censored) horizons are counted, never
-dropped. A group with complete outcomes on fewer than MIN_SIGNAL_DATES distinct signal dates keeps its counts but
-shows no measures, and one whose signal dates fall in fewer than MIN_BLOCKS bootstrap blocks shows its measures with
-no intervals.
+dropped. A group with complete outcomes on fewer than the run's min_signal_dates distinct signal dates (thresholds.py)
+keeps its counts but shows no measures, and one whose signal dates fall in fewer than min_blocks bootstrap blocks
+shows its measures with no intervals.
 """
 
 import numpy as np
 import pandas as pd
 
 from app.breakoutiq.dataset import COMPLETE, ENDED
-from app.breakoutiq.stats import (
-    BOOTSTRAP_RESAMPLES,
-    BOOTSTRAP_SEED,
-    CONFIDENCE,
-    MIN_BLOCKS,
-    MIN_SIGNAL_DATES,
-    block_bootstrap,
-    block_mean,
-    block_median,
-    date_blocks,
-)
+from app.breakoutiq.stats import BOOTSTRAP_SEED, block_bootstrap, block_mean, block_median, date_blocks
+from app.breakoutiq.thresholds import DEFAULTS, Thresholds
 from app.models import AnalysisResult
 
 SECTION = 'baseline'
@@ -58,9 +49,7 @@ MEASURES = (
 _USE_MEAN = np.array([not name.endswith('_median') for name in MEASURES])
 
 
-def baseline(
-    rows: pd.DataFrame, resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED
-) -> list[AnalysisResult]:
+def baseline(rows: pd.DataFrame, thresholds: Thresholds = DEFAULTS, seed: int = BOOTSTRAP_SEED) -> list[AnalysisResult]:
     """
     The baseline's results from the analysis dataset (dataset.build_dataset): one per horizon and group, the group
     ALL first, then each value of each split in SPLITS. The finding is ALL or '<split>:<value>'.
@@ -72,17 +61,17 @@ def baseline(
         for split in SPLITS:
             groups += [(f'{split}:{value}', split, group) for value, group in at_horizon.groupby(split, sort=True)]
         for finding, split, group in groups:
-            payload = _payload(group, int(horizon), resamples, seed)
+            payload = _payload(group, int(horizon), thresholds, seed)
             payload = {'split': split, 'group': finding.split(':', 1)[1] if split else ALL, **payload}
             results.append(AnalysisResult(SECTION, finding, int(horizon), PAYLOAD_VERSION, payload))
     return results
 
 
-def _payload(group: pd.DataFrame, horizon: int, resamples: int, seed: int) -> dict:
+def _payload(group: pd.DataFrame, horizon: int, thresholds: Thresholds, seed: int) -> dict:
     """One group's counts at 'horizon', and its measures with their intervals when it meets the minimum sample."""
     complete = group['outcome_status'] == COMPLETE
     complete_dates = int(group.loc[complete, 'session_date'].nunique())
-    shown = complete_dates >= MIN_SIGNAL_DATES
+    shown = complete_dates >= thresholds.min_signal_dates
     blocks = date_blocks(group['session_date'], horizon)
     payload = {
         'signals': int(group['signal_id'].nunique()),
@@ -91,20 +80,20 @@ def _payload(group: pd.DataFrame, horizon: int, resamples: int, seed: int) -> di
         'complete_signal_dates': complete_dates,
         'censored': int((group['outcome_status'] == ENDED).sum()),
         'shown': shown,
-        'min_signal_dates': MIN_SIGNAL_DATES,
-        'confidence': CONFIDENCE,
+        'min_signal_dates': thresholds.min_signal_dates,
+        'confidence': thresholds.confidence,
         'block_sessions': horizon,
         'blocks': int(blocks.max()) + 1 if len(blocks) else 0,
-        'min_blocks': MIN_BLOCKS,
-        'resamples': resamples,
+        'min_blocks': thresholds.min_blocks,
+        'resamples': thresholds.bootstrap_resamples,
         'measures': {},
     }
     if shown:
-        payload['measures'] = measures(group, horizon, resamples, seed)
+        payload['measures'] = measures(group, horizon, thresholds, seed)
     return payload
 
 
-def measures(group: pd.DataFrame, block_sessions: int, resamples: int, seed: int) -> dict:
+def measures(group: pd.DataFrame, block_sessions: int, thresholds: Thresholds, seed: int = BOOTSTRAP_SEED) -> dict:
     """
     Each of MEASURES on 'group' as {'estimate', 'ci_low', 'ci_high', 'n'}: the figure on the whole group, its interval
     from a bootstrap over blocks of 'block_sessions' sessions, and the observations it rests on. A figure with no
@@ -116,7 +105,7 @@ def measures(group: pd.DataFrame, block_sessions: int, resamples: int, seed: int
         (block_mean if use_mean else block_median)(row, blocks) for row, use_mean in zip(values, _USE_MEAN, strict=True)
     ]
     estimate = [_estimate(row, use_mean) for row, use_mean in zip(values, _USE_MEAN, strict=True)]
-    low, high = block_bootstrap(blocks, figures, resamples, seed)
+    low, high = block_bootstrap(blocks, figures, thresholds, seed)
     counts = (~np.isnan(values)).sum(axis=1)
     return {
         name: {

@@ -8,14 +8,14 @@ difference in shares), with standard errors clustered two-way by signal date and
 The returns (HORIZON_OUTCOMES) are compared at each horizon, every comparison of a horizon one family. The breakout
 failure is the signal's, decided over its first sessions whatever the horizon, so it is compared once over every
 signal with a decided failure (SIGNAL_OUTCOMES), its results stored with no horizon, its comparisons one family of
-their own. Each family is corrected by Benjamini-Hochberg at stats.FDR, and each result keeps both its raw and its
-adjusted p-value.
+their own. Each family is corrected by Benjamini-Hochberg at the run's fdr (thresholds.py), and each result keeps both
+its raw and its adjusted p-value.
 
 Like the baseline, the ranking describes the whole archive, gap included: it chooses no rule, which only the
 candidate search does, on development alone. Returns are compared on complete outcomes only; ended (censored)
 horizons are counted in each group, never dropped. A comparison whose two groups do not each hold observations
-(complete outcomes for a return, decided failures for the failure) on MIN_SIGNAL_DATES distinct signal dates is not
-shown, and is not tested.
+(complete outcomes for a return, decided failures for the failure) on the run's min_signal_dates distinct signal
+dates is not shown, and is not tested.
 """
 
 from collections.abc import Callable
@@ -26,15 +26,8 @@ import pandas as pd
 
 from app.analyzer import SECONDARY_INDICATORS
 from app.breakoutiq.dataset import COMPLETE, ENDED, pct_change
-from app.breakoutiq.stats import (
-    CLUSTERS,
-    CONFIDENCE,
-    FDR,
-    MIN_SIGNAL_DATES,
-    benjamini_hochberg,
-    cluster_codes,
-    clustered_ols,
-)
+from app.breakoutiq.stats import CLUSTERS, benjamini_hochberg, cluster_codes, clustered_ols
+from app.breakoutiq.thresholds import DEFAULTS, Thresholds
 from app.models import AnalysisResult
 
 SECTION = 'indicators'
@@ -134,7 +127,7 @@ BANDS = 5
 _FLAG_GROUPS = ('fail', 'pass')
 
 
-def indicators(rows: pd.DataFrame) -> list[AnalysisResult]:
+def indicators(rows: pd.DataFrame, thresholds: Thresholds = DEFAULTS) -> list[AnalysisResult]:
     """
     The section's results from the analysis dataset (dataset.build_dataset): per horizon, one per indicator and each
     of HORIZON_OUTCOMES, then, with no horizon, one per indicator and each of SIGNAL_OUTCOMES; VALUES first, then
@@ -152,14 +145,14 @@ def indicators(rows: pd.DataFrame) -> list[AnalysisResult]:
                 else:
                     groups, labels = _flag_groups(at[name]), _FLAG_GROUPS
                 for outcome in outcomes:
-                    payload = comparison(context, groups.to_numpy(dtype=float), labels, outcome)
+                    payload = comparison(context, groups.to_numpy(dtype=float), labels, outcome, thresholds)
                     payload = {'kind': kind, 'indicator': name, 'outcome': outcome, **payload}
                     if kind == VALUE:
                         payload['edges'] = edges[name]
                     payloads.append(payload)
         return payloads
 
-    return compare_all(SECTION, PAYLOAD_VERSION, frame, compare)
+    return compare_all(SECTION, PAYLOAD_VERSION, frame, compare, thresholds)
 
 
 def compare_all(
@@ -167,11 +160,12 @@ def compare_all(
     payload_version: int,
     frame: pd.DataFrame,
     compare: Callable[['Horizon', pd.DataFrame, tuple[str, ...]], list[dict]],
+    thresholds: Thresholds = DEFAULTS,
 ) -> list[AnalysisResult]:
     """
     A comparing section's results: 'compare' run on each horizon's rows for HORIZON_OUTCOMES, then once on one row
-    per signal for SIGNAL_OUTCOMES, with no horizon. Each call's payloads are one family, corrected and ranked, and
-    stored as '<kind>:<indicator>:<outcome>'.
+    per signal for SIGNAL_OUTCOMES, with no horizon. Each call's payloads are one family, corrected at the fdr of
+    'thresholds' and ranked, and stored as '<kind>:<indicator>:<outcome>'.
     """
     families = [
         (int(horizon), compare(Horizon.of(at), at, HORIZON_OUTCOMES))
@@ -182,7 +176,7 @@ def compare_all(
         families.append((None, compare(Horizon.of(signals, per_signal=True), signals, SIGNAL_OUTCOMES)))
     results = []
     for horizon, payloads in families:
-        correct(payloads)
+        correct(payloads, thresholds.fdr)
         rank(payloads)
         results += [
             AnalysisResult(section, f'{p["kind"]}:{p["indicator"]}:{p["outcome"]}', horizon, payload_version, p)
@@ -265,10 +259,17 @@ def _flag_groups(values: pd.Series) -> pd.Series:
     return pd.to_numeric(values, errors='coerce') + 1
 
 
-def comparison(context: Horizon, groups: np.ndarray, labels: tuple[str, ...] | None, outcome: str) -> dict:
+def comparison(
+    context: Horizon,
+    groups: np.ndarray,
+    labels: tuple[str, ...] | None,
+    outcome: str,
+    thresholds: Thresholds = DEFAULTS,
+) -> dict:
     """
     One indicator's comparison on 'outcome' at a horizon: every group's counts and mean, and the effect of the
-    highest group over the lowest, with its clustered interval and raw p-value when both meet the minimum sample.
+    highest group over the lowest, with its clustered interval and raw p-value when both meet the minimum sample of
+    'thresholds'.
     'groups' numbers each row's group from 1 (NaN in none), and 'labels' names group N at N - 1, or None to name
     each by its number.
     """
@@ -288,7 +289,7 @@ def comparison(context: Horizon, groups: np.ndarray, labels: tuple[str, ...] | N
                 'n': int(seen.sum()),
                 'signal_dates': dates,
                 'censored': int((in_group & context.ended).sum()),
-                'mean': float(y[seen].mean()) if dates >= MIN_SIGNAL_DATES else None,
+                'mean': float(y[seen].mean()) if dates >= thresholds.min_signal_dates else None,
             }
         )
 
@@ -302,21 +303,21 @@ def comparison(context: Horizon, groups: np.ndarray, labels: tuple[str, ...] | N
         'p_adjusted': None,
         'significant': False,
         'rank': None,
-        'min_signal_dates': MIN_SIGNAL_DATES,
-        'confidence': CONFIDENCE,
-        'fdr': FDR,
+        'min_signal_dates': thresholds.min_signal_dates,
+        'confidence': thresholds.confidence,
+        'fdr': thresholds.fdr,
         'clusters': list(CLUSTERS),
     }
     if len(numbers) < 2:
         return payload
     low, high = group_payloads[0], group_payloads[-1]
     payload['compared'] = [low['group'], high['group']]
-    if min(low['signal_dates'], high['signal_dates']) < MIN_SIGNAL_DATES:
+    if min(low['signal_dates'], high['signal_dates']) < thresholds.min_signal_dates:
         return payload
 
     tested = observed & ((groups == numbers[0]) | (groups == numbers[-1]))
     exog = pd.DataFrame({'const': 1.0, 'effect': (groups[tested] == numbers[-1]).astype(float)})
-    fit = clustered_ols(y[tested], exog, context.clusters[tested], of=['effect'])
+    fit = clustered_ols(y[tested], exog, context.clusters[tested], of=['effect'], confidence=thresholds.confidence)
     if fit is None:
         return payload
     effect = fit['effect']
@@ -338,13 +339,13 @@ def _distinct(codes: np.ndarray, mask: np.ndarray) -> int:
     return len(np.unique(codes[mask]))
 
 
-def correct(payloads: list[dict]) -> None:
+def correct(payloads: list[dict], fdr: float) -> None:
     """Sets each tested payload's adjusted p-value over the family 'payloads', and whether it is significant at
-    FDR."""
+    'fdr'."""
     tested = [p for p in payloads if p['p_value'] is not None]
     for payload, adjusted in zip(tested, benjamini_hochberg([p['p_value'] for p in tested]), strict=True):
         payload['p_adjusted'] = adjusted
-        payload['significant'] = adjusted <= FDR
+        payload['significant'] = adjusted <= fdr
 
 
 def rank(payloads: list[dict], effect: str = 'effect') -> None:

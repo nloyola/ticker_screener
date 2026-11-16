@@ -15,8 +15,6 @@ from app.breakoutiq.candidates import (
     ABOVE,
     BELOW_ECONOMIC_BAR,
     CONDITION_INDICATORS,
-    MAX_CANDIDATES,
-    MIN_NET_EXCESS_RETURN,
     NOT_CONFIRMED_ON_TEST,
     NOT_CONFIRMED_ON_VALIDATION,
     NOT_TESTED_ON_TEST,
@@ -34,6 +32,7 @@ from app.breakoutiq.candidates import (
 )
 from app.breakoutiq.dataset import DEVELOPMENT, GAP, TEST, VALIDATION
 from app.breakoutiq.indicators import FLAG, FLAGS, SECONDARY, VALUES
+from app.breakoutiq.thresholds import DEFAULTS, MAX_CANDIDATES, MIN_NET_EXCESS_RETURN
 from app.signal_paths import HORIZONS
 
 SESSIONS = pd.bdate_range('2016-01-04', periods=600)
@@ -167,6 +166,20 @@ def test_a_rule_that_holds_below_the_economic_bar_stays_preliminary():
     assert best['expected_excess_return'] < MIN_NET_EXCESS_RETURN[20]
     assert best['label'] == PRELIMINARY
     assert best['reason'] == BELOW_ECONOMIC_BAR
+
+
+def test_a_lower_economic_bar_validates_the_rule_the_default_bar_holds_back():
+    rows = _plant_volume(_dataset(1))
+    rows['excess_return_pct'] -= 3.5
+    kept = _rules(candidates(rows))[0]['expected_excess_return']
+    lower = DEFAULTS.with_bars({20: kept - 0.01})
+
+    best = _rules(candidates(rows, lower))[0]
+
+    assert _indicators(best) == {'volume_ratio'}
+    assert best['expected_excess_return'] == kept
+    assert best['min_net_excess_return'] == kept - 0.01
+    assert best['label'] == VALIDATED and best['reason'] is None
 
 
 def test_no_rule_is_scored_on_test_more_than_once_per_run(monkeypatch):

@@ -16,7 +16,7 @@ from app.breakoutiq.mandatory import (
     STRENGTHS,
     mandatory,
 )
-from app.breakoutiq.stats import FDR, MIN_SIGNAL_DATES
+from app.breakoutiq.thresholds import FDR, MIN_SIGNAL_DATES
 
 SESSIONS = pd.bdate_range('2016-01-04', periods=600)
 

@@ -21,14 +21,13 @@ from app.breakoutiq.confounders import (
     MODEL,
     NO_OUTCOMES,
     PAYLOAD_VERSION,
-    REDUNDANT_CORRELATION,
-    REDUNDANT_VIF,
     SECTION,
     TOO_FEW_ROWS,
     confounders,
 )
 from app.breakoutiq.indicators import VALUES
 from app.breakoutiq.mandatory import STRENGTHS
+from app.breakoutiq.thresholds import REDUNDANT_CORRELATION, REDUNDANT_VIF
 
 SESSIONS = pd.bdate_range('2016-01-04', periods=600)
 _SECTORS = ('Energy', 'Health', 'Technology')

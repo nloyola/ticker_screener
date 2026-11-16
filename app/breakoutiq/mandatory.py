@@ -7,7 +7,7 @@ passed each rule, never signals that passed it with signals that did not: it can
 and every result says so. Each strength is cut into quantile bands and its highest band compared with its lowest, as
 the indicator ranking compares a raw value (indicators.comparison), on the same outcomes, with errors clustered by
 signal date and ticker, the returns at each horizon and the breakout failure once over the signals, each horizon's
-comparisons, and the failure's, one family corrected by Benjamini-Hochberg at stats.FDR (indicators.compare_all).
+comparisons, and the failure's, one family corrected by Benjamini-Hochberg at the run's fdr (indicators.compare_all).
 Like the ranking, it describes the whole archive, gap included, and chooses no rule.
 """
 
@@ -15,6 +15,7 @@ import pandas as pd
 
 from app.analyzer import BREAKOUT_WINDOWS, SMA_DAYS, SMA_RISING_DAYS, VOLUME_RATIO_MIN
 from app.breakoutiq.indicators import Horizon, band_edges, bands, compare_all, comparison
+from app.breakoutiq.thresholds import DEFAULTS, Thresholds
 from app.models import AnalysisResult
 
 SECTION = 'mandatory'
@@ -40,7 +41,7 @@ NECESSITY_NOTE = (
 )
 
 
-def mandatory(rows: pd.DataFrame) -> list[AnalysisResult]:
+def mandatory(rows: pd.DataFrame, thresholds: Thresholds = DEFAULTS) -> list[AnalysisResult]:
     """
     The section's results from the analysis dataset (dataset.build_dataset): per horizon, one per strength and each
     of indicators.HORIZON_OUTCOMES, then, with no horizon, one per strength and each of indicators.SIGNAL_OUTCOMES;
@@ -53,7 +54,7 @@ def mandatory(rows: pd.DataFrame) -> list[AnalysisResult]:
         for name, rule in STRENGTHS.items():
             groups = bands(at[name], edges[name]).to_numpy(dtype=float)
             for outcome in outcomes:
-                payload = comparison(context, groups, None, outcome)
+                payload = comparison(context, groups, None, outcome, thresholds)
                 payloads.append(
                     {
                         'kind': STRENGTH,
@@ -69,4 +70,4 @@ def mandatory(rows: pd.DataFrame) -> list[AnalysisResult]:
                 )
         return payloads
 
-    return compare_all(SECTION, PAYLOAD_VERSION, rows, compare)
+    return compare_all(SECTION, PAYLOAD_VERSION, rows, compare, thresholds)
