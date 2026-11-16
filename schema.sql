@@ -274,6 +274,84 @@ CREATE TABLE IF NOT EXISTS signal (
 
 CREATE INDEX IF NOT EXISTS idx_signal_session_date ON signal(session_date);
 
+-- Each signal's own price path, so its performance survives price_data being rewritten by every run and deleted
+-- when the dashboard removes a ticker: one row per signal and session, session_index 0 the signal session and N the
+-- Nth session after it, up to the 120-session horizon. The ticker's open, high, low, close and volume, and its
+-- market's benchmark's (BENCHMARKS in app/markets.py) open and close, the two benchmark_price keeps, all as that
+-- session's price_data and benchmark_price held them in the run that last wrote the path. A run rewrites a path that
+-- is not frozen whole, so every value in it shares one adjustment basis. Not market data: db-init and the
+-- dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from before
+-- it; change both together.
+CREATE TABLE IF NOT EXISTS signal_price (
+       signal_id INTEGER NOT NULL REFERENCES signal (id),
+       session_index INTEGER NOT NULL CHECK (session_index BETWEEN 0 AND 120),
+       session_date TEXT NOT NULL CHECK (date(session_date) IS session_date),
+       open REAL,
+       high REAL,
+       low REAL,
+       close REAL NOT NULL,
+       volume INTEGER,
+       benchmark_open REAL,
+       benchmark_close REAL,
+       PRIMARY KEY (signal_id, session_index),
+       UNIQUE (signal_id, session_date)
+);
+
+-- One row per signal and horizon (5, 10, 20, 40, 60 and 120 sessions after the signal session). Entry is the open
+-- of the session after the signal session, exit the close of the horizon's session; the returns are percentages,
+-- gross and net of the round-trip cost in basis points it was computed with, the benchmark's over the same entry
+-- open to exit close, and the excess return the net return over the benchmark's. mfe_pct and mae_pct are the highest
+-- high and lowest low up to the horizon against the entry. status is pending until the horizon's session is in the
+-- path, complete once it is, and then never recomputed, or ended when the ticker stopped getting prices first, with
+-- the reason and the last session it had prices for. Not market data: db-init and the dashboard's ticker removals
+-- never touch it. The twelfth upgrade in app/db.py creates it in databases from before it; change both together.
+CREATE TABLE IF NOT EXISTS signal_outcome (
+       signal_id INTEGER NOT NULL REFERENCES signal (id),
+       horizon INTEGER NOT NULL CHECK (horizon IN (5, 10, 20, 40, 60, 120)),
+       status TEXT NOT NULL CHECK (status IN ('pending', 'complete', 'ended')),
+       entry_date TEXT CHECK (date(entry_date) IS entry_date),
+       entry_price REAL,
+       exit_date TEXT CHECK (date(exit_date) IS exit_date),
+       exit_price REAL,
+       cost_bps INTEGER CHECK (cost_bps >= 0),
+       gross_return_pct REAL,
+       net_return_pct REAL,
+       benchmark_return_pct REAL,
+       excess_return_pct REAL,
+       mfe_pct REAL,
+       mae_pct REAL,
+       ended_reason TEXT,
+       last_session_date TEXT CHECK (date(last_session_date) IS last_session_date),
+       completed_at TIMESTAMP,
+       updated_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+       CHECK ((status = 'complete') = (completed_at IS NOT NULL)),
+       CHECK (status <> 'complete' OR (entry_date IS NOT NULL AND entry_price IS NOT NULL
+              AND exit_date IS NOT NULL AND exit_price IS NOT NULL AND cost_bps IS NOT NULL
+              AND gross_return_pct IS NOT NULL AND net_return_pct IS NOT NULL
+              AND mfe_pct IS NOT NULL AND mae_pct IS NOT NULL)),
+       CHECK ((status = 'ended') = (ended_reason IS NOT NULL)),
+       CHECK ((status = 'ended') = (last_session_date IS NOT NULL)),
+       PRIMARY KEY (signal_id, horizon)
+);
+
+-- One row per tracked signal, what is decided once for the signal rather than per horizon. path_frozen_at is when
+-- its path in signal_price reached the 120-session horizon, after which no run rewrites it. breakout_level is the
+-- level the breakout cleared: the prior 60-day high when the 60-day breakout passed, the prior 20-day high otherwise.
+-- breakout_failed is NULL until decided, 1 once a close in the 10 sessions after the signal session is below that
+-- level, with the first such session's date, and 0 once all 10 have closed at or above it. Not market data: db-init
+-- and the dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from
+-- before it; change both together.
+CREATE TABLE IF NOT EXISTS signal_track (
+       signal_id INTEGER NOT NULL PRIMARY KEY REFERENCES signal (id),
+       path_frozen_at TIMESTAMP,
+       breakout_level REAL,
+       breakout_failed INTEGER CHECK (breakout_failed IN (0, 1)),
+       failure_date TEXT CHECK (date(failure_date) IS failure_date),
+       failure_decided_at TIMESTAMP,
+       CHECK ((breakout_failed IS 1) = (failure_date IS NOT NULL)),
+       CHECK ((breakout_failed IS NULL) = (failure_decided_at IS NULL))
+);
+
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
 -- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in
 -- app/db.py creates it in databases from before it; change both together.

@@ -424,6 +424,69 @@ def _add_signal(con: sqlite3.Connection) -> None:
     con.execute('CREATE INDEX IF NOT EXISTS idx_signal_session_date ON signal(session_date)')
 
 
+def _add_signal_tracking(con: sqlite3.Connection) -> None:
+    """
+    Version 12: signal_price, signal_outcome and signal_track, each signal's price path, its outcome per horizon and
+    what is decided once for it, which schema.sql only creates when db-init runs.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS signal_price (
+               signal_id INTEGER NOT NULL REFERENCES signal (id),
+               session_index INTEGER NOT NULL CHECK (session_index BETWEEN 0 AND 120),
+               session_date TEXT NOT NULL CHECK (date(session_date) IS session_date),
+               open REAL,
+               high REAL,
+               low REAL,
+               close REAL NOT NULL,
+               volume INTEGER,
+               benchmark_open REAL,
+               benchmark_close REAL,
+               PRIMARY KEY (signal_id, session_index),
+               UNIQUE (signal_id, session_date)
+        )""")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS signal_outcome (
+               signal_id INTEGER NOT NULL REFERENCES signal (id),
+               horizon INTEGER NOT NULL CHECK (horizon IN (5, 10, 20, 40, 60, 120)),
+               status TEXT NOT NULL CHECK (status IN ('pending', 'complete', 'ended')),
+               entry_date TEXT CHECK (date(entry_date) IS entry_date),
+               entry_price REAL,
+               exit_date TEXT CHECK (date(exit_date) IS exit_date),
+               exit_price REAL,
+               cost_bps INTEGER CHECK (cost_bps >= 0),
+               gross_return_pct REAL,
+               net_return_pct REAL,
+               benchmark_return_pct REAL,
+               excess_return_pct REAL,
+               mfe_pct REAL,
+               mae_pct REAL,
+               ended_reason TEXT,
+               last_session_date TEXT CHECK (date(last_session_date) IS last_session_date),
+               completed_at TIMESTAMP,
+               updated_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+               CHECK ((status = 'complete') = (completed_at IS NOT NULL)),
+               CHECK (status <> 'complete' OR (entry_date IS NOT NULL AND entry_price IS NOT NULL
+                      AND exit_date IS NOT NULL AND exit_price IS NOT NULL AND cost_bps IS NOT NULL
+                      AND gross_return_pct IS NOT NULL AND net_return_pct IS NOT NULL
+                      AND mfe_pct IS NOT NULL AND mae_pct IS NOT NULL)),
+               CHECK ((status = 'ended') = (ended_reason IS NOT NULL)),
+               CHECK ((status = 'ended') = (last_session_date IS NOT NULL)),
+               PRIMARY KEY (signal_id, horizon)
+        )""")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS signal_track (
+               signal_id INTEGER NOT NULL PRIMARY KEY REFERENCES signal (id),
+               path_frozen_at TIMESTAMP,
+               breakout_level REAL,
+               breakout_failed INTEGER CHECK (breakout_failed IN (0, 1)),
+               failure_date TEXT CHECK (date(failure_date) IS failure_date),
+               failure_decided_at TIMESTAMP,
+               CHECK ((breakout_failed IS 1) = (failure_date IS NOT NULL)),
+               CHECK ((breakout_failed IS NULL) = (failure_decided_at IS NULL))
+        )""")
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -436,6 +499,7 @@ UPGRADES = (
     _add_open,
     _add_screened_session,
     _add_signal,
+    _add_signal_tracking,
 )
 SCHEMA_VERSION = len(UPGRADES)
 
