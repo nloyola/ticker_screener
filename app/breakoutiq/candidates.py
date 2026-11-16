@@ -8,26 +8,34 @@ lies above a threshold or at or below it, or whose flag or combined secondary in
 signal with no value fails the condition, as it would under the rule. The thresholds are the interior edges of the
 value's quantile bands over the development signals alone. A rule is one condition, or two on different indicators
 both required; the pairs combine the strongest single condition of each of the PAIR_POOL indicators with the
-strongest evidence on development.
+strongest evidence on development, the stronger of the two first.
 
-A rule is scored on a period by comparing the signals it keeps with those it drops: the difference in their mean net
-excess return, with errors clustered two-way by signal date and ticker (stats.clustered_ols), on the period's
-complete outcomes. Ended (censored) horizons are counted in each group, never dropped silently, and gap signals are in
-no period, so they are left out.
+A single condition is scored on a period by comparing the signals it keeps with those it drops: the difference in
+their mean net excess return, with errors clustered two-way by signal date and ticker (stats.clustered_ols), on the
+period's complete outcomes. A pair is scored on what its second condition adds to its first: among the signals the
+first keeps, those the second keeps against those it drops. So a pair whose second condition is noise, or implied by
+the first, adds nothing and is not carried, however strong its first condition. Ended (censored) horizons are counted
+in each group, never dropped silently, and gap signals are in no period, so they are left out.
 
 At each horizon, separately:
 - development: every rule is scored, and the whole search is one family corrected by Benjamini-Hochberg at
-  stats.FDR. A rule is carried to validation when it keeps a better outcome (a positive effect), significantly after
-  the correction, and keeps at least MIN_KEPT_SHARE of the signals. Only the best rule of each indicator, or pair of
-  indicators, is carried, and at most MAX_CANDIDATES of them, by their development p-value.
+  stats.FDR. A threshold's two directions (above it, at or below it) are one test of the same split, so only the
+  direction with the larger effect is in the family. A rule is carried to validation when it keeps a better outcome
+  (a positive effect), significantly after the correction, and keeps at least MIN_KEPT_SHARE of the signals. Only the
+  best rule of each indicator, or pair of indicators, is carried, and at most MAX_CANDIDATES of them, by their
+  development p-value.
 - validation: each carried rule is scored, the carried rules one family. A rule survives when its effect is positive
   again and significant after the correction.
 - test: each survivor is scored exactly once, through TestPeriod, which refuses a second score of the same rule, the
   survivors one family.
 
+A rule is a candidate at one horizon: the same rule can be carried at several horizons, and is then scored on test
+once at each, every horizon's test family corrected on its own, with no correction across horizons.
+
 Every carried rule is a candidate, labelled PRELIMINARY until it holds, its effect positive and significant, on both
 validation and test, and VALIDATED only if, on test too, the signals it keeps also reach MIN_NET_EXCESS_RETURN at the
-horizon: the economic bar. Its payload says why a preliminary rule stopped. Nothing here changes the live screener.
+horizon: the economic bar, on the mean of the signals the rule keeps rather than on its effect. Its payload says why
+a preliminary rule stopped. Nothing here changes the live screener.
 """
 
 from dataclasses import dataclass
@@ -35,7 +43,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from app.breakoutiq.dataset import COMPLETE, DEVELOPMENT, ENDED, TEST, VALIDATION
+from app.breakoutiq.dataset import COMPLETE, DEVELOPMENT, ENDED, GAP, TEST, VALIDATION
 from app.breakoutiq.indicators import (
     COMPOSITES,
     FLAG,
@@ -71,8 +79,11 @@ RULE = 'rule'
 PRELIMINARY = 'preliminary'
 VALIDATED = 'validated'
 
-# why a candidate stayed preliminary
+# why a candidate stayed preliminary: a period could not test it (a group below the minimum sample, or errors that
+# could not be clustered), or tested it and did not confirm it, or it kept too small a return
+NOT_TESTED_ON_VALIDATION = 'not tested on validation'
 NOT_CONFIRMED_ON_VALIDATION = 'not confirmed on validation'
+NOT_TESTED_ON_TEST = 'not tested on test'
 NOT_CONFIRMED_ON_TEST = 'not confirmed on test'
 BELOW_ECONOMIC_BAR = 'below the economic bar'
 
@@ -93,7 +104,7 @@ PASSES = 'pass'
 
 # the indicators a condition can be on, each with its kind: the raw values and the strengths cut at thresholds, the
 # flags and combined secondary indicators required to pass
-INDICATORS = {
+CONDITION_INDICATORS = {
     **dict.fromkeys(VALUES, VALUE),
     **dict.fromkeys(STRENGTHS, STRENGTH),
     **dict.fromkeys(FLAGS, FLAG),
@@ -130,7 +141,7 @@ class Condition:
     def payload(self) -> dict:
         return {
             'indicator': self.indicator,
-            'kind': INDICATORS[self.indicator],
+            'kind': CONDITION_INDICATORS[self.indicator],
             'op': self.op,
             'threshold': self.threshold,
         }
@@ -167,7 +178,7 @@ def single_conditions(development: pd.DataFrame) -> list[Condition]:
     indicator, passing.
     """
     conditions = []
-    for name, kind in INDICATORS.items():
+    for name, kind in CONDITION_INDICATORS.items():
         if kind in (VALUE, STRENGTH):
             for edge in band_edges(development, name)[1:-1]:
                 conditions += [Condition(name, ABOVE, edge), Condition(name, AT_MOST, edge)]
@@ -201,16 +212,20 @@ class Period:
         """
         The rule on this period: the counts and mean outcome of the signals it keeps and of those it drops, the share
         of the signals it keeps, and, when both groups meet the minimum sample, the effect of keeping (kept less
-        dropped) with its clustered interval and raw p-value.
+        dropped) with its clustered interval and raw p-value. For a pair, the dropped signals are those its first
+        condition keeps ('within') and its second drops, so the effect is what the second condition adds.
         """
-        kept = np.ones(len(self.y), dtype=bool)
+        within = rule[0].keeps(self.rows) if len(rule) > 1 else np.ones(len(self.y), dtype=bool)
+        kept = within.copy()
         for condition in rule:
             kept &= condition.keeps(self.rows)
-        groups = {'kept': _group(self, kept), 'dropped': _group(self, ~kept)}
-        for name, mask in (('kept', kept), ('dropped', ~kept)):
+        dropped = within & ~kept
+        groups = {'kept': _group(self, kept), 'dropped': _group(self, dropped)}
+        for name, mask in (('kept', kept), ('dropped', dropped)):
             groups[name]['mean'] = _mean(self, mask) if groups[name]['signal_dates'] >= MIN_SIGNAL_DATES else None
         signals = _distinct(self.signals, np.ones(len(self.y), dtype=bool))
         score = {
+            'within': rule_key(rule[:1]) if len(rule) > 1 else None,
             **groups,
             'kept_share': groups['kept']['signals'] / signals if signals else None,
             'shown': False,
@@ -221,8 +236,9 @@ class Period:
         }
         if min(groups['kept']['signal_dates'], groups['dropped']['signal_dates']) < MIN_SIGNAL_DATES:
             return score
-        exog = pd.DataFrame({'const': 1.0, 'kept': kept[self.observed].astype(float)})
-        fit = clustered_ols(self.y[self.observed], exog, self.clusters[self.observed])
+        compared = within & self.observed
+        exog = pd.DataFrame({'const': 1.0, 'kept': kept[compared].astype(float)})
+        fit = clustered_ols(self.y[compared], exog, self.clusters[compared], of=['kept'])
         if fit is None:
             return score
         effect = fit['kept']
@@ -238,19 +254,23 @@ class Period:
 
 
 class TestPeriod(Period):
-    """The test period, which scores a rule at most once per analysis run: a second score of the same rule raises."""
+    """
+    One horizon's test period, which scores a rule at most once: a second score of the same rule raises. A run builds
+    one per horizon, so a rule is scored on test at most once per horizon in a run.
+    """
 
     __test__ = False  # not a pytest test class
 
-    def __init__(self, rows: pd.DataFrame):
+    def __init__(self, rows: pd.DataFrame, horizon: int):
         super().__init__(rows)
-        self.scored: list[str] = []
+        self.horizon = horizon
+        self.scored: set[str] = set()
 
     def score(self, rule: Rule) -> dict:
         key = rule_key(rule)
         if key in self.scored:
-            raise RuntimeError(f'rule {key} was already scored on the test period')
-        self.scored.append(key)
+            raise RuntimeError(f'rule {key} was already scored on the test period at horizon {self.horizon}')
+        self.scored.add(key)
         return super().score(rule)
 
 
@@ -260,18 +280,18 @@ def _horizon(horizon: int, rows: pd.DataFrame, conditions: list[Condition]) -> t
         DEVELOPMENT: Period(rows[rows['period'] == DEVELOPMENT]),
         VALIDATION: Period(rows[rows['period'] == VALIDATION]),
     }
-    test = TestPeriod(rows[rows['period'] == TEST])
-    bar = MIN_NET_EXCESS_RETURN.get(horizon)
+    test = TestPeriod(rows[rows['period'] == TEST], horizon)
+    bar = MIN_NET_EXCESS_RETURN[horizon]
 
     # development: the single conditions, then pairs of the strongest indicators' best conditions, one family
     searched = {(c,): periods[DEVELOPMENT].score((c,)) for c in conditions}
     pool = _best_per_indicators([(rule, score) for rule, score in searched.items() if _promising(score)], PAIR_POOL)
-    pairs = [
-        (a[0], b[0]) for i, (a, _) in enumerate(pool) for (b, _) in pool[i + 1 :] if a[0].indicator != b[0].indicator
-    ]
+    # the pool holds one condition per indicator, best first, so each pair's first condition is its stronger
+    pairs = [(a[0], b[0]) for i, (a, _) in enumerate(pool) for (b, _) in pool[i + 1 :]]
     singles = len(searched)
     searched |= {pair: periods[DEVELOPMENT].score(pair) for pair in pairs}
-    _correct(list(searched.values()))
+    family = _development_family(searched)
+    _correct(family)
     carried = _best_per_indicators(
         [(rule, score) for rule, score in searched.items() if _promising(score) and score['significant']],
         MAX_CANDIDATES,
@@ -314,11 +334,12 @@ def _horizon(horizon: int, rows: pd.DataFrame, conditions: list[Condition]) -> t
             VALIDATION: periods[VALIDATION].counts(),
             TEST: test.counts(),
         },
-        'gap': int(rows['signal_id'][rows['period'] == 'gap'].nunique()),
+        'gap': int(rows['signal_id'][rows['period'] == GAP].nunique()),
         'conditions': singles,
         'pairs': len(pairs),
         'searched': len(searched),
         'tested_on_development': sum(1 for s in searched.values() if s['p_value'] is not None),
+        'development_family': len(family),
         'carried': len(carried),
         'survived_validation': len(survivors),
         'scored_on_test': len(test.scored),
@@ -356,15 +377,39 @@ def _holds(score: dict | None) -> bool:
     return score is not None and score['significant'] and score['effect']['estimate'] > 0
 
 
-def _label(validation: dict, test: dict | None, bar: float | None) -> tuple[str, str | None]:
+def _label(validation: dict, test: dict | None, bar: float) -> tuple[str, str | None]:
     """A candidate's label, and why it is preliminary (None when validated)."""
+    if not validation['shown']:
+        return PRELIMINARY, NOT_TESTED_ON_VALIDATION
     if not _holds(validation):
         return PRELIMINARY, NOT_CONFIRMED_ON_VALIDATION
+    assert test is not None, 'a rule that holds on validation is scored on test'
+    if not test['shown']:
+        return PRELIMINARY, NOT_TESTED_ON_TEST
     if not _holds(test):
         return PRELIMINARY, NOT_CONFIRMED_ON_TEST
-    if bar is None or test['kept']['mean'] is None or test['kept']['mean'] < bar:
+    if test['kept']['mean'] < bar:
         return PRELIMINARY, BELOW_ECONOMIC_BAR
     return VALIDATED, None
+
+
+def _development_family(searched: dict[Rule, dict]) -> list[dict]:
+    """
+    The development search's tested scores, corrected as one family: every tested pair and passing condition, and of
+    the two directions of each threshold, the one with the larger effect.
+    """
+    family, splits = [], {}
+    for rule, score in searched.items():
+        if score['p_value'] is None:
+            continue
+        if len(rule) == 1 and rule[0].op != PASSES:
+            split = (rule[0].indicator, rule[0].threshold)
+            other = splits.get(split)
+            if other is None or score['effect']['estimate'] > other['effect']['estimate']:
+                splits[split] = score
+            continue
+        family.append(score)
+    return family + list(splits.values())
 
 
 def _best_per_indicators(scored: list[tuple[Rule, dict]], limit: int) -> list[tuple[Rule, dict]]:

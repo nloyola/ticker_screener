@@ -1,19 +1,24 @@
 """
-The secondary indicators ranked: which of them predict a better main outcome or less downside, at each horizon.
+The secondary indicators ranked: which of them predict a better main outcome or less downside.
 
 Each raw value is cut into quantile bands, and its highest band compared with its lowest; each flag, and each of the
 strategy's secondary indicators that combines several flags, is compared passing against failing. A comparison is a
 regression of the outcome on the group, so its effect is the difference in the outcome's mean (in a rate, a
 difference in shares), with standard errors clustered two-way by signal date and by ticker (stats.clustered_ols).
-Every comparison of a horizon is one family, corrected by Benjamini-Hochberg at stats.FDR, and each result keeps both
-its raw and its adjusted p-value.
+The returns (HORIZON_OUTCOMES) are compared at each horizon, every comparison of a horizon one family. The breakout
+failure is the signal's, decided over its first sessions whatever the horizon, so it is compared once over every
+signal with a decided failure (SIGNAL_OUTCOMES), its results stored with no horizon, its comparisons one family of
+their own. Each family is corrected by Benjamini-Hochberg at stats.FDR, and each result keeps both its raw and its
+adjusted p-value.
 
 Like the baseline, the ranking describes the whole archive, gap included: it chooses no rule, which only the
 candidate search does, on development alone. Returns are compared on complete outcomes only; ended (censored)
-horizons are counted in each group, never dropped. A comparison whose two groups do not each hold observations on
-MIN_SIGNAL_DATES distinct signal dates is not shown, and is not tested.
+horizons are counted in each group, never dropped. A comparison whose two groups do not each hold observations
+(complete outcomes for a return, decided failures for the failure) on MIN_SIGNAL_DATES distinct signal dates is not
+shown, and is not tested.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -102,8 +107,9 @@ COMPOSITES = ('macd', 'relative_strength', 'moving_average_alignment', 'ema_21_a
 
 # the outcomes compared: the main one, the net excess return over the benchmark, and the downside measures, the MAE
 # and the breakout failure. Each maps to its column, and whether it is read on complete outcomes only (the returns)
-# or on every resolved row with a decided failure (the failure, as the baseline's failure_rate)
+# or on every signal with a decided failure (the failure)
 MAIN_OUTCOME = 'excess_return'
+FAILURE = 'failure'
 
 
 @dataclass(frozen=True)
@@ -115,8 +121,11 @@ class Outcome:
 OUTCOMES = {
     MAIN_OUTCOME: Outcome('excess_return_pct', True),
     'mae': Outcome('mae_pct', True),
-    'failure': Outcome('breakout_failed', False),
+    FAILURE: Outcome('breakout_failed', False),
 }
+# the outcomes compared at each horizon, and those compared once over the signals, with no horizon
+HORIZON_OUTCOMES = (MAIN_OUTCOME, 'mae')
+SIGNAL_OUTCOMES = (FAILURE,)
 
 # the quantile bands a raw value is cut into, over the signals (each once); values tied across a quantile give fewer
 BANDS = 5
@@ -127,32 +136,56 @@ _FLAG_GROUPS = ('fail', 'pass')
 
 def indicators(rows: pd.DataFrame) -> list[AnalysisResult]:
     """
-    The section's results from the analysis dataset (dataset.build_dataset): one per horizon, indicator and outcome,
-    VALUES first, then FLAGS, then COMPOSITES, each with every one of OUTCOMES. The finding is
-    '<kind>:<indicator>:<outcome>'.
+    The section's results from the analysis dataset (dataset.build_dataset): per horizon, one per indicator and each
+    of HORIZON_OUTCOMES, then, with no horizon, one per indicator and each of SIGNAL_OUTCOMES; VALUES first, then
+    FLAGS, then COMPOSITES. The finding is '<kind>:<indicator>:<outcome>'.
     """
     frame = indicator_frame(rows)
     edges = {name: band_edges(frame, name) for name in VALUES}
-    results = []
-    for horizon, at_horizon in frame.groupby('horizon', sort=True):
-        context = Horizon.of(at_horizon)
+
+    def compare(context: 'Horizon', at: pd.DataFrame, outcomes: tuple[str, ...]) -> list[dict]:
         payloads = []
         for kind, names in ((VALUE, VALUES), (FLAG, FLAGS), (SECONDARY, COMPOSITES)):
             for name in names:
                 if kind == VALUE:
-                    groups, labels = bands(at_horizon[name], edges[name]), None
+                    groups, labels = bands(at[name], edges[name]), None
                 else:
-                    groups, labels = _flag_groups(at_horizon[name]), _FLAG_GROUPS
-                for outcome in OUTCOMES:
+                    groups, labels = _flag_groups(at[name]), _FLAG_GROUPS
+                for outcome in outcomes:
                     payload = comparison(context, groups.to_numpy(dtype=float), labels, outcome)
                     payload = {'kind': kind, 'indicator': name, 'outcome': outcome, **payload}
                     if kind == VALUE:
                         payload['edges'] = edges[name]
                     payloads.append(payload)
+        return payloads
+
+    return compare_all(SECTION, PAYLOAD_VERSION, frame, compare)
+
+
+def compare_all(
+    section: str,
+    payload_version: int,
+    frame: pd.DataFrame,
+    compare: Callable[['Horizon', pd.DataFrame, tuple[str, ...]], list[dict]],
+) -> list[AnalysisResult]:
+    """
+    A comparing section's results: 'compare' run on each horizon's rows for HORIZON_OUTCOMES, then once on one row
+    per signal for SIGNAL_OUTCOMES, with no horizon. Each call's payloads are one family, corrected and ranked, and
+    stored as '<kind>:<indicator>:<outcome>'.
+    """
+    families = [
+        (int(horizon), compare(Horizon.of(at), at, HORIZON_OUTCOMES))
+        for horizon, at in frame.groupby('horizon', sort=True)
+    ]
+    if not frame.empty:
+        signals = frame.drop_duplicates('signal_id')
+        families.append((None, compare(Horizon.of(signals, per_signal=True), signals, SIGNAL_OUTCOMES)))
+    results = []
+    for horizon, payloads in families:
         correct(payloads)
         rank(payloads)
         results += [
-            AnalysisResult(SECTION, f'{p["kind"]}:{p["indicator"]}:{p["outcome"]}', int(horizon), PAYLOAD_VERSION, p)
+            AnalysisResult(section, f'{p["kind"]}:{p["indicator"]}:{p["outcome"]}', horizon, payload_version, p)
             for p in payloads
         ]
     return results
@@ -160,7 +193,10 @@ def indicators(rows: pd.DataFrame) -> list[AnalysisResult]:
 
 @dataclass(frozen=True)
 class Horizon:
-    """A horizon's rows as the comparisons read them, each array aligned with the rows."""
+    """
+    A horizon's rows as the comparisons read them, each array aligned with the rows; or, 'per_signal', one row per
+    signal, for the outcomes that do not depend on the horizon, with no row censored.
+    """
 
     dates: np.ndarray  # each row's signal date, as a code
     signals: np.ndarray  # each row's signal, as a code
@@ -169,7 +205,7 @@ class Horizon:
     outcomes: dict[str, np.ndarray]  # each of OUTCOMES' observations, NaN on a row it does not read
 
     @classmethod
-    def of(cls, rows: pd.DataFrame) -> 'Horizon':
+    def of(cls, rows: pd.DataFrame, per_signal: bool = False) -> 'Horizon':
         complete = (rows['outcome_status'] == COMPLETE).to_numpy()
         outcomes = {}
         for name, spec in OUTCOMES.items():
@@ -179,7 +215,7 @@ class Horizon:
             dates=pd.factorize(rows['session_date'])[0],
             signals=pd.factorize(rows['signal_id'])[0],
             clusters=cluster_codes(rows),
-            ended=(rows['outcome_status'] == ENDED).to_numpy(),
+            ended=np.zeros(len(rows), dtype=bool) if per_signal else (rows['outcome_status'] == ENDED).to_numpy(),
             outcomes=outcomes,
         )
 
@@ -280,7 +316,7 @@ def comparison(context: Horizon, groups: np.ndarray, labels: tuple[str, ...] | N
 
     tested = observed & ((groups == numbers[0]) | (groups == numbers[-1]))
     exog = pd.DataFrame({'const': 1.0, 'effect': (groups[tested] == numbers[-1]).astype(float)})
-    fit = clustered_ols(y[tested], exog, context.clusters[tested])
+    fit = clustered_ols(y[tested], exog, context.clusters[tested], of=['effect'])
     if fit is None:
         return payload
     effect = fit['effect']
@@ -303,19 +339,19 @@ def _distinct(codes: np.ndarray, mask: np.ndarray) -> int:
 
 
 def correct(payloads: list[dict]) -> None:
-    """Sets each tested payload's adjusted p-value over the family 'payloads' (one horizon), and whether it is
-    significant at FDR."""
+    """Sets each tested payload's adjusted p-value over the family 'payloads', and whether it is significant at
+    FDR."""
     tested = [p for p in payloads if p['p_value'] is not None]
     for payload, adjusted in zip(tested, benjamini_hochberg([p['p_value'] for p in tested]), strict=True):
         payload['p_adjusted'] = adjusted
         payload['significant'] = adjusted <= FDR
 
 
-def rank(payloads: list[dict]) -> None:
+def rank(payloads: list[dict], effect: str = 'effect') -> None:
     """Ranks the tested payloads of each outcome, 1 for the strongest evidence: the smallest raw p-value, then the
-    largest effect relative to its standard error."""
+    largest effect (the payload's 'effect' key) relative to its standard error."""
     for outcome in OUTCOMES:
         tested = [p for p in payloads if p['outcome'] == outcome and p['p_value'] is not None]
-        tested.sort(key=lambda p: (p['p_value'], -abs(p['effect']['estimate'] / p['effect']['se'])))
+        tested.sort(key=lambda p: (p['p_value'], -abs(p[effect]['estimate'] / p[effect]['se'])))
         for position, payload in enumerate(tested, start=1):
             payload['rank'] = position

@@ -393,9 +393,9 @@ CREATE TABLE IF NOT EXISTS backfill_run (
 
 -- BreakoutIQ's analysis runs (app/breakoutiq/): one row per run, stored with its results in one transaction once the
 -- run has finished, with the signal sessions its data covered (first_session to last_session, NULL with no signals),
--- the signals it read and its settings (the methods' constants, as JSON). Not market data: db-init never touches it.
--- The fourteenth upgrade in app/db.py creates it and analysis_result in databases from before them; change both
--- together.
+-- the signals it analysed (those with a resolved horizon) and its settings (the methods' constants, as JSON). Not
+-- market data: db-init never touches it. The fourteenth upgrade in app/db.py creates it and analysis_result in
+-- databases from before them; change both together.
 CREATE TABLE IF NOT EXISTS analysis_run (
        id INTEGER PRIMARY KEY,
        started_at TIMESTAMP NOT NULL,
@@ -423,6 +423,12 @@ CREATE TABLE IF NOT EXISTS analysis_result (
        payload TEXT NOT NULL CHECK (json_valid(payload)),
        UNIQUE (run_id, section, finding, horizon)
 );
+
+-- A finding with no horizon is unique within its run and section too, which the UNIQUE above does not enforce, since
+-- SQLite counts every NULL as distinct. The fifteenth upgrade in app/db.py creates it in databases from before it;
+-- change both together.
+CREATE UNIQUE INDEX IF NOT EXISTS analysis_result_no_horizon ON analysis_result (run_id, section, finding)
+       WHERE horizon IS NULL;
 
 -- Each ticker's company name, looked up from the price API named in price_api. Not market data: db-init keeps it,
 -- so names survive a re-initialisation. The dashboard writes it too, when an admin adds a ticker. The upgrade in

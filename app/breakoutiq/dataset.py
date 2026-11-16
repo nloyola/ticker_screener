@@ -10,9 +10,13 @@ stopped before the horizon's exit. Ended rows stay in the dataset (censored is T
 can report how many there were. Pending horizons are left out.
 """
 
+import logging
+import os
+
 import numpy as np
 import pandas as pd
 
+from app.analyzer import SCREENER_VERSION
 from app.container import Container
 from app.markets import BENCHMARKS
 from app.repositories.history_repo import BENCHMARK
@@ -40,14 +44,23 @@ BELOW = 'below'
 COMPLETE = 'complete'
 ENDED = 'ended'
 
+logger = logging.getLogger(__name__)
 
-def load_dataset(container: Container, with_history: bool) -> pd.DataFrame:
+
+class MissingHistory(Exception):
+    """The price history database the regime of a backfilled signal needs is not there."""
+
+
+def load_dataset(container: Container, with_history: bool, screener_version: str = SCREENER_VERSION) -> pd.DataFrame:
     """
-    The dataset from the database. Each market's benchmark closes come from benchmark_price and, when 'with_history'
-    is True, from the price history database (HISTORY_DATABASE_FILE) too, which holds the years the regime of a
-    backfilled signal needs.
+    The dataset from the database, of the signals 'screener_version' archived. Each market's benchmark closes come
+    from benchmark_price and, when 'with_history' is True, from the price history database (HISTORY_DATABASE_FILE)
+    too, which holds the years the regime of a backfilled signal needs; MissingHistory when that file is not there,
+    rather than an empty history that would leave those regimes unknown.
     """
-    data = container.analysis_data_repo
+    if with_history and not os.path.isfile(container.history_db_path):
+        raise MissingHistory(f'no price history database at {container.history_db_path}')
+    archive = container.analysis_data_repo.archive(screener_version)
     benchmarks = {}
     for market, ticker in BENCHMARKS.items():
         live = _series(container.benchmark_price_repo.closes(ticker))
@@ -57,7 +70,7 @@ def load_dataset(container: Container, with_history: bool) -> pd.DataFrame:
             else _series({})
         )
         benchmarks[market] = join_closes(history, live)
-    return build_dataset(data.signals(), data.outcomes(), benchmarks, data.path_sessions())
+    return build_dataset(archive.signals, archive.outcomes, benchmarks, archive.path_sessions)
 
 
 def build_dataset(
@@ -102,7 +115,9 @@ def build_dataset(
 
     signals['regime'] = regimes(signals, benchmarks)
     calendars = _calendars(signals, benchmarks, path_sessions)
+    signals['window_end'] = signals['signal_id'].map(window_ends(outcomes))
     signals['period'] = assign_periods(signals, calendars)
+    signals = signals.drop(columns='window_end')
 
     rows = signals.merge(outcomes, on='signal_id', how='inner', validate='one_to_many')
     rows['censored'] = rows['outcome_status'] == ENDED
@@ -111,7 +126,7 @@ def build_dataset(
 
 def assign_periods(signals: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex]) -> pd.Series:
     """
-    Each signal's period, aligned with 'signals' (columns session_date, market, source).
+    Each signal's period, aligned with 'signals' (columns session_date, market, source, and optionally window_end).
 
     The signals are split by session date, every signal of a date in the same period: a date is in development
     while the signals before it are fewer than DEVELOPMENT_SHARE of them all, then in validation while fewer than
@@ -120,10 +135,14 @@ def assign_periods(signals: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex]
 
     A signal is then moved to GAP when fewer than GAP_SESSIONS sessions of its market's calendar lie strictly between
     its date and the next period's first date, since its outcome window, which ends on the GAP_SESSIONS-th session
-    after its date, would reach into the next period. The last period has no gap.
+    after its date, would reach into the next period. A ticker that misses sessions reaches its GAP_SESSIONS-th
+    later, so a signal whose known window end (window_end, window_ends) is on or after the next period's first date
+    is moved to GAP too. The last period has no gap.
     """
     if signals.empty:
         return pd.Series([], index=signals.index, dtype=object)
+    if 'window_end' not in signals:
+        signals = signals.assign(window_end=pd.NaT)
     counts = signals.groupby('session_date').size().sort_index()
     before = (counts.cumsum() - counts) / counts.sum()
     by_date = pd.Series(
@@ -147,8 +166,18 @@ def assign_periods(signals: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex]
             between = calendar.searchsorted(boundary, side='left') - calendar.searchsorted(
                 group['session_date'].to_numpy(), side='right'
             )
-            periods.loc[group.index[between < GAP_SESSIONS]] = GAP
+            crosses = (between < GAP_SESSIONS) | (group['window_end'] >= boundary).to_numpy()
+            periods.loc[group.index[crosses]] = GAP
     return periods
+
+
+def window_ends(outcomes: pd.DataFrame) -> pd.Series:
+    """
+    Each signal's latest known outcome window end, indexed by signal_id: the latest exit date of its complete
+    horizons, or last session of its ended ones.
+    """
+    ends = outcomes['exit_date'].where(outcomes['outcome_status'] == COMPLETE, outcomes['last_session_date'])
+    return pd.to_datetime(ends).groupby(outcomes['signal_id']).max()
 
 
 def regimes(signals: pd.DataFrame, benchmarks: dict[str, pd.Series]) -> pd.Series:
@@ -183,6 +212,8 @@ def join_closes(history: pd.Series, live: pd.Series) -> pd.Series:
         return history.sort_index()
     history, live = history.sort_index(), live.sort_index()
     common = history.index.intersection(live.index)
+    if not len(common):
+        logger.warning('benchmark history and live closes share no date: joined unscaled, the regime may be wrong')
     scale = history[common[-1]] / live[common[-1]] if len(common) else 1.0
     later = live[live.index > history.index[-1]] * scale
     return pd.concat([history, later])

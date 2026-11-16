@@ -2,8 +2,10 @@
 BreakoutIQ's control for confounders and redundancy: where one indicator only proxies for another, the regression
 credits the true one and names the proxy redundant; an indicator that only proxies for its sector loses its effect
 once the sector is held fixed; an effect present in one regime only shows in that regime's subgroup; and an indicator
-missing on too many rows, or constant, is left out and says why. With no effect the large majority of simulations
-find none.
+missing on too many rows, or constant, is left out and says why. Two collinear indicators neither significant
+alone keep their shared effect in a joint test, and the stronger is credited. A horizon with no complete outcomes, or
+too few rows for its design, says why it was not fitted, and a fixed effect held by one ticker never blanks a horizon.
+With no effect the large majority of simulations find none.
 """
 
 import json
@@ -17,10 +19,12 @@ from app.breakoutiq.confounders import (
     INDICATORS,
     MISSING,
     MODEL,
+    NO_OUTCOMES,
     PAYLOAD_VERSION,
     REDUNDANT_CORRELATION,
     REDUNDANT_VIF,
     SECTION,
+    TOO_FEW_ROWS,
     confounders,
 )
 from app.breakoutiq.indicators import VALUES
@@ -170,7 +174,7 @@ def test_every_indicator_has_a_result_per_horizon_and_the_payloads_store_as_json
     for horizon in (5, 20):
         findings = [r.finding for r in results if r.horizon == horizon]
         assert findings == [MODEL, *(f'{ADJUSTED}:{name}' for name in INDICATORS)]
-    assert set(INDICATORS) == set(VALUES) | set(STRENGTHS)
+    assert set(INDICATORS) == (set(VALUES) - {'secondary_passed'}) | set(STRENGTHS)
     model = _payload(results, MODEL, horizon=5)
     assert model['censored'] == 40 and model['n'] == len(rows) // 2 - 40
     assert model['shown'] and len(model['correlations']['matrix']) == len(model['indicators'])
@@ -187,3 +191,69 @@ def test_with_no_effect_the_large_majority_of_simulations_find_none():
     ]
 
     assert sum(found) <= 0.15 * simulations
+
+
+def test_collinear_indicators_keep_their_shared_effect_and_credit_the_stronger():
+    rows = _dataset(12)
+    rng = np.random.default_rng(13)
+    # correlated about 0.99: the regression cannot tell them apart, so neither is significant adjusted
+    rows['rs_market_1m'] = rows['rs_market_3m'] + 0.15 * rng.normal(0, 1, len(rows))
+    rows['excess_return_pct'] += 1.2 * _standard(rows['rs_market_3m'])
+
+    results = confounders(rows)
+    true = _payload(results, f'{ADJUSTED}:rs_market_3m')
+    proxy = _payload(results, f'{ADJUSTED}:rs_market_1m')
+
+    assert not true['significant'] and not proxy['significant']
+    # the shared effect is not lost: the two together are significant
+    assert true['joint']['indicators'] == ['rs_market_3m', 'rs_market_1m']
+    assert true['joint']['p_value'] < 0.001
+    # exactly one of them is credited, the other named redundant with it; a high VIF alone names nothing
+    assert true['high_vif'] and proxy['high_vif']
+    assert sorted([true['redundant'], proxy['redundant']]) == [False, True]
+    credited, redundant = (true, proxy) if proxy['redundant'] else (proxy, true)
+    assert redundant['redundant_with'] == [credited['indicator']]
+
+
+def test_a_horizon_with_no_complete_outcome_says_so():
+    rows = _dataset(14)
+    rows['outcome_status'] = 'ended'
+    rows['excess_return_pct'] = np.nan
+
+    results = confounders(rows)
+    model = _payload(results, MODEL)
+
+    assert not model['shown'] and model['reason'] == NO_OUTCOMES
+    assert model['left_out'] == {} and model['indicators'] == []
+    assert model['censored'] == len(rows)
+    assert all(not r.payload['shown'] for r in results)
+
+
+def test_complete_outcomes_with_no_excess_return_are_counted():
+    rows = _dataset(15)
+    rows.loc[rows.index[:25], 'excess_return_pct'] = np.nan
+
+    model = _payload(confounders(rows), MODEL)
+
+    assert model['no_outcome'] == 25
+    assert model['n'] == len(rows) - 25
+
+
+def test_too_few_rows_for_the_design_says_so_rather_than_collinear():
+    # 40 dates of one signal: enough dates, far too few rows for some 30 columns
+    rows = _dataset(16, signals_per_date=1, dates=40)
+
+    model = _payload(confounders(rows), MODEL)
+
+    assert not model['shown'] and model['reason'] == TOO_FEW_ROWS
+    assert 'collinear' not in model['left_out'].values()
+
+
+def test_a_sector_held_by_one_ticker_does_not_blank_the_horizon():
+    found = 0
+    for seed in range(20):
+        rows = _dataset(200 + seed)
+        rows.loc[rows['ticker'] == 'T7', 'sector'] = 'Utilities'
+        model = _payload(confounders(rows), MODEL)
+        found += model['shown']
+    assert found == 20

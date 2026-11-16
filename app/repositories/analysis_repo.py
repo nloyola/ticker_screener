@@ -1,4 +1,5 @@
 import json
+import math
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
 
@@ -30,7 +31,7 @@ class AnalysisRepo:
                     _day(run.first_session),
                     _day(run.last_session),
                     run.signals,
-                    json.dumps(run.settings, sort_keys=True),
+                    _json(run.settings),
                     run.screener_version,
                     run.git_commit,
                 ),
@@ -40,10 +41,7 @@ class AnalysisRepo:
             con.executemany(
                 'INSERT INTO analysis_result (run_id, section, finding, horizon, payload_version, payload) '
                 'VALUES (?, ?, ?, ?, ?, ?)',
-                [
-                    (run_id, r.section, r.finding, r.horizon, r.payload_version, json.dumps(r.payload, sort_keys=True))
-                    for r in results
-                ],
+                [(run_id, r.section, r.finding, r.horizon, r.payload_version, _json(r.payload)) for r in results],
             )
             return run_id
 
@@ -84,6 +82,22 @@ class AnalysisRepo:
             )
             for row in rows
         ]
+
+
+def _json(value) -> str:
+    """'value' as JSON, each value that is not a finite number (NaN, an infinity) as null, which JSON has no other way
+    to say and json_valid would refuse."""
+    return json.dumps(_finite(value), sort_keys=True, allow_nan=False)
+
+
+def _finite(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite(v) for key, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_finite(v) for v in value]
+    return value
 
 
 def _timestamp(moment: datetime) -> str:

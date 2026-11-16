@@ -7,7 +7,7 @@ strength, not whether the rule is needed.
 import numpy as np
 import pandas as pd
 
-from app.breakoutiq.indicators import BANDS, MAIN_OUTCOME, OUTCOMES
+from app.breakoutiq.indicators import BANDS, FAILURE, HORIZON_OUTCOMES, MAIN_OUTCOME
 from app.breakoutiq.mandatory import (
     NECESSITY_NOTE,
     PAYLOAD_VERSION,
@@ -65,7 +65,8 @@ def test_each_strength_has_a_result_per_horizon_with_its_bands_effects_and_sampl
     results = mandatory(rows)
 
     expected = {
-        (f'{STRENGTH}:{name}:{outcome}', horizon) for name in STRENGTHS for outcome in OUTCOMES for horizon in (5, 20)
+        *((f'{STRENGTH}:{name}:{outcome}', h) for name in STRENGTHS for outcome in HORIZON_OUTCOMES for h in (5, 20)),
+        *((f'{STRENGTH}:{name}:{FAILURE}', None) for name in STRENGTHS),
     }
     assert {(r.finding, r.horizon) for r in results} == expected
     assert len(results) == len(expected)
@@ -75,7 +76,7 @@ def test_each_strength_has_a_result_per_horizon_with_its_bands_effects_and_sampl
         assert r.payload_version == PAYLOAD_VERSION
         assert len(p['edges']) == BANDS + 1
         assert [g['group'] for g in p['groups']] == list(range(1, BANDS + 1))
-        assert sum(g['signals'] for g in p['groups']) == len(rows) // 2
+        assert sum(g['signals'] for g in p['groups']) == rows['signal_id'].nunique()
         assert all(g['signal_dates'] >= MIN_SIGNAL_DATES and g['n'] > 0 for g in p['groups'])
         assert p['compared'] == [1, BANDS]
         assert p['shown']

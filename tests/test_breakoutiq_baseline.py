@@ -14,7 +14,7 @@ import pytest
 
 from app.breakoutiq.baseline import ALL, MEASURES, PAYLOAD_VERSION, SECTION, SPLITS, UNKNOWN, baseline
 from app.breakoutiq.dataset import load_dataset
-from app.breakoutiq.stats import MIN_SIGNAL_DATES, block_bootstrap, block_mean, block_median, date_blocks
+from app.breakoutiq.stats import MIN_BLOCKS, MIN_SIGNAL_DATES, block_bootstrap, block_mean, block_median, date_blocks
 from app.db import init_db
 from app.repositories.analysis_data_repo import AnalysisDataRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
@@ -302,3 +302,25 @@ def test_on_an_archive_the_counts_equal_its_resolved_outcomes(db):
         )
     totals = {h: sum(row[2] for row in archive if row[0] == h) for h in {row[0] for row in archive}}
     assert {r.horizon: r.payload['signals'] for r in results if r.finding == ALL} == totals
+
+
+def test_a_group_on_too_few_blocks_shows_its_measures_with_no_intervals():
+    # 40 consecutive dates at the 120-session horizon: one block, enough dates
+    rows = _rows(np.random.default_rng(3).normal(1, 2, 40), horizon=120)
+
+    payload = _payload(baseline(rows, resamples=50), horizon=120)
+
+    assert payload['shown'] and payload['blocks'] == 1 < payload['min_blocks'] == MIN_BLOCKS
+    mean = payload['measures']['net_return_mean']
+    assert mean['estimate'] == pytest.approx(rows['net_return_pct'].mean())
+    assert mean['ci_low'] is None and mean['ci_high'] is None
+
+
+def test_the_bootstrap_needs_min_blocks():
+    values = np.arange(40, dtype=float)
+    few, enough = np.arange(40) % (MIN_BLOCKS - 1), np.arange(40) % MIN_BLOCKS
+
+    low, _ = block_bootstrap(few, [block_mean(values, few)], resamples=50)
+    assert np.isnan(low[0])
+    low, high = block_bootstrap(enough, [block_mean(values, enough)], resamples=50)
+    assert low[0] < high[0]

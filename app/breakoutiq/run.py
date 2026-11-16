@@ -3,15 +3,17 @@ The whole BreakoutIQ analysis as one run: the dataset built once from the archiv
 (SECTIONS), and the run stored in analysis_run with every section's results in analysis_result, in one transaction,
 so a reader never sees a run with only some of its results.
 
-The run records the settings it ran with (settings()): every named constant a section reads, and each section's
-payload version, so a stored result can always be read against the methods that produced it.
+The run records the settings it ran with (settings()): every named constant a section reads, the indicators,
+outcomes, splits and controls each section covers, and each section's payload version, so a stored result can always
+be read against the methods that produced it. The run reads the signals of the screener's own version
+(SCREENER_VERSION, stored with the run), with the regime of a backfilled signal from the price history.
 """
 
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pandas as pd
 
@@ -46,22 +48,25 @@ SECTIONS = (
 
 @dataclass
 class AnalysisSummary:
-    """What a run read and stored: the run's id, its data's extent, and each section's result count and seconds."""
+    """
+    What a run read and stored: the run's id, its data's extent (the signals with a resolved horizon), how many of
+    them have no regime, and each section's result count and seconds.
+    """
 
     run_id: int
     signals: int
     rows: int
     censored: int
-    first_session: object
-    last_session: object
+    no_regime: int
+    first_session: date | None
+    last_session: date | None
     results: dict[str, int] = field(default_factory=dict)
     seconds: dict[str, float] = field(default_factory=dict)
 
 
-def settings(with_history: bool) -> dict:
+def settings() -> dict:
     """Every setting the run's results depend on, as stored in analysis_run.settings."""
     return {
-        'with_history': with_history,
         'horizons': list(HORIZONS),
         'cost_bps': COST_BPS,
         'failure_sessions': FAILURE_SESSIONS,
@@ -70,13 +75,25 @@ def settings(with_history: bool) -> dict:
         'gap_sessions': data.GAP_SESSIONS,
         'regime_sma_days': data.REGIME_SMA_DAYS,
         'min_signal_dates': stats.MIN_SIGNAL_DATES,
+        'min_blocks': stats.MIN_BLOCKS,
         'confidence': stats.CONFIDENCE,
         'bootstrap_resamples': stats.BOOTSTRAP_RESAMPLES,
         'bootstrap_seed': stats.BOOTSTRAP_SEED,
         'fdr': stats.FDR,
         'clusters': list(stats.CLUSTERS),
+        'baseline_splits': list(baseline.SPLITS),
+        'baseline_measures': list(baseline.MEASURES),
         'bands': indicators.BANDS,
         'main_outcome': indicators.MAIN_OUTCOME,
+        'horizon_outcomes': list(indicators.HORIZON_OUTCOMES),
+        'signal_outcomes': list(indicators.SIGNAL_OUTCOMES),
+        'values': list(indicators.VALUES),
+        'flags': list(indicators.FLAGS),
+        'composites': list(indicators.COMPOSITES),
+        'strengths': list(mandatory.STRENGTHS),
+        'confounder_indicators': list(confounders.INDICATORS),
+        'confounder_controls': list(confounders.CONTROLS),
+        'min_rows_per_column': confounders.MIN_ROWS_PER_COLUMN,
         'max_missing_share': confounders.MAX_MISSING_SHARE,
         'redundant_correlation': confounders.REDUNDANT_CORRELATION,
         'redundant_vif': confounders.REDUNDANT_VIF,
@@ -113,13 +130,13 @@ class Analysis:
     def __init__(self, container: Container):
         self.container = container
 
-    def run(self, with_history: bool = True) -> AnalysisSummary:
+    def run(self) -> AnalysisSummary:
         """
-        Builds the dataset from the archive, the regime of a backfilled signal read from the price history when
-        'with_history' is True, runs every section and stores the run with its results.
+        Builds the dataset from the archive, the regime of a backfilled signal read from the price history
+        (MissingHistory without it), runs every section and stores the run with its results.
         """
         started_at = datetime.now(UTC)
-        rows = data.load_dataset(self.container, with_history)
+        rows = data.load_dataset(self.container, with_history=True)
         seconds: dict[str, float] = {}
         results = analyse(rows, seconds)
         signals = rows.drop_duplicates('signal_id')
@@ -131,7 +148,7 @@ class Analysis:
             first_session=first,
             last_session=last,
             signals=len(signals),
-            settings=settings(with_history),
+            settings=settings(),
             screener_version=SCREENER_VERSION,
             git_commit=git_commit(),
         )
@@ -142,6 +159,7 @@ class Analysis:
             signals=len(signals),
             rows=len(rows),
             censored=int(rows['censored'].sum()) if len(rows) else 0,
+            no_regime=int(signals['regime'].isna().sum()) if len(signals) else 0,
             first_session=first,
             last_session=last,
             results=counts,
@@ -153,8 +171,9 @@ def summarize(summary: AnalysisSummary) -> None:
     """Prints what a run read and stored."""
     extent = f' ({summary.first_session} to {summary.last_session})' if summary.first_session else ''
     print(
-        f'breakoutiq-analysis: read {summary.signals} signal{"" if summary.signals == 1 else "s"}{extent}, '
-        f'{summary.rows} resolved horizon{"" if summary.rows == 1 else "s"}, {summary.censored} of them censored'
+        f'breakoutiq-analysis: read {summary.signals} signal{"" if summary.signals == 1 else "s"} with a resolved '
+        f'horizon{extent}, {summary.rows} resolved horizon{"" if summary.rows == 1 else "s"}, {summary.censored} of '
+        f'them censored, {summary.no_regime} signal{"" if summary.no_regime == 1 else "s"} with no regime'
     )
     for name, count in summary.results.items():
         took = f' in {summary.seconds[name]:.0f}s' if name in summary.seconds else ''

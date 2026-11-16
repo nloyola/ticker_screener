@@ -550,6 +550,14 @@ def _add_analysis(con: sqlite3.Connection) -> None:
         )""")
 
 
+def _add_analysis_no_horizon_index(con: sqlite3.Connection) -> None:
+    """Version 15: analysis_result_no_horizon, so a finding with no horizon is unique within its run and section."""
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS analysis_result_no_horizon ON analysis_result (run_id, section, finding)
+               WHERE horizon IS NULL""")
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -565,6 +573,7 @@ UPGRADES = (
     _add_signal_tracking,
     _add_backfill_run,
     _add_analysis,
+    _add_analysis_no_horizon_index,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

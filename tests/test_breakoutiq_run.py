@@ -137,7 +137,7 @@ def test_the_command_stores_one_complete_run_that_reloads_with_its_payloads(db):
     run = runs[0]
     assert run.signals == count
     assert (run.first_session, run.last_session) == (SESSIONS[0].date(), SESSIONS[-1].date())
-    assert run.settings == json.loads(json.dumps(settings(with_history=True)))
+    assert run.settings == json.loads(json.dumps(settings()))
     assert run.settings['payload_versions'] == {s.name: s.payload_version for s in SECTIONS}
     assert run.git_commit is None or run.git_commit
 
@@ -158,8 +158,9 @@ def test_the_command_stores_one_complete_run_that_reloads_with_its_payloads(db):
 
     summary = [line for line in done.stdout.splitlines() if line.startswith('breakoutiq-analysis:')]
     assert summary[0] == (
-        f'breakoutiq-analysis: read {count} signals ({SESSIONS[0].date()} to {SESSIONS[-1].date()}), '
-        f'{count * len(HORIZONS)} resolved horizons, {count // 10} of them censored'
+        f'breakoutiq-analysis: read {count} signals with a resolved horizon ({SESSIONS[0].date()} to '
+        f'{SESSIONS[-1].date()}), {count * len(HORIZONS)} resolved horizons, {count // 10} of them censored, '
+        f'{count} signals with no regime'
     )
     assert summary[-1] == f'breakoutiq-analysis: stored run {run.id}'
     for section in SECTIONS:
@@ -175,7 +176,7 @@ def test_an_archive_with_no_resolved_outcome_stores_an_empty_run(db):
             "'{}', 'live')"
         )
 
-    summary = Analysis(db).run(with_history=True)
+    summary = Analysis(db).run()
 
     run = db.analysis_repo.runs()[0]
     assert (summary.run_id, summary.signals, summary.rows) == (run.id, 0, 0)

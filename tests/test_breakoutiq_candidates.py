@@ -1,8 +1,9 @@
 """
 BreakoutIQ's candidate rule search: a rule planted in a synthetic dataset comes out validated, a rule that only fits
 development's noise stays preliminary, a rule that holds but keeps too small a return stays below the economic bar,
-the search on development reads neither validation nor test, and no rule is ever scored on test more than once per
-analysis run.
+a pair is scored on what its second condition adds, so a noise partner of a real condition is never validated, a
+period that cannot test a rule says so, the search on development reads neither validation nor test nor the gap, and
+no rule is ever scored on test more than once per horizon in an analysis run.
 """
 
 import numpy as np
@@ -12,9 +13,12 @@ import pytest
 from app.breakoutiq.candidates import (
     ABOVE,
     BELOW_ECONOMIC_BAR,
+    CONDITION_INDICATORS,
     MAX_CANDIDATES,
     MIN_NET_EXCESS_RETURN,
     NOT_CONFIRMED_ON_VALIDATION,
+    NOT_TESTED_ON_TEST,
+    NOT_TESTED_ON_VALIDATION,
     PAYLOAD_VERSION,
     PRELIMINARY,
     RULE,
@@ -22,11 +26,12 @@ from app.breakoutiq.candidates import (
     SECTION,
     VALIDATED,
     Condition,
+    Period,
     TestPeriod,
     candidates,
 )
 from app.breakoutiq.dataset import DEVELOPMENT, GAP, TEST, VALIDATION
-from app.breakoutiq.indicators import FLAGS, VALUES
+from app.breakoutiq.indicators import FLAG, FLAGS, SECONDARY, VALUES
 from app.signal_paths import HORIZONS
 
 SESSIONS = pd.bdate_range('2016-01-04', periods=600)
@@ -115,8 +120,10 @@ def test_a_planted_rule_comes_out_validated():
     (condition,) = best['conditions']
     assert condition['op'] == ABOVE
     assert condition['threshold'] == pytest.approx(_PLANTED_VOLUME, abs=0.4)
-    # every validated rule keeps the planted signals: none of them is noise
-    assert all('volume_ratio' in _indicators(p) for p in validated)
+    # a pair adds its second condition to the planted one, which is noise: none is validated
+    assert [p['rule'] for p in validated] == [best['rule']]
+    pairs = [p for p in rules if len(p['conditions']) == 2]
+    assert all(p['periods'][DEVELOPMENT]['within'] == p['rule'].split('&')[0] for p in pairs)
 
     for period in (DEVELOPMENT, VALIDATION, TEST):
         score = best['periods'][period]
@@ -165,7 +172,7 @@ def test_no_rule_is_scored_on_test_more_than_once_per_run(monkeypatch):
     score = TestPeriod.score
 
     def counting(self, rule):
-        scored.append(('&'.join(c.key for c in rule), id(self)))
+        scored.append(('&'.join(c.key for c in rule), self.horizon))
         return score(self, rule)
 
     monkeypatch.setattr(TestPeriod, 'score', counting)
@@ -173,6 +180,7 @@ def test_no_rule_is_scored_on_test_more_than_once_per_run(monkeypatch):
 
     assert scored, 'no survivor was scored on test'
     assert len(scored) == len(set(scored))
+    assert {horizon for _, horizon in scored} == {10, 20}
     for horizon in (10, 20):
         search = _search(results, horizon)
         rules = _rules(results, horizon)
@@ -184,7 +192,7 @@ def test_no_rule_is_scored_on_test_more_than_once_per_run(monkeypatch):
 
 def test_the_test_period_refuses_a_second_score_of_a_rule():
     rows = _dataset(3)
-    test = TestPeriod(rows[rows['period'] == TEST])
+    test = TestPeriod(rows[rows['period'] == TEST], 20)
     rule = (Condition('volume_ratio', ABOVE, 2.5),)
 
     test.score(rule)
@@ -194,7 +202,7 @@ def test_the_test_period_refuses_a_second_score_of_a_rule():
 
 def test_the_development_search_reads_neither_validation_nor_test():
     rows = _plant_volume(_dataset(4))
-    later = rows['period'].isin([VALIDATION, TEST])
+    later = rows['period'].isin([VALIDATION, TEST, GAP])
     scrambled = rows.copy()
     scrambled.loc[later, 'excess_return_pct'] = np.random.default_rng(9).permutation(
         scrambled.loc[later, 'excess_return_pct'].to_numpy()
@@ -238,3 +246,60 @@ def test_with_no_effect_the_large_majority_of_simulations_validate_nothing():
 
 def test_every_horizon_has_an_economic_bar():
     assert set(MIN_NET_EXCESS_RETURN) == set(HORIZONS)
+
+
+def test_a_pair_is_scored_on_what_its_second_condition_adds():
+    rows = _dataset(5)
+    rows = rows[rows['period'] == DEVELOPMENT].reset_index(drop=True)
+    volume, tight = Condition('volume_ratio', ABOVE, _PLANTED_VOLUME), Condition('consolidation_tight', 'pass')
+    # only the planted volume matters: inside the signals it keeps, the noise flag adds nothing
+    rows = _plant_volume(rows, size=6.0)
+
+    single, pair = Period(rows).score((volume,)), Period(rows).score((volume, tight))
+
+    assert single['significant'] is False and single['p_value'] < 1e-6
+    assert pair['within'] == volume.key
+    in_volume = volume.keeps(rows)
+    assert pair['kept']['n'] + pair['dropped']['n'] == int(in_volume.sum())
+    assert pair['p_value'] > 0.01
+    assert abs(pair['effect']['estimate']) < 1.5
+
+
+def test_a_signal_with_no_value_fails_a_condition():
+    rows = pd.DataFrame({'volume_ratio': [3.0, np.nan, 1.0], 'consolidation_tight': [1, np.nan, 0]})
+
+    assert Condition('volume_ratio', ABOVE, 2.0).keeps(rows).tolist() == [True, False, False]
+    assert Condition('volume_ratio', '<=', 2.0).keeps(rows).tolist() == [False, False, True]
+    assert Condition('consolidation_tight', 'pass').keeps(rows).tolist() == [True, False, False]
+
+
+def test_a_period_that_cannot_test_a_rule_says_so():
+    rows = _plant_volume(_dataset(1))
+    # validation keeps only a few dates: too few for the minimum sample
+    validation_dates = rows.loc[rows['period'] == VALIDATION, 'session_date'].drop_duplicates()
+    rows = rows[~rows['session_date'].isin(validation_dates.iloc[20:])]
+
+    rules = _rules(candidates(rows))
+
+    assert rules and all(p['reason'] == NOT_TESTED_ON_VALIDATION for p in rules)
+    assert all(not p['scored_on_test'] for p in rules)
+
+
+def test_a_test_period_that_cannot_test_a_rule_says_so():
+    rows = _plant_volume(_dataset(1))
+    test_dates = rows.loc[rows['period'] == TEST, 'session_date'].drop_duplicates()
+    rows = rows[~rows['session_date'].isin(test_dates.iloc[20:])]
+
+    best = _rules(candidates(rows))[0]
+
+    assert best['periods'][VALIDATION]['significant'] and best['scored_on_test']
+    assert best['label'] == PRELIMINARY and best['reason'] == NOT_TESTED_ON_TEST
+
+
+def test_each_threshold_is_one_test_in_the_development_family():
+    search = _search(candidates(_plant_volume(_dataset(1))))
+
+    passing = sum(1 for name, kind in CONDITION_INDICATORS.items() if kind in (FLAG, SECONDARY))
+    splits = (search['conditions'] - passing) // 2
+    assert search['development_family'] <= passing + splits + search['pairs']
+    assert search['development_family'] < search['tested_on_development']

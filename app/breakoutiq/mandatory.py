@@ -1,19 +1,20 @@
 """
 The strength of the mandatory signals: whether signals that passed a mandatory rule by more had a better main outcome
-or less downside, at each horizon.
+or less downside.
 
 Every signal in the archive passed all four mandatory rules, so this section can only compare how strongly signals
 passed each rule, never signals that passed it with signals that did not: it cannot show whether a rule is needed,
 and every result says so. Each strength is cut into quantile bands and its highest band compared with its lowest, as
 the indicator ranking compares a raw value (indicators.comparison), on the same outcomes, with errors clustered by
-signal date and ticker, and with every comparison of a horizon one family corrected by Benjamini-Hochberg at
-stats.FDR. Like the ranking, it describes the whole archive, gap included, and chooses no rule.
+signal date and ticker, the returns at each horizon and the breakout failure once over the signals, each horizon's
+comparisons, and the failure's, one family corrected by Benjamini-Hochberg at stats.FDR (indicators.compare_all).
+Like the ranking, it describes the whole archive, gap included, and chooses no rule.
 """
 
 import pandas as pd
 
 from app.analyzer import BREAKOUT_WINDOWS, SMA_DAYS, SMA_RISING_DAYS, VOLUME_RATIO_MIN
-from app.breakoutiq.indicators import OUTCOMES, Horizon, band_edges, bands, comparison, correct, rank
+from app.breakoutiq.indicators import Horizon, band_edges, bands, compare_all, comparison
 from app.models import AnalysisResult
 
 SECTION = 'mandatory'
@@ -41,17 +42,17 @@ NECESSITY_NOTE = (
 
 def mandatory(rows: pd.DataFrame) -> list[AnalysisResult]:
     """
-    The section's results from the analysis dataset (dataset.build_dataset): one per horizon, strength and outcome,
-    STRENGTHS in order, each with every one of indicators.OUTCOMES. The finding is 'strength:<strength>:<outcome>'.
+    The section's results from the analysis dataset (dataset.build_dataset): per horizon, one per strength and each
+    of indicators.HORIZON_OUTCOMES, then, with no horizon, one per strength and each of indicators.SIGNAL_OUTCOMES;
+    STRENGTHS in order. The finding is 'strength:<strength>:<outcome>'.
     """
     edges = {name: band_edges(rows, name) for name in STRENGTHS}
-    results = []
-    for horizon, at_horizon in rows.groupby('horizon', sort=True):
-        context = Horizon.of(at_horizon)
+
+    def compare(context: Horizon, at: pd.DataFrame, outcomes: tuple[str, ...]) -> list[dict]:
         payloads = []
         for name, rule in STRENGTHS.items():
-            groups = bands(at_horizon[name], edges[name]).to_numpy(dtype=float)
-            for outcome in OUTCOMES:
+            groups = bands(at[name], edges[name]).to_numpy(dtype=float)
+            for outcome in outcomes:
                 payload = comparison(context, groups, None, outcome)
                 payloads.append(
                     {
@@ -66,10 +67,6 @@ def mandatory(rows: pd.DataFrame) -> list[AnalysisResult]:
                         'edges': edges[name],
                     }
                 )
-        correct(payloads)
-        rank(payloads)
-        results += [
-            AnalysisResult(SECTION, f'{STRENGTH}:{p["indicator"]}:{p["outcome"]}', int(horizon), PAYLOAD_VERSION, p)
-            for p in payloads
-        ]
-    return results
+        return payloads
+
+    return compare_all(SECTION, PAYLOAD_VERSION, rows, compare)

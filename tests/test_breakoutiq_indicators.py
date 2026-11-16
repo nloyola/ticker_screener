@@ -12,13 +12,16 @@ import pytest
 from app.breakoutiq.indicators import (
     BANDS,
     COMPOSITES,
+    FAILURE,
     FLAG,
     FLAGS,
+    HORIZON_OUTCOMES,
     MAIN_OUTCOME,
     OUTCOMES,
     PAYLOAD_VERSION,
     SECONDARY,
     SECTION,
+    SIGNAL_OUTCOMES,
     VALUE,
     VALUES,
     band_edges,
@@ -121,13 +124,17 @@ def test_a_planted_value_effect_is_found_and_nothing_else():
 def test_with_no_effect_the_large_majority_of_simulations_find_none():
     # each date's signals share a shock, and three flags are market-wide, one value per date: unclustered errors
     # would find those flags often
+    # BH holds a family's chance of any false finding to about FDR when nothing is real, so each family, the horizon's
+    # and the failure's, is judged on its own
     simulations = 40
-    found = [
-        _significant(indicators(_dataset(100 + i, date_flags=('dma_200_rising', 'price_gt_21wema', 'rsi_50_70'))))
+    runs = [
+        indicators(_dataset(100 + i, date_flags=('dma_200_rising', 'price_gt_21wema', 'rsi_50_70')))
         for i in range(simulations)
     ]
 
-    assert sum(bool(f) for f in found) <= 0.15 * simulations
+    for horizon in (20, None):
+        found = [any(r.payload['significant'] for r in results if r.horizon == horizon) for results in runs]
+        assert sum(found) <= 0.15 * simulations, horizon
 
 
 def test_clustering_by_date_widens_the_error_of_a_market_wide_flag():
@@ -150,8 +157,7 @@ def test_every_indicator_has_a_result_per_outcome_and_horizon():
         (f'{kind}:{name}:{outcome}', horizon)
         for kind, names in ((VALUE, VALUES), (FLAG, FLAGS), (SECONDARY, COMPOSITES))
         for name in names
-        for outcome in OUTCOMES
-        for horizon in (5, 20)
+        for outcome, horizon in [*((o, h) for o in HORIZON_OUTCOMES for h in (5, 20)), (FAILURE, None)]
     }
     assert {(r.finding, r.horizon) for r in results} == expected
     assert len(results) == len(expected)
@@ -166,8 +172,8 @@ def test_every_indicator_has_a_result_per_outcome_and_horizon():
 def test_each_horizon_and_outcome_is_ranked_from_one():
     results = indicators(_dataset(4, horizons=(5, 20)))
 
-    for horizon in (5, 20):
-        for outcome in OUTCOMES:
+    for horizon, outcomes in ((5, HORIZON_OUTCOMES), (20, HORIZON_OUTCOMES), (None, SIGNAL_OUTCOMES)):
+        for outcome in outcomes:
             ranked = sorted(
                 (r.payload for r in results if r.horizon == horizon and r.payload['outcome'] == outcome),
                 key=lambda p: p['rank'],
@@ -208,9 +214,10 @@ def test_ended_horizons_are_counted_in_their_group_but_never_measured():
     payload = _payload(indicators(rows), f'{FLAG}:macd_crossover:{MAIN_OUTCOME}')
     assert sum(g['censored'] for g in payload['groups']) == ended.sum()
     assert payload['effect']['n'] == (~ended).sum()
-    # the failure is read on every resolved row
-    failure = _payload(indicators(rows), f'{FLAG}:macd_crossover:failure')
-    assert failure['effect']['n'] == len(rows)
+    # the failure is the signal's: read once per signal with a decided failure, ended horizon or not, never censored
+    failure = _payload(indicators(rows), f'{FLAG}:macd_crossover:{FAILURE}', horizon=None)
+    assert failure['effect']['n'] == rows['signal_id'].nunique()
+    assert sum(g['censored'] for g in failure['groups']) == 0
 
 
 def test_a_group_on_too_few_dates_is_neither_shown_nor_tested():
@@ -227,6 +234,18 @@ def test_a_group_on_too_few_dates_is_neither_shown_nor_tested():
     # left out of the family, so the others' adjustment is over one fewer test
     tested = [r for r in results if r.payload['p_value'] is not None]
     assert len(tested) == len(results) - len(OUTCOMES)
+
+
+def test_the_failure_is_compared_once_over_the_signals_whatever_the_horizons():
+    rows = _dataset(11, horizons=(5, 20, 60))
+
+    results = indicators(rows)
+    failures = [r for r in results if r.payload['outcome'] == FAILURE]
+
+    assert {r.horizon for r in failures} == {None}
+    assert len(failures) == len(VALUES) + len(FLAGS) + len(COMPOSITES)
+    payload = _payload(results, f'{FLAG}:macd_crossover:{FAILURE}', horizon=None)
+    assert sum(g['signals'] for g in payload['groups']) == rows['signal_id'].nunique()
 
 
 def test_a_flag_with_one_side_only_is_not_compared():

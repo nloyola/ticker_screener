@@ -1,7 +1,8 @@
 """
 analysis_run and analysis_result, BreakoutIQ's analysis runs and findings: every database gains them, a market data
-reset keeps their rows, a run reads back with its results and versioned payloads, and the tables refuse rows that
-break their rules.
+reset keeps their rows, a run reads back with its results and versioned payloads, the tables refuse rows that break
+their rules, a finding with no horizon is unique within its run, and a payload with no finite value stores it as
+null.
 """
 
 import sqlite3
@@ -14,7 +15,7 @@ from app.db import MARKET_DATA_TABLES, SCHEMA_VERSION, SQLite, clear_market_data
 from app.models import AnalysisResult, AnalysisRun
 from app.repositories.analysis_repo import AnalysisRepo
 
-TABLES = ('analysis_run', 'analysis_result')
+TABLES = ('analysis_run', 'analysis_result', 'analysis_result_no_horizon')
 
 
 def _query(path: str, sql: str, params=()) -> list[tuple]:
@@ -46,6 +47,17 @@ def version_13_db(tmp_path) -> str:
     return path
 
 
+@pytest.fixture
+def version_14_db(tmp_path) -> str:
+    """A database at version 14: the analysis tables without the index of findings with no horizon."""
+    path = str(tmp_path / 'v14.db')
+    init_db(path)
+    with sqlite3.connect(path) as con:
+        con.execute('DROP INDEX analysis_result_no_horizon')
+        con.execute('PRAGMA user_version = 14')
+    return path
+
+
 def _run(**changes) -> AnalysisRun:
     values = {
         'started_at': datetime(2026, 11, 16, 23, 0, tzinfo=UTC),
@@ -73,6 +85,34 @@ def test_upgrade_adds_the_tables_as_schema_sql_creates_them(version_13_db, db_pa
     assert _query(version_13_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
     for table in TABLES:
         assert _schema_sql(version_13_db, table) == _schema_sql(db_path, table)
+
+
+def test_upgrade_adds_the_index_of_findings_with_no_horizon(version_14_db, db_path):
+    upgrade_db(version_14_db)
+
+    assert _query(version_14_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _schema_sql(version_14_db, 'analysis_result_no_horizon') == _schema_sql(
+        db_path, 'analysis_result_no_horizon'
+    )
+
+
+def test_a_finding_with_no_horizon_is_unique_within_its_run(db_path):
+    repo = AnalysisRepo(SimpleNamespace(db_path=db_path))
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.add(_run(), [RESULTS[1], RESULTS[1]])
+
+    assert repo.runs() == []
+
+
+def test_a_payload_value_that_is_not_finite_is_stored_as_null(db_path):
+    repo = AnalysisRepo(SimpleNamespace(db_path=db_path))
+    payload = {'estimate': float('nan'), 'bounds': [float('inf'), 1.5], 'nested': {'vif': float('-inf')}}
+
+    run_id = repo.add(_run(settings={'bar': float('nan')}), [AnalysisResult('baseline', 'all', 20, 1, payload)])
+
+    (result,) = repo.results(run_id)
+    assert result.payload == {'estimate': None, 'bounds': [None, 1.5], 'nested': {'vif': None}}
+    assert repo.runs()[0].settings == {'bar': None}
 
 
 def test_the_tables_are_not_market_data(db_path):

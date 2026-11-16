@@ -5,7 +5,8 @@ source, market and regime, each measure with a block-bootstrap confidence interv
 The baseline describes the whole archive, so it covers every period, gap included; the sections that compare periods
 leave the gap out. Returns are measured on complete outcomes only; ended (censored) horizons are counted, never
 dropped. A group with complete outcomes on fewer than MIN_SIGNAL_DATES distinct signal dates keeps its counts but
-shows no measures.
+shows no measures, and one whose signal dates fall in fewer than MIN_BLOCKS bootstrap blocks shows its measures with
+no intervals.
 """
 
 import numpy as np
@@ -16,6 +17,7 @@ from app.breakoutiq.stats import (
     BOOTSTRAP_RESAMPLES,
     BOOTSTRAP_SEED,
     CONFIDENCE,
+    MIN_BLOCKS,
     MIN_SIGNAL_DATES,
     block_bootstrap,
     block_mean,
@@ -81,6 +83,7 @@ def _payload(group: pd.DataFrame, horizon: int, resamples: int, seed: int) -> di
     complete = group['outcome_status'] == COMPLETE
     complete_dates = int(group.loc[complete, 'session_date'].nunique())
     shown = complete_dates >= MIN_SIGNAL_DATES
+    blocks = date_blocks(group['session_date'], horizon)
     payload = {
         'signals': int(group['signal_id'].nunique()),
         'signal_dates': int(group['session_date'].nunique()),
@@ -91,6 +94,8 @@ def _payload(group: pd.DataFrame, horizon: int, resamples: int, seed: int) -> di
         'min_signal_dates': MIN_SIGNAL_DATES,
         'confidence': CONFIDENCE,
         'block_sessions': horizon,
+        'blocks': int(blocks.max()) + 1 if len(blocks) else 0,
+        'min_blocks': MIN_BLOCKS,
         'resamples': resamples,
         'measures': {},
     }

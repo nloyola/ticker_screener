@@ -1,10 +1,13 @@
 """
-The statistics every BreakoutIQ section shares: the minimum sample a result needs to be shown, and confidence
-intervals bootstrapped by blocks of signal dates.
+The statistics every BreakoutIQ section shares: the minimum sample a result needs to be shown, confidence intervals
+bootstrapped by blocks of signal dates, least-squares fits with errors clustered by signal date and ticker, and the
+Benjamini-Hochberg correction of a family of tests.
 
 Signals on the same day move together, and signals a few sessions apart share most of their outcome window, so
-resampling single signals would overstate certainty. The bootstrap resamples whole blocks of consecutive sessions
-instead, each block as long as the horizon, so signals whose windows overlap are drawn together.
+resampling single signals would overstate certainty. The bootstrap resamples whole blocks of consecutive business
+days (Monday to Friday, holidays included) instead, each block as long as the horizon in sessions, so signals whose
+windows overlap are drawn together. An interval needs MIN_BLOCKS blocks: with fewer, the draws can only recombine a
+handful of block means, and the interval would understate the uncertainty.
 
 A draw is how many times each block was drawn, and a figure's value on a draw is computed from per-block summaries
 rather than by copying rows, so a draw costs the same for a hundred thousand signals as for a hundred.
@@ -18,13 +21,16 @@ import pandas as pd
 import statsmodels.api as sm
 from statsmodels.stats.multitest import multipletests
 
-# a result needs complete outcomes on at least this many distinct signal dates to be shown at all
+# a result needs observations (complete outcomes for a return, decided failures for the failure) on at least this
+# many distinct signal dates to be shown at all
 MIN_SIGNAL_DATES = 30
+# a bootstrap interval needs at least this many blocks of signal dates; with fewer, it is left out
+MIN_BLOCKS = 10
 # the confidence level of every interval, and the bootstrap's resamples and seed (fixed, so a run is reproducible)
 CONFIDENCE = 0.95
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 51
-# the false discovery rate every family of tests (one per section and horizon) is corrected to, by Benjamini-Hochberg
+# the false discovery rate every family of tests is corrected to, by Benjamini-Hochberg
 FDR = 0.10
 # the columns a regression's standard errors are clustered by, two-way: signals of one date share the market's
 # move, and signals of one ticker share its own
@@ -56,12 +62,12 @@ def block_bootstrap(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     The CONFIDENCE percentile interval of each of 'figures', from 'resamples' draws of as many blocks as there are,
-    with replacement. 'blocks' is each row's block (date_blocks). Each figure's bounds are NaN when fewer than two
-    blocks exist or no draw gave it a value.
+    with replacement. 'blocks' is each row's block (date_blocks). Each figure's bounds are NaN when fewer than
+    MIN_BLOCKS blocks exist or no draw gave it a value.
     """
     count = int(blocks.max()) + 1 if len(blocks) else 0
     low, high = np.full(len(figures), np.nan), np.full(len(figures), np.nan)
-    if count < 2:
+    if count < MIN_BLOCKS:
         return low, high
     rng = np.random.default_rng(seed)
     draws = np.empty((resamples, len(figures)))
@@ -162,7 +168,31 @@ def cluster_codes(rows: pd.DataFrame) -> np.ndarray:
     return np.column_stack([pd.factorize(rows[column])[0] for column in CLUSTERS])
 
 
-def clustered_ols(y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray) -> dict[str, Coefficient] | None:
+class ClusteredFit:
+    """A clustered least-squares fit (clustered_fit): its reported coefficients, and joint tests of its columns."""
+
+    def __init__(self, result, coefficients: dict[str, Coefficient]):
+        self._result = result
+        self.coefficients = coefficients
+
+    def joint_p_value(self, columns: list[str]) -> float | None:
+        """
+        The p-value of the Wald test, with the clustered covariance, that every one of 'columns' is zero together;
+        None when their joint covariance is not positive definite.
+        """
+        names = list(self._result.model.exog_names)
+        matrix = np.zeros((len(columns), len(names)))
+        for row, column in enumerate(columns):
+            matrix[row, names.index(column)] = 1
+        covariance = matrix @ np.asarray(self._result.cov_params(), dtype=float) @ matrix.T
+        if not np.all(np.linalg.eigvalsh(covariance) > 0):
+            return None
+        return float(self._result.wald_test(matrix, use_f=True, scalar=True).pvalue)
+
+
+def clustered_fit(
+    y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray, of: list[str] | None = None
+) -> ClusteredFit | None:
     """
     The least-squares fit of 'y' on the columns of 'exog' (which must include any constant), with standard errors
     clustered two-way by the two columns of 'clusters' (integer codes, cluster_codes), Cameron, Gelbach and Miller's
@@ -170,24 +200,39 @@ def clustered_ols(y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray) -> di
     correction. Intervals and p-values use Student's t with one degree of freedom fewer than the smaller cluster
     count.
 
-    Each column's Coefficient, or None when the fit cannot be clustered: fewer than two clusters on a side, or a
-    variance that comes out not positive (the two-way sum is not always positive semi-definite).
+    The fit reports the Coefficient of each column of 'of' (every column when None), or is None when it cannot be
+    clustered: fewer than two clusters on a side, or a variance of a reported column that comes out not positive
+    (the two-way sum is not always positive semi-definite). An unreported column, such as a fixed effect, may have
+    no valid variance without refusing the fit.
     """
     codes = np.asarray(clusters)
     if min(len(np.unique(codes[:, i])) for i in range(2)) < 2:
         return None
-    fit = sm.OLS(np.asarray(y, dtype=float), exog.astype(float)).fit(
+    result = sm.OLS(np.asarray(y, dtype=float), exog.astype(float)).fit(
         cov_type='cluster', cov_kwds={'groups': codes}, use_t=True
     )
-    se = np.asarray(fit.bse, dtype=float)
-    if not np.all(np.isfinite(se)) or np.any(se <= 0):
+    reported = list(exog.columns) if of is None else of
+    columns = list(exog.columns)
+    with np.errstate(invalid='ignore'):  # an unreported column's variance may come out negative
+        se = np.asarray(result.bse, dtype=float)
+    at = [columns.index(name) for name in reported]
+    if not np.all(np.isfinite(se[at])) or np.any(se[at] <= 0):
         return None
-    interval = np.asarray(fit.conf_int(alpha=1 - CONFIDENCE), dtype=float)
-    params, pvalues = np.asarray(fit.params, dtype=float), np.asarray(fit.pvalues, dtype=float)
-    return {
-        name: Coefficient(*(float(v) for v in (params[i], se[i], interval[i, 0], interval[i, 1], pvalues[i])))
-        for i, name in enumerate(exog.columns)
+    interval = np.asarray(result.conf_int(alpha=1 - CONFIDENCE), dtype=float)
+    params, pvalues = np.asarray(result.params, dtype=float), np.asarray(result.pvalues, dtype=float)
+    coefficients = {
+        columns[i]: Coefficient(*(float(v) for v in (params[i], se[i], interval[i, 0], interval[i, 1], pvalues[i])))
+        for i in at
     }
+    return ClusteredFit(result, coefficients)
+
+
+def clustered_ols(
+    y: np.ndarray, exog: pd.DataFrame, clusters: np.ndarray, of: list[str] | None = None
+) -> dict[str, Coefficient] | None:
+    """clustered_fit's reported coefficients, by column, or None when the fit cannot be clustered."""
+    fit = clustered_fit(y, exog, clusters, of)
+    return None if fit is None else fit.coefficients
 
 
 def benjamini_hochberg(p_values: list[float]) -> list[float]:

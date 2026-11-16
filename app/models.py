@@ -239,7 +239,8 @@ class AnalysisResult:
 class AnalysisRun:
     """
     One finished BreakoutIQ analysis run (analysis_run in schema.sql): when it ran, the signal sessions its data
-    covered, the signals it read, the settings it ran with and the screener that ran it.
+    covered, the signals it analysed (those with a resolved horizon), the settings it ran with and the screener that
+    ran it.
     """
 
     started_at: datetime

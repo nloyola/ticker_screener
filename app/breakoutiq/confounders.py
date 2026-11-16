@@ -10,24 +10,32 @@ indicator's adjusted effect is reported beside its unadjusted one, the slope of 
 rows, so a reader sees how much of an effect the others explain. Every adjusted effect of a horizon is one family,
 corrected by Benjamini-Hochberg at stats.FDR.
 
-Redundancy is read from the correlations between the indicators and each one's variance inflation factor (VIF). An
-indicator is named redundant when its adjusted effect is not significant and a highly correlated one carries the
-stronger evidence, or when its VIF is high and its adjusted effect is not significant: what it says, the others
-already say.
+Redundancy is read from the correlations between the indicators, with each one's variance inflation factor (VIF)
+reported beside them. Indicators correlated at least REDUNDANT_CORRELATION say the same thing, and their adjusted
+effects share it: collinearity widens both errors, so neither may be significant alone though together they matter.
+Each indicator with correlated ones is therefore also tested jointly with them (a Wald test of their effects all
+being zero, with the clustered covariance), so an effect they share is not lost. An indicator whose adjusted effect is
+significant is never redundant; one that is not is redundant with each correlated indicator that is significant, or,
+when none is, with the one among them whose unadjusted effect has the larger |t|: that one is credited, the rest
+named redundant. A high VIF alone names nothing redundant.
 
 Each indicator's effect is also compared across sectors and regimes: the same regression fitted on each sector's and
 each regime's rows alone, with the indicators on the pooled scale so the subgroup effects compare with the pooled one.
 The subgroup effects are descriptive, with intervals and no tests.
 
+A regression is fitted only on MIN_SIGNAL_DATES distinct signal dates and MIN_ROWS_PER_COLUMN rows per column of its
+design; a model or subgroup not fitted says why (its 'reason').
+
 Like the ranking, the section describes the whole archive, gap included, and chooses no rule. The regression reads
-complete outcomes only; ended (censored) horizons are counted, never dropped silently.
+complete outcomes only; ended (censored) horizons are counted, never dropped silently, and so are complete outcomes
+with no excess return (no_outcome).
 """
 
 import numpy as np
 import pandas as pd
 
 from app.breakoutiq.dataset import COMPLETE, ENDED
-from app.breakoutiq.indicators import MAIN_OUTCOME, OUTCOMES, VALUE, VALUES, value_frame
+from app.breakoutiq.indicators import MAIN_OUTCOME, OUTCOMES, VALUE, VALUES, correct, rank, value_frame
 from app.breakoutiq.mandatory import STRENGTH, STRENGTHS
 from app.breakoutiq.stats import (
     CLUSTERS,
@@ -35,8 +43,8 @@ from app.breakoutiq.stats import (
     FDR,
     MIN_SIGNAL_DATES,
     Coefficient,
-    benjamini_hochberg,
     cluster_codes,
+    clustered_fit,
     clustered_ols,
 )
 from app.models import AnalysisResult
@@ -49,8 +57,12 @@ MODEL = 'model'
 ADJUSTED = 'adjusted'
 
 # the indicators regressed together, each with its kind: every secondary indicator's raw value and every mandatory
-# strength. The flags are thresholds of these same values, so they are left out of the regression
-INDICATORS = {**dict.fromkeys(VALUES, VALUE), **dict.fromkeys(STRENGTHS, STRENGTH)}
+# strength. The flags are thresholds of these same values, so they are left out of the regression, and so is
+# secondary_passed, a count of those flags
+INDICATORS = {
+    **dict.fromkeys((v for v in VALUES if v != 'secondary_passed'), VALUE),
+    **dict.fromkeys(STRENGTHS, STRENGTH),
+}
 
 # the confounders held fixed, each a fixed effect per level, the first level (in sorted order) the baseline
 CONTROLS = ('market', 'sector', 'regime')
@@ -71,6 +83,16 @@ REDUNDANT_VIF = 5.0
 MISSING = 'missing'
 CONSTANT = 'constant'
 COLLINEAR = 'collinear'
+
+# a regression needs at least this many rows per column of its design (constant, fixed effects and indicators)
+MIN_ROWS_PER_COLUMN = 10
+
+# why a model or subgroup was not fitted
+NO_OUTCOMES = 'no complete outcomes'
+TOO_FEW_DATES = 'too few signal dates'
+TOO_FEW_ROWS = 'too few rows'
+NOT_CLUSTERED = 'errors could not be clustered'
+NO_INDICATOR = 'no indicator to regress'
 
 # a column whose part not explained by the columns before it is below this share of its length is collinear with them
 _COLLINEAR_TOLERANCE = 1e-6
@@ -95,47 +117,66 @@ def confounders(rows: pd.DataFrame) -> list[AnalysisResult]:
 def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
     """One horizon's model payload and its indicators' payloads."""
     y = pd.to_numeric(rows[OUTCOMES[MAIN_OUTCOME].column], errors='coerce').to_numpy(dtype=float)
-    observed = (rows['outcome_status'] == COMPLETE).to_numpy() & ~np.isnan(y)
+    complete = (rows['outcome_status'] == COMPLETE).to_numpy()
+    observed = complete & ~np.isnan(y)
     values = rows[list(INDICATORS)].apply(pd.to_numeric, errors='coerce').astype(float)
     controls = pd.DataFrame({c: _levels(rows[c]) for c in CONTROLS})
 
     missing_share = {
-        name: float(values.loc[observed, name].isna().mean()) if observed.any() else 0.0 for name in INDICATORS
+        name: float(values.loc[observed, name].isna().mean()) if observed.any() else None for name in INDICATORS
     }
-    left_out = {name: MISSING for name in INDICATORS if missing_share[name] > MAX_MISSING_SHARE}
+    left_out = {name: MISSING for name in INDICATORS if (missing_share[name] or 0) > MAX_MISSING_SHARE}
     candidates = [name for name in INDICATORS if name not in left_out]
     used = observed & values[candidates].notna().all(axis=1).to_numpy()
 
     fitted = rows[used].reset_index(drop=True)
     y_used = y[used]
     x = values[used].reset_index(drop=True)
-    means, sds = x[candidates].mean(), x[candidates].std()
-    for name in candidates:
-        if not sds[name] > 0:
-            left_out[name] = CONSTANT
-    scaled = [name for name in candidates if name not in left_out]
-    z = (x[scaled] - means[scaled]) / sds[scaled]
     fixed = controls[used].reset_index(drop=True)
-
-    design = pd.concat([_fixed_effects(fixed, CONTROLS), z], axis=1)
-    kept = _independent(design)
-    for name in scaled:
-        if name not in kept:
-            left_out[name] = COLLINEAR
-    regressed = [name for name in scaled if name in kept]
-
     dates = _distinct(fitted['session_date'])
-    fit = clustered_ols(y_used, design[kept], cluster_codes(fitted)) if dates >= MIN_SIGNAL_DATES else None
-    shown = fit is not None and bool(regressed)
+    means, sds = x[candidates].mean(), x[candidates].std()
 
-    correlations, vif = _redundancy(z[regressed])
+    reason, fit, regressed = None, None, []
+    z = pd.DataFrame(index=fitted.index)
+    if not observed.any():
+        reason = NO_OUTCOMES
+    elif dates < MIN_SIGNAL_DATES:
+        reason = TOO_FEW_DATES
+    else:
+        for name in candidates:
+            if sds[name] == 0:
+                left_out[name] = CONSTANT
+        scaled = [name for name in candidates if name not in left_out]
+        z = (x[scaled] - means[scaled]) / sds[scaled]
+        design = pd.concat([_fixed_effects(fixed, CONTROLS), z], axis=1)
+        if len(design) < MIN_ROWS_PER_COLUMN * design.shape[1]:
+            reason = TOO_FEW_ROWS
+        else:
+            kept = _independent(design)
+            for name in scaled:
+                if name not in kept:
+                    left_out[name] = COLLINEAR
+            regressed = [name for name in scaled if name in kept]
+            if not regressed:
+                reason = NO_INDICATOR
+            else:
+                fit = clustered_fit(y_used, design[kept], cluster_codes(fitted), of=regressed)
+                reason = NOT_CLUSTERED if fit is None else None
+    shown = fit is not None
+    if not shown:
+        regressed = []
+    z = z[regressed]
+
+    correlations, vif = _redundancy(z)
     model = {
         'outcome': MAIN_OUTCOME,
         'shown': shown,
+        'reason': reason,
         'n': int(used.sum()),
         'signals': _distinct(fitted['signal_id']),
         'signal_dates': dates,
         'censored': int((rows['outcome_status'] == ENDED).sum()),
+        'no_outcome': int((complete & np.isnan(y)).sum()),
         'missing': int((observed & ~used).sum()),
         'missing_share': missing_share,
         'indicators': regressed,
@@ -147,13 +188,14 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
         'max_missing_share': MAX_MISSING_SHARE,
         'redundant_correlation': REDUNDANT_CORRELATION,
         'redundant_vif': REDUNDANT_VIF,
+        'min_rows_per_column': MIN_ROWS_PER_COLUMN,
         'min_signal_dates': MIN_SIGNAL_DATES,
         'confidence': CONFIDENCE,
         'fdr': FDR,
         'clusters': list(CLUSTERS),
     }
 
-    subgroups = {split: _subgroups(fitted, y_used, z[regressed], fixed, split) for split in SPLITS}
+    subgroups = {split: _subgroups(fitted, y_used, z, fixed, split) for split in SPLITS}
     payloads = []
     for name, kind in INDICATORS.items():
         payload = {
@@ -177,8 +219,9 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
             'significant': False,
             'rank': None,
             'vif': vif.get(name),
-            'high_vif': name in vif and vif[name] >= REDUNDANT_VIF,
+            'high_vif': vif[name] >= REDUNDANT_VIF if name in vif else None,
             'correlated': [],
+            'joint': None,
             'redundant': None,
             'redundant_with': [],
             'by_sector': [],
@@ -190,17 +233,20 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
             'clusters': list(CLUSTERS),
         }
         if shown and name in regressed:
-            alone = clustered_ols(y_used, pd.DataFrame({'const': 1.0, name: z[name]}), cluster_codes(fitted))
+            alone = clustered_ols(y_used, pd.DataFrame({'const': 1.0, name: z[name]}), cluster_codes(fitted), of=[name])
             payload['shown'] = True
-            payload['adjusted'] = _effect(fit[name])
+            payload['adjusted'] = _effect(fit.coefficients[name])
             payload['unadjusted'] = _effect(alone[name]) if alone else None
-            payload['p_value'] = fit[name].p_value
+            payload['p_value'] = fit.coefficients[name].p_value
             index = regressed.index(name)
             payload['correlated'] = [
                 {'indicator': other, 'r': correlations[index][j]}
                 for j, other in enumerate(regressed)
                 if j != index and abs(correlations[index][j]) >= REDUNDANT_CORRELATION
             ]
+            if payload['correlated']:
+                block = [name, *(c['indicator'] for c in payload['correlated'])]
+                payload['joint'] = {'indicators': block, 'p_value': fit.joint_p_value(block)}
             for split in SPLITS:
                 payload[f'by_{split}'] = [
                     {**g['counts'], **g['effects'].get(name, _NO_EFFECT)} for g in subgroups[split]
@@ -208,8 +254,8 @@ def _horizon(rows: pd.DataFrame) -> tuple[dict, list[dict]]:
                 payload['sign_agreement'][split] = _sign_agreement(payload['adjusted'], payload[f'by_{split}'])
         payloads.append(payload)
 
-    _correct(payloads)
-    _rank(payloads)
+    correct(payloads)
+    rank(payloads, effect='adjusted')
     _name_redundant(payloads)
     return model, payloads
 
@@ -234,17 +280,25 @@ def _subgroups(rows: pd.DataFrame, y: np.ndarray, z: pd.DataFrame, fixed: pd.Dat
             'signals': _distinct(at['signal_id']),
             'signal_dates': dates,
             'shown': False,
+            'reason': None,
         }
         effects = {}
-        if dates >= MIN_SIGNAL_DATES and not z.empty:
-            design = pd.concat(
-                [_fixed_effects(fixed[mask].reset_index(drop=True), others), z[mask].reset_index(drop=True)], axis=1
-            )
+        design = pd.concat(
+            [_fixed_effects(fixed[mask].reset_index(drop=True), others), z[mask].reset_index(drop=True)], axis=1
+        )
+        if dates < MIN_SIGNAL_DATES:
+            counts['reason'] = TOO_FEW_DATES
+        elif len(design) < MIN_ROWS_PER_COLUMN * design.shape[1]:
+            counts['reason'] = TOO_FEW_ROWS
+        else:
             kept = _independent(design)
-            fit = clustered_ols(y[mask], design[kept], cluster_codes(at))
-            if fit is not None:
+            reported = [name for name in z.columns if name in kept]
+            fit = clustered_ols(y[mask], design[kept], cluster_codes(at), of=reported) if reported else None
+            if fit is None:
+                counts['reason'] = NOT_CLUSTERED if reported else NO_INDICATOR
+            else:
                 counts['shown'] = True
-                effects = {name: _effect(fit[name]) for name in z.columns if name in fit}
+                effects = {name: _effect(fit[name]) for name in reported}
         groups.append({'counts': counts, 'effects': effects})
     return groups
 
@@ -312,42 +366,29 @@ def _sign_agreement(pooled: dict, groups: list[dict]) -> float | None:
     return sum(np.sign(e) == np.sign(pooled['estimate']) for e in estimates) / len(estimates)
 
 
-def _correct(payloads: list[dict]) -> None:
-    """Sets each shown payload's adjusted p-value over the horizon's family, and whether it is significant at FDR."""
-    tested = [p for p in payloads if p['p_value'] is not None]
-    for payload, adjusted in zip(tested, benjamini_hochberg([p['p_value'] for p in tested]), strict=True):
-        payload['p_adjusted'] = adjusted
-        payload['significant'] = adjusted <= FDR
-
-
-def _t(payload: dict) -> float:
-    return abs(payload['adjusted']['estimate'] / payload['adjusted']['se'])
-
-
-def _rank(payloads: list[dict]) -> None:
-    """Ranks the shown payloads, 1 for the strongest evidence: the smallest raw p-value, then the largest |t|."""
-    tested = sorted((p for p in payloads if p['p_value'] is not None), key=lambda p: (p['p_value'], -_t(p)))
-    for position, payload in enumerate(tested, start=1):
-        payload['rank'] = position
+def _t(effect: dict | None) -> float:
+    return abs(effect['estimate'] / effect['se']) if effect else 0.0
 
 
 def _name_redundant(payloads: list[dict]) -> None:
     """
     Names each shown indicator redundant or not. One whose adjusted effect is significant never is. Otherwise it is
-    redundant with each highly correlated indicator that is significant or has the larger |t|, and redundant too
-    when its VIF is high.
+    redundant with each highly correlated indicator that is significant; when none is, with the one whose unadjusted
+    effect has the larger |t|, if that is not itself. A high VIF alone names nothing redundant.
     """
     by_name = {p['indicator']: p for p in payloads if p['shown']}
     for payload in by_name.values():
         if payload['significant']:
             payload['redundant'] = False
             continue
-        payload['redundant_with'] = [
-            c['indicator']
-            for c in payload['correlated']
-            if by_name[c['indicator']]['significant'] or _t(by_name[c['indicator']]) > _t(payload)
-        ]
-        payload['redundant'] = bool(payload['redundant_with']) or payload['high_vif']
+        correlated = [by_name[c['indicator']] for c in payload['correlated']]
+        significant = [p['indicator'] for p in correlated if p['significant']]
+        if significant:
+            payload['redundant_with'] = significant
+        elif correlated:
+            credited = max([payload, *correlated], key=lambda p: _t(p['unadjusted']))
+            payload['redundant_with'] = [] if credited is payload else [credited['indicator']]
+        payload['redundant'] = bool(payload['redundant_with'])
 
 
 def _distinct(values: pd.Series) -> int:

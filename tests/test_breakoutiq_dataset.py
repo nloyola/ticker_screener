@@ -1,6 +1,8 @@
 """
 BreakoutIQ's analysis dataset: one row per signal and resolved horizon, with the derived mandatory strengths and the
-regime, and the signals split by date into development, validation and test with a GAP_SESSIONS gap between them.
+regime, and the signals split by date into development, validation and test with a GAP_SESSIONS gap between them,
+a signal whose own window reaches the next period in the gap too; one screener version's signals, read only when the
+price history is there.
 """
 
 import sqlite3
@@ -21,11 +23,13 @@ from app.breakoutiq.dataset import (
     REGIME_SMA_DAYS,
     TEST,
     VALIDATION,
+    MissingHistory,
     assign_periods,
     build_dataset,
     join_closes,
     load_dataset,
     regimes,
+    window_ends,
 )
 from app.db import init_db
 from app.repositories.analysis_data_repo import AnalysisDataRepo
@@ -276,3 +280,58 @@ def test_build_dataset_on_no_signals_is_empty():
     path_sessions = pd.DataFrame(columns=['market', 'session_date'])
 
     assert build_dataset(signals, outcomes, {}, path_sessions).empty
+
+
+def test_a_signal_whose_window_reaches_the_next_period_is_in_the_gap():
+    # one signal a session: development ends well before validation, the calendar gap alone is met
+    dates = SESSIONS[300:1300]
+    signals = _signals(dates).assign(window_end=pd.NaT)
+    periods = assign_periods(signals, {'US': SESSIONS})
+    boundary = signals.loc[periods == VALIDATION, 'session_date'].min()
+    last = signals.index[periods == DEVELOPMENT][-1]
+    # its ticker missed sessions, so its known window ends on the next period's first date
+    signals.loc[last, 'window_end'] = boundary
+
+    moved = assign_periods(signals, {'US': SESSIONS})
+
+    assert periods[last] == DEVELOPMENT and moved[last] == GAP
+    assert (moved.drop(index=last) == periods.drop(index=last)).all()
+
+
+def test_the_dataset_reads_one_screener_version(db):
+    day = date(2020, 1, 2)
+    _add_signal(db.db_path, 1, day)
+    # the same ticker and session archived again by a later version, with its own values
+    _add_signal(db.db_path, 2, day, ticker='T1', screener_version='1.1.0', volume_ratio=9.0)
+    _add_outcome(db.db_path, 1, 5, 'complete')
+    _add_outcome(db.db_path, 2, 5, 'complete')
+
+    current = load_dataset(db, with_history=False)
+    later = load_dataset(db, with_history=False, screener_version='1.1.0')
+
+    assert list(current['signal_id']) == [1] and list(current['volume_ratio']) == [2.5]
+    assert list(later['signal_id']) == [2] and list(later['volume_ratio']) == [9.0]
+
+
+def test_a_missing_history_stops_the_dataset_and_creates_no_file(db, tmp_path):
+    db.history_db_path = str(tmp_path / 'nowhere.db')
+    _add_signal(db.db_path, 1, date(2020, 1, 2))
+    _add_outcome(db.db_path, 1, 5, 'complete')
+
+    with pytest.raises(MissingHistory, match='nowhere.db'):
+        load_dataset(db, with_history=True)
+    assert not (tmp_path / 'nowhere.db').exists()
+    assert list(load_dataset(db, with_history=False)['signal_id']) == [1]
+
+
+def test_window_ends_are_the_latest_exit_or_last_session():
+    outcomes = pd.DataFrame(
+        {
+            'signal_id': [1, 1, 2],
+            'outcome_status': ['complete', 'ended', 'complete'],
+            'exit_date': pd.to_datetime(['2020-02-03', None, '2020-01-10']),
+            'last_session_date': pd.to_datetime([None, '2020-03-02', None]),
+        }
+    )
+
+    assert window_ends(outcomes).to_dict() == {1: pd.Timestamp('2020-03-02'), 2: pd.Timestamp('2020-01-10')}
