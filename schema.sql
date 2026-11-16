@@ -303,10 +303,11 @@ CREATE TABLE IF NOT EXISTS signal_price (
 -- open to exit close, and the excess return the net return over the benchmark's. mfe_pct and mae_pct are the highest
 -- high and lowest low up to the horizon against the entry. A horizon whose session is not in the path yet is pending
 -- and has no row: the screener never writes status pending. It is complete once its session is in the path, and then
--- never recomputed, or ended when the ticker stopped getting prices first, with the reason and the last session it
--- had prices for, a row deleted again when a later run has prices for the ticker. Not market data: db-init and the
--- dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from before
--- it; change both together.
+-- never recomputed, apart from benchmark_return_pct and excess_return_pct, which a complete row stored without them
+-- gets once its path has the benchmark's entry and exit prices, or ended when the ticker stopped getting prices first,
+-- with the reason and the last session it had prices for, a row deleted again when a later run has prices for the
+-- ticker. Not market data: db-init and the dashboard's ticker removals never touch it. The twelfth upgrade in
+-- app/db.py creates it in databases from before it; change both together.
 CREATE TABLE IF NOT EXISTS signal_outcome (
        signal_id INTEGER NOT NULL REFERENCES signal (id),
        horizon INTEGER NOT NULL CHECK (horizon IN (5, 10, 20, 40, 60, 120)),
@@ -337,12 +338,13 @@ CREATE TABLE IF NOT EXISTS signal_outcome (
 );
 
 -- One row per tracked signal, what is decided once for the signal rather than per horizon. path_frozen_at is when
--- its path in signal_price reached the 120-session horizon, after which no run rewrites it. breakout_level is the
--- level the breakout cleared: the prior 60-day high when the 60-day breakout passed, the prior 20-day high otherwise.
--- breakout_failed is NULL until decided, 1 once a close in the 10 sessions after the signal session is below that
--- level, with the first such session's date, and 0 once all 10 have closed at or above it. Not market data: db-init
--- and the dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from
--- before it; change both together.
+-- its path in signal_price reached the 120-session horizon, after which no run rewrites it; a path lacking a
+-- benchmark price its outcomes need waits for the run whose benchmark covers it, unless the gap is inside the
+-- benchmark's stored range. breakout_level is the level the breakout cleared: the prior 60-day high when the 60-day
+-- breakout passed, the prior 20-day high otherwise. breakout_failed is NULL until decided, 1 once a close in the 10
+-- sessions after the signal session is below that level, with the first such session's date, and 0 once all 10 have
+-- closed at or above it. Not market data: db-init and the dashboard's ticker removals never touch it. The twelfth
+-- upgrade in app/db.py creates it in databases from before it; change both together.
 CREATE TABLE IF NOT EXISTS signal_track (
        signal_id INTEGER NOT NULL PRIMARY KEY REFERENCES signal (id),
        path_frozen_at TIMESTAMP,

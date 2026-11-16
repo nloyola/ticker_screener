@@ -24,6 +24,7 @@ class OutcomeUpdate:
     decided: int = 0
     failed: int = 0
     no_level: int = 0
+    benchmarks_filled: int = 0
 
 
 class SignalOutcomeUpdates:
@@ -35,8 +36,10 @@ class SignalOutcomeUpdates:
         """
         For every signal with a path whose outcomes are not all decided, computes its outcomes from the path and
         stores each horizon newly complete, its exit session now in the path, and the breakout failure once decided.
-        A complete horizon and a decided failure are never recomputed or stored again. A horizon its path does not
-        reach yet stays as it is: without a row (pending), or ended by the path update.
+        A complete horizon and a decided failure are never recomputed or stored again, except that a horizon
+        completed while the path lacked the benchmark's prices (a run whose benchmark download failed) gets the
+        benchmark's and the excess return once a later run's path has them. A horizon its path does not reach yet
+        stays as it is: without a row (pending), or ended by the path update.
 
         A signal archived without the high its breakout cleared gets its horizons but no failure, with a warning.
         Logs one summary line and returns the counts.
@@ -50,9 +53,15 @@ class SignalOutcomeUpdates:
                 result.no_level += 1
             outcomes = compute_outcomes(path, s.close, level)
             completed = [o for o in outcomes.horizons if o.complete and o.horizon not in s.complete]
-            self.signal_outcome_repo.store(s.id, completed, outcomes.failure)
+            benchmarks = [
+                o
+                for o in outcomes.horizons
+                if o.complete and o.horizon in s.benchmark_due and o.benchmark_return_pct is not None
+            ]
+            self.signal_outcome_repo.store(s.id, completed, outcomes.failure, benchmarks)
             result.signals += 1
             result.completed += len(completed)
+            result.benchmarks_filled += len(benchmarks)
             if outcomes.failure is not None and outcomes.failure.failed is not None:
                 result.decided += 1
                 result.failed += int(outcomes.failure.failed)
@@ -60,6 +69,6 @@ class SignalOutcomeUpdates:
         logger.info(
             f'signal outcomes: computed {result.signals} signals, completed {result.completed} horizons, '
             f'decided {result.decided} breakout failures ({result.failed} failed), '
-            f'{result.no_level} without a breakout level'
+            f'{result.no_level} without a breakout level, filled {result.benchmarks_filled} benchmark returns'
         )
         return result

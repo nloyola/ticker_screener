@@ -66,6 +66,23 @@ def build_path(
     return path
 
 
+def benchmark_may_fill(path: Sequence[PathSession], newest_benchmark: date | None) -> bool:
+    """
+    Whether 'path' lacks a benchmark price its outcomes need (the entry session's open or close, or a horizon exit's
+    close) that a later benchmark download can still bring: the benchmark's stored closes, whose newest date is
+    'newest_benchmark' (None when it has none), end before the path's last session, as when the run's benchmark
+    download failed and kept the closes it had. A gap inside the benchmark's stored range is one no download fills.
+    """
+    if newest_benchmark is not None and newest_benchmark >= path[-1].session_date:
+        return False
+    entry = path[1] if len(path) > 1 else None
+    needed = (
+        [] if entry is None else [entry.benchmark_open if entry.benchmark_open is not None else entry.benchmark_close]
+    )
+    needed += [path[h].benchmark_close for h in HORIZONS if h < len(path)]
+    return any(v is None for v in needed)
+
+
 @dataclass
 class PathUpdate:
     """What one update did: paths rewritten, of which frozen, signals ended, and signals whose session is gone."""
@@ -94,7 +111,8 @@ class SignalPaths:
 
         Any other signal's path is rewritten whole from price_data and benchmark_price as this run left them, so every
         value in it shares one adjustment basis, from the signal session to its market's last complete session for a
-        run started at 'started_at', or PATH_SESSIONS sessions after the signal session, when the path is frozen. Its
+        run started at 'started_at', or PATH_SESSIONS sessions after the signal session, when the path is frozen,
+        unless benchmark_may_fill says a later download can still fill a benchmark price its outcomes need. Its
         ended horizons, if an earlier run ended it, are deleted, since its ticker has prices again. A signal whose
         session is no longer in price_data keeps its path, with a warning.
 
@@ -106,6 +124,7 @@ class SignalPaths:
         for s in signals:
             by_ticker.setdefault(s.ticker, []).append(s)
         benchmarks = {market: self.benchmark_price_repo.opens_and_closes(BENCHMARKS[market]) for market in markets}
+        newest_benchmark = {market: max(benchmarks[market], default=None) for market in markets}
         last_sessions = {market: last_complete_session(market, started_at) for market in markets}
 
         for ticker, ticker_signals in by_ticker.items():
@@ -124,7 +143,9 @@ class SignalPaths:
                     )
                     result.missing_session += 1
                     continue
-                frozen = path[-1].session_index == PATH_SESSIONS
+                frozen = path[-1].session_index == PATH_SESSIONS and not benchmark_may_fill(
+                    path, newest_benchmark[s.market]
+                )
                 self.signal_path_repo.write(s.id, path, frozen)
                 result.rewritten += 1
                 result.frozen += int(frozen)

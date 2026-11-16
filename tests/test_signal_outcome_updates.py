@@ -80,7 +80,7 @@ def add_signal(path: str, signal_id: int, ticker: str, close: float, high_20d=10
         )
 
 
-def store_prices(c: SimpleNamespace, ticker: str, n: int, close=rising) -> None:
+def store_prices(c: SimpleNamespace, ticker: str, n: int, close=rising, benchmark_sessions: int | None = None) -> None:
     c.price_data_repo.replace_for_ticker(
         ticker,
         [
@@ -102,7 +102,7 @@ def store_prices(c: SimpleNamespace, ticker: str, n: int, close=rising) -> None:
         'SPY',
         [
             DailyPrice(date=d, close=500.0 + i, volume=0, high=None, low=None, open=499.0 + i)
-            for i, d in enumerate(DAYS[:n])
+            for i, d in enumerate(DAYS[: n if benchmark_sessions is None else benchmark_sessions])
         ],
     )
 
@@ -187,6 +187,48 @@ def test_rerunning_changes_no_complete_row_and_completes_the_next_horizon(path, 
     # with nothing new, a rerun changes nothing at all
     run(container, 40)
     assert outcome_rows(path) == after
+
+
+def test_a_horizon_completed_without_the_benchmark_gets_it_once_the_path_has_it(path, container):
+    # the run's benchmark download failed, keeping closes up to DAYS[19]: the 10-session exit, DAYS[20], has no
+    # benchmark close, so that horizon completes without the benchmark's return; the 5-session one has it
+    store_prices(container, 'AAA', 30, benchmark_sessions=20)
+    add_signal(path, 1, 'AAA', close=110.0)
+    run(container, 30)
+    before = outcome_rows(path)
+    assert before[0][10] is not None and before[1][10] is None and before[1][11] is None
+
+    # the next run's download brings the benchmark: the row gets the benchmark's return and the excess over it,
+    # and nothing else in it changes, even after a restatement of the ticker's prices
+    store_prices(container, 'AAA', 30, close=lambda i: (100.0 + i) / 2)
+    result = run(container, 30)
+
+    after = outcome_rows(path)
+    expected = compute_outcomes(container.signal_path_repo.path(1), 55.0, 52.5).horizons[1]
+    assert after[1][10] == expected.benchmark_return_pct
+    assert after[1][11] == pytest.approx(before[1][9] - expected.benchmark_return_pct)
+    assert after[1][:10] + after[1][12:17] == before[1][:10] + before[1][12:17]
+    assert after[0] == before[0]
+    assert (result.completed, result.benchmarks_filled) == (0, 1)
+
+    # filled once: a rerun changes nothing
+    run(container, 30)
+    assert outcome_rows(path) == after
+
+
+def test_a_complete_signal_gets_a_late_benchmark_too(path, container):
+    # every horizon complete and the failure decided, but the 120-session exit lacks the benchmark: the path waits
+    # to freeze, and the next run's benchmark fills the last row though the signal had nothing else left
+    store_prices(container, 'AAA', 131, benchmark_sessions=130)
+    add_signal(path, 1, 'AAA', close=110.0)
+    run(container, 131)
+    assert [r[10] is None for r in outcome_rows(path)] == [False] * 5 + [True]
+
+    store_prices(container, 'AAA', 131)
+    result = run(container, 131)
+
+    assert all(r[10] is not None and r[11] is not None for r in outcome_rows(path))
+    assert result.benchmarks_filled == 1
 
 
 def test_the_command_stores_the_same_rows_as_the_run(path, container, tmp_path):

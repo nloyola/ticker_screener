@@ -19,7 +19,7 @@ from app.price_apis import DailyPrice
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.signal_path_repo import SignalPathRepo
-from app.signal_paths import HORIZONS, PATH_SESSIONS, REMOVED, SignalPaths, build_path
+from app.signal_paths import HORIZONS, PATH_SESSIONS, REMOVED, SignalPaths, benchmark_may_fill, build_path
 
 NEW_YORK = ZoneInfo('America/New_York')
 # a Monday
@@ -165,6 +165,7 @@ def test_a_split_inside_the_path_leaves_no_jump(path, container):
 
 def test_a_path_freezes_at_the_120_session_horizon_and_is_never_rewritten(path, container):
     store_prices(container, 'AAA', DAYS[:140])
+    store_benchmark(container, 'SPY', DAYS[:140])
     add_signal(path, 1, 'AAA', DAYS[10])
 
     result = update(container, DAYS[139])
@@ -182,6 +183,53 @@ def test_a_path_freezes_at_the_120_session_horizon_and_is_never_rewritten(path, 
     update(container, DAYS[149])
     assert path_of(path, 1) == stored
     assert outcomes(path, 1) == []
+
+
+def test_a_path_waits_to_freeze_while_a_later_download_can_bring_its_benchmark(path, container):
+    # the run's benchmark download failed, keeping closes that end the session before the path's 120th: the path
+    # is written but not frozen, so the next run, with the benchmark current, writes it whole and freezes it
+    store_prices(container, 'AAA', DAYS[:131])
+    store_benchmark(container, 'SPY', DAYS[:130])
+    add_signal(path, 1, 'AAA', DAYS[10])
+
+    result = update(container, DAYS[130])
+
+    assert path_of(path, 1)[-1][0] == PATH_SESSIONS and path_of(path, 1)[-1][8] is None
+    assert frozen_at(path, 1) is None
+    assert result.frozen == 0
+
+    store_benchmark(container, 'SPY', DAYS[:131])
+    result = update(container, DAYS[130])
+
+    assert path_of(path, 1)[-1][8] == 630.0
+    assert frozen_at(path, 1) is not None
+    assert result.frozen == 1
+
+
+def test_a_path_freezes_with_a_gap_inside_its_benchmarks_stored_range(path, container):
+    # the benchmark is current but has no close on the 20-session exit: no download fills that, so the path freezes
+    store_prices(container, 'AAA', DAYS[:131])
+    store_benchmark(container, 'SPY', DAYS[:30] + DAYS[31:131])
+    add_signal(path, 1, 'AAA', DAYS[10])
+
+    update(container, DAYS[130])
+
+    assert path_of(path, 1)[20][8] is None
+    assert frozen_at(path, 1) is not None
+
+
+def test_benchmark_may_fill_only_a_needed_price_missing_after_the_benchmarks_newest_close():
+    store = {d: (499.0 + i, 500.0 + i) for i, d in enumerate(DAYS[:30])}
+    complete = build_path(DAYS[10], rows('AAA', DAYS[:30]), store, DAYS[29])
+    assert not benchmark_may_fill(complete, DAYS[29])
+    # the newest session lacks the benchmark, but 19 is no horizon's exit and the benchmark is stale: nothing needed
+    stale = build_path(DAYS[10], rows('AAA', DAYS[:30]), {d: store[d] for d in DAYS[:29]}, DAYS[29])
+    assert not benchmark_may_fill(stale, DAYS[28])
+    # the 10-session exit lacks it, after the benchmark's newest close
+    short = build_path(DAYS[10], rows('AAA', DAYS[:21]), {d: store[d] for d in DAYS[:20]}, DAYS[20])
+    assert benchmark_may_fill(short, DAYS[19])
+    # no benchmark stored at all: a download can still bring it
+    assert benchmark_may_fill(build_path(DAYS[10], rows('AAA', DAYS[:21]), {}, DAYS[20]), None)
 
 
 def test_a_removed_ticker_keeps_its_path_and_its_horizons_beyond_it_end(path, container):
