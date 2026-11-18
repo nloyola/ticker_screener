@@ -25,7 +25,7 @@ from app.analyzer import (
     utc_now,
 )
 from app.container import Container
-from app.markets import MARKETS, UnsupportedTicker, last_complete_session, market_of
+from app.markets import MARKETS, UnsupportedTicker, is_session, last_complete_session, market_of
 from app.provenance import git_commit
 from app.repositories.signal_repo import SignalLink
 
@@ -72,14 +72,17 @@ def replayable_sessions(dates: Mapping[str, pd.Index], started_at: datetime) -> 
 
 
 def market_dates(prices: pd.DataFrame) -> dict[str, pd.Index]:
-    """Each market's session dates: the days any of its tickers has a price, leaving out a ticker of no market."""
+    """
+    Each market's session dates: the days any of its tickers has a price, but those the market does not trade
+    (is_session), which Analyzer.score_as_of drops, leaving out a ticker of no market.
+    """
     by_market: dict[str, set[date]] = {market: set() for market in MARKETS}
     for ticker, group_df in prices.groupby(level='ticker'):
         try:
             market = market_of(str(ticker))
         except UnsupportedTicker:
             continue
-        by_market[market].update(group_df.index.get_level_values('date'))
+        by_market[market].update(d for d in group_df.index.get_level_values('date') if is_session(market, d))
     return {market: pd.Index(sorted(days)) for market, days in by_market.items()}
 
 

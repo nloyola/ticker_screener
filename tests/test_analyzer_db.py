@@ -20,7 +20,7 @@ import app.analyzer as analyzer_module
 from app.analyzer import SCREENER_VERSION, Analyzer, rule_settings, trading_days_between
 from app.commands.run_refresh_cmd import RUN_ID_ENV, RunRefreshCmd, run_id_from_env
 from app.db import init_db
-from app.markets import CANADA, US
+from app.markets import CANADA, US, is_session
 from app.models import PriceData
 from app.price_apis import DailyPrice
 from app.provenance import COMMIT_ENV
@@ -37,8 +37,31 @@ from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
-TODAY = date.today()
-LAST_RUN = TODAY - timedelta(days=3)
+
+def trades(day: date) -> bool:
+    """Whether both markets trade on 'day', so a row of either market's ticker dated on it is a session's."""
+    return is_session(US, day) and is_session(CANADA, day)
+
+
+def shift(day: date, sessions: int) -> date:
+    """The day 'sessions' days both markets trade after 'day' (before it when negative)."""
+    step = timedelta(days=1 if sessions > 0 else -1)
+    for _ in range(abs(sessions)):
+        day += step
+        while not trades(day):
+            day += step
+    return day
+
+
+def session_days(last_day: date, n: int) -> list[date]:
+    """The n days both markets trade ending on last_day, oldest first."""
+    return [shift(last_day, i - n + 1) for i in range(n)]
+
+
+# the newest day both markets traded: the fixtures' rows are dated by sessions, never by a weekend or a holiday, which
+# a run drops, and stay near the real today, which the fetch's window is judged from
+TODAY = shift(date.today() + timedelta(days=1), -1)
+LAST_RUN = shift(TODAY, -3)
 
 NEW_YORK = ZoneInfo('America/New_York')
 # runs started while the US and Canadian markets are open, and in the evening once both have published TODAY's rows
@@ -47,13 +70,14 @@ EVENING = datetime.combine(TODAY, time(20), tzinfo=NEW_YORK)
 
 
 def price_rows(ticker: str, last_day: date, n: int = 100) -> list[PriceData]:
-    """n rising closes ending on last_day, with a volume spike on the last day."""
+    """n rising closes on the sessions ending on last_day, with a volume spike on the last day."""
+    days = session_days(last_day, n)
     return [
         PriceData(
             id=0,
             subsector_id=1,
             ticker=ticker,
-            date=last_day - timedelta(days=n - 1 - i),
+            date=days[i],
             close=100.0 + i,
             volume=2000 if i == n - 1 else 1000,
         )
@@ -92,8 +116,8 @@ def container(path) -> SimpleNamespace:
 
 
 def score_all(analyzer: Analyzer, date_created: date) -> None:
-    """Scores every stored ticker as a run on date_created did."""
-    analyzer.save_to_repository(
+    """Scores every stored ticker as a run did, dating its rows date_created."""
+    analyzer.stock_criteria_repo.bulk_insert(
         [analyzer.analyze_ticker(t, g) for t, g in analyzer.load_price_data().groupby(level='ticker')], date_created
     )
 
@@ -110,8 +134,8 @@ def test_stale_ticker_keeps_its_previous_row_and_date(path, container, capsys):
     analyzer = container.analyzer
 
     # the last run scored both tickers from rows ending yesterday
-    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY - timedelta(days=1)))
-    container.price_data_repo.bulk_insert(price_rows('STALE', TODAY - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('AAA', shift(TODAY, -1)))
+    container.price_data_repo.bulk_insert(price_rows('STALE', shift(TODAY, -1)))
     score_all(analyzer, LAST_RUN)
     assert criteria(path) == {'AAA': (199.0, LAST_RUN.isoformat()), 'STALE': (199.0, LAST_RUN.isoformat())}
 
@@ -125,19 +149,20 @@ def test_stale_ticker_keeps_its_previous_row_and_date(path, container, capsys):
     assert summary_lines(out) == [
         f'US: skipped 1 stale ticker (stopped trading, or last price before {TODAY}) and 0 frozen tickers'
     ]
-    assert flagged_lines(out) == [f'FLAGGED ticker=STALE reason=stale last={TODAY - timedelta(days=1)}']
+    assert flagged_lines(out) == [f'FLAGGED ticker=STALE reason=stale last={shift(TODAY, -1)}']
 
 
 def test_us_holiday_leaves_us_tickers_scored(path, container, capsys):
     # Canada traded today and the US did not: every US ticker's last price is yesterday's
-    yesterday = TODAY - timedelta(days=1)
+    yesterday = shift(TODAY, -1)
     container.price_data_repo.bulk_insert(price_rows('AAA', yesterday))
-    container.price_data_repo.bulk_insert(price_rows('BBB', yesterday - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('BBB', shift(yesterday, -1)))
     container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY))
 
     container.analyzer.analyze()
 
-    assert criteria(path) == {'AAA': (199.0, TODAY.isoformat()), 'SHOP.TO': (199.0, TODAY.isoformat())}
+    # each market's rows are dated by its own session, the US's yesterday's
+    assert criteria(path) == {'AAA': (199.0, yesterday.isoformat()), 'SHOP.TO': (199.0, TODAY.isoformat())}
     assert summary_lines(capsys.readouterr().out) == [
         f'US: skipped 1 stale ticker (stopped trading, or last price before {yesterday}) and 0 frozen tickers',
         f'Canada: skipped 0 stale tickers (stopped trading, or last price before {TODAY}) and 0 frozen tickers',
@@ -146,16 +171,21 @@ def test_us_holiday_leaves_us_tickers_scored(path, container, capsys):
 
 def test_standalone_analyze_scores_both_markets(path, container, capsys):
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
-    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY - timedelta(days=3)))
-    container.price_data_repo.bulk_insert(price_rows('ABC.V', TODAY - timedelta(days=3)))
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', shift(TODAY, -3)))
+    container.price_data_repo.bulk_insert(price_rows('ABC.V', shift(TODAY, -3)))
 
     container.analyzer.analyze()
 
-    assert set(criteria(path)) == {'AAA', 'SHOP.TO', 'ABC.V'}
-    assert {date_created for _, date_created in criteria(path).values()} == {TODAY.isoformat()}
+    # each market's rows are dated by its own newest session
+    canada = shift(TODAY, -3).isoformat()
+    assert {t: d for t, (_, d) in criteria(path).items()} == {
+        'AAA': TODAY.isoformat(),
+        'SHOP.TO': canada,
+        'ABC.V': canada,
+    }
     assert summary_lines(capsys.readouterr().out) == [
         f'US: skipped 0 stale tickers (stopped trading, or last price before {TODAY}) and 0 frozen tickers',
-        f'Canada: skipped 0 stale tickers (stopped trading, or last price before {TODAY - timedelta(days=3)}) '
+        f'Canada: skipped 0 stale tickers (stopped trading, or last price before {shift(TODAY, -3)}) '
         'and 0 frozen tickers',
     ]
 
@@ -198,8 +228,8 @@ def rows_of(path: str, table: str, ticker: str) -> list[tuple]:
 
 def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path, container, capsys):
     # the last run, an EODHD one, scored both markets; SHOP.TO holds rows older than the window too
-    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY - timedelta(days=1)))
-    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY - timedelta(days=1), n=HISTORY_DAYS + 10))
+    container.price_data_repo.bulk_insert(price_rows('AAA', shift(TODAY, -1)))
+    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', shift(TODAY, -1), n=HISTORY_DAYS + 10))
     score_all(container.analyzer, LAST_RUN)
     shop_criteria = rows_of(path, 'stock_criteria', 'SHOP.TO')
     shop_prices = rows_of(path, 'price_data', 'SHOP.TO')
@@ -224,8 +254,8 @@ def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path,
 
 def test_stale_ticker_already_flagged_is_counted_but_not_flagged_again(path, container, capsys):
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
-    container.price_data_repo.bulk_insert(price_rows('GONE', TODAY - timedelta(days=2)))
-    container.price_data_repo.bulk_insert(price_rows('LATE', TODAY - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('GONE', shift(TODAY, -2)))
+    container.price_data_repo.bulk_insert(price_rows('LATE', shift(TODAY, -1)))
 
     container.analyzer.analyze(already_flagged={'GONE'})
 
@@ -233,7 +263,7 @@ def test_stale_ticker_already_flagged_is_counted_but_not_flagged_again(path, con
     assert summary_lines(out) == [
         f'US: skipped 2 stale tickers (stopped trading, or last price before {TODAY}) and 0 frozen tickers'
     ]
-    assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={TODAY - timedelta(days=1)}']
+    assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={shift(TODAY, -1)}']
 
 
 class TiingoWithDeadTickers(TiingoStub):
@@ -251,7 +281,7 @@ class TiingoWithDeadTickers(TiingoStub):
 
 def test_run_refresh_flags_each_dead_or_stale_ticker_once(path, container, capsys):
     # every ticker was scored by the last run; GONE and EMPTY keep their rows, which analyze finds stale
-    yesterday = TODAY - timedelta(days=1)
+    yesterday = shift(TODAY, -1)
     for ticker in ('AAA', 'GONE', 'EMPTY'):
         container.price_data_repo.bulk_insert(price_rows(ticker, yesterday))
 
@@ -284,10 +314,10 @@ def add_signal(path: str, signal_id: int, ticker: str, session_date: date) -> No
 
 def test_run_refresh_keeps_each_signals_path_and_ends_those_it_got_no_prices_for(path, container):
     # signals of a ticker the run fetches, of two it gets no prices for, and of one removed from every subsector
-    yesterday = TODAY - timedelta(days=1)
+    yesterday = shift(TODAY, -1)
     for ticker in ('AAA', 'GONE', 'EMPTY'):
         container.price_data_repo.bulk_insert(price_rows(ticker, yesterday))
-    session = TODAY - timedelta(days=10)
+    session = shift(TODAY, -10)
     for signal_id, ticker in enumerate(('AAA', 'GONE', 'EMPTY', 'OLD'), start=1001):
         add_signal(path, signal_id, ticker, session)
 
@@ -302,7 +332,7 @@ def test_run_refresh_keeps_each_signals_path_and_ends_those_it_got_no_prices_for
     # AAA's path is the fetch's rows from the signal session to today, on the fetch's basis
     fetched = {p.date: p.close for p in price_rows('AAA', TODAY, n=101)}
     path_rows = [(p.session_index, p.session_date, p.close) for p in container.signal_path_repo.path(1001)]
-    assert path_rows == [(i, session + timedelta(days=i), fetched[session + timedelta(days=i)]) for i in range(11)]
+    assert path_rows == [(i, shift(session, i), fetched[shift(session, i)]) for i in range(11)]
     # analyze found GONE and EMPTY stale too, but the fetch's reasons win
     assert container.analyzer.flagged == {'GONE': 'stale', 'EMPTY': 'stale'}
     with sqlite3.connect(path) as con:
@@ -335,13 +365,13 @@ def frozen_rows(ticker: str, flat: int, n: int = 100, volume_on: int | None = No
 
 
 def first_flat_day(flat: int) -> date:
-    return TODAY - timedelta(days=flat - 1)
+    return shift(TODAY, -(flat - 1))
 
 
 def test_frozen_ticker_keeps_its_previous_row_and_is_flagged(path, container, capsys, caplog):
     analyzer = container.analyzer
-    container.price_data_repo.bulk_insert(price_rows('AAA', TODAY - timedelta(days=1)))
-    container.price_data_repo.bulk_insert(price_rows('ANSS', TODAY - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('AAA', shift(TODAY, -1)))
+    container.price_data_repo.bulk_insert(price_rows('ANSS', shift(TODAY, -1)))
     score_all(analyzer, LAST_RUN)
 
     # today's fetch got a new day for both, but ANSS's last 10 days are one close with no volume
@@ -409,7 +439,7 @@ def test_frozen_ticker_already_flagged_is_counted_but_not_flagged_again(path, co
 
 def test_ticker_both_stale_and_frozen_is_flagged_once_as_stale(path, container, capsys):
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
-    yesterday = TODAY - timedelta(days=1)
+    yesterday = shift(TODAY, -1)
     container.price_data_repo.bulk_insert([r for r in frozen_rows('VERO', flat=11) if r.date <= yesterday])
 
     container.analyzer.analyze()
@@ -425,32 +455,35 @@ def test_run_during_market_hours_scores_the_previous_session(path, container, ca
     # the fetch stored a row for TODAY, a session still in progress, for both markets
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
     container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY))
-    container.price_data_repo.bulk_insert(price_rows('LATE', TODAY - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('LATE', shift(TODAY, -1)))
 
     container.analyzer.analyze(started_at=MARKET_HOURS)
 
-    # 198.0 is the close of the day before TODAY; LATE, which has no row for TODAY, is current, not stale
+    # 198.0 is the close of the session before TODAY, which dates every row; LATE, which has no row for TODAY, is
+    # current, not stale
+    previous = shift(TODAY, -1)
     assert criteria(path) == {
-        'AAA': (198.0, TODAY.isoformat()),
-        'LATE': (199.0, TODAY.isoformat()),
-        'SHOP.TO': (198.0, TODAY.isoformat()),
+        'AAA': (198.0, previous.isoformat()),
+        'LATE': (199.0, previous.isoformat()),
+        'SHOP.TO': (198.0, previous.isoformat()),
     }
+    # the last complete day is the calendar day before TODAY, a Sunday when TODAY is a Monday
     yesterday = TODAY - timedelta(days=1)
     out = capsys.readouterr().out
     assert summary_lines(out) == [
         f'US: dropped 1 row dated after {yesterday}, whose candles are final only after 19:00 America/New_York '
         'that day',
-        f'US: skipped 0 stale tickers (stopped trading, or last price before {yesterday}) and 0 frozen tickers',
+        f'US: skipped 0 stale tickers (stopped trading, or last price before {previous}) and 0 frozen tickers',
         f'Canada: dropped 1 row dated after {yesterday}, whose candles are final only after 19:00 America/Toronto '
         'that day',
-        f'Canada: skipped 0 stale tickers (stopped trading, or last price before {yesterday}) and 0 frozen tickers',
+        f'Canada: skipped 0 stale tickers (stopped trading, or last price before {previous}) and 0 frozen tickers',
     ]
     assert flagged_lines(out) == []
 
 
 def test_run_in_the_evening_scores_that_day(path, container, capsys):
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
-    container.price_data_repo.bulk_insert(price_rows('LATE', TODAY - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(price_rows('LATE', shift(TODAY, -1)))
 
     container.analyzer.analyze(started_at=EVENING)
 
@@ -459,7 +492,7 @@ def test_run_in_the_evening_scores_that_day(path, container, capsys):
     assert summary_lines(out) == [
         f'US: skipped 1 stale ticker (stopped trading, or last price before {TODAY}) and 0 frozen tickers'
     ]
-    assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={TODAY - timedelta(days=1)}']
+    assert flagged_lines(out) == [f'FLAGGED ticker=LATE reason=stale last={shift(TODAY, -1)}']
 
 
 def test_run_refresh_judges_completeness_by_when_it_started(path, container):
@@ -474,8 +507,8 @@ def test_run_refresh_judges_completeness_by_when_it_started(path, container):
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args([]), container)
 
-    # TiingoStub's closes run from 100.0 to 200.0 on TODAY; 199.0 is the day before's
-    assert criteria(path) == {'AAA': (199.0, TODAY.isoformat())}
+    # TiingoStub's closes run from 100.0 to 200.0 on TODAY; 199.0 is the session before's, which dates the row
+    assert criteria(path) == {'AAA': (199.0, shift(TODAY, -1).isoformat())}
 
 
 SECONDARY_COLUMNS = (
@@ -587,7 +620,7 @@ def test_analyze_stores_every_relative_strength_value(path, container):
         container.price_data_repo.bulk_insert(rows)
     container.benchmark_price_repo.replace(
         'SPY',
-        [DailyPrice(TODAY - timedelta(days=99 - i), 200.0 + i, 1, 200.0 + i, 200.0 + i, 200.0 + i) for i in range(100)],
+        [DailyPrice(d, 200.0 + i, 1, 200.0 + i, 200.0 + i, 200.0 + i) for i, d in enumerate(session_days(TODAY, 100))],
     )
 
     container.analyzer.analyze(started_at=EVENING)
@@ -646,11 +679,11 @@ LXP_LAST_TRADE = date(2026, 10, 30)
 
 
 def trading_days(last_day: date, n: int) -> list[date]:
-    """The n weekdays ending on last_day, oldest first."""
+    """The n US sessions ending on last_day, oldest first."""
     days: list[date] = []
     day = last_day
     while len(days) < n:
-        if day.weekday() < 5:
+        if is_session(US, day):
             days.append(day)
         day -= timedelta(days=1)
     return days[::-1]
@@ -770,7 +803,7 @@ def statuses(path: str) -> dict[str, tuple[float, str, str | None]]:
 @pytest.mark.parametrize(
     'rows',
     [
-        pytest.param(price_rows('BRK', TODAY - timedelta(days=1)), id='stale'),
+        pytest.param(price_rows('BRK', shift(TODAY, -1)), id='stale'),
         pytest.param(padded_rows('BRK'), id='padded stop'),
         pytest.param(frozen_rows('BRK', flat=10), id='frozen'),
     ],
@@ -813,7 +846,7 @@ def test_ticker_left_unscored_after_being_scored_loses_its_status(path, containe
 
 # screened_session: each market's session a run scored, with the rules it scored by
 
-SESSION_BEFORE = TODAY - timedelta(days=1)
+SESSION_BEFORE = shift(TODAY, -1)
 
 
 def sessions(path: str) -> list[tuple]:
@@ -822,6 +855,109 @@ def sessions(path: str) -> list[tuple]:
             'SELECT market, session_date, screener_version, rule_settings, git_commit, run_id, tickers_scored '
             'FROM screened_session ORDER BY market, session_date'
         ).fetchall()
+
+
+# Each market's rows are dated by its own last session, never by the run's day, and a price API's row dated on a day
+# its market does not trade is dropped before scoring.
+
+
+def market_rows(ticker: str, last_day: date, closed_day: date | None = None) -> list[PriceData]:
+    """
+    100 rising closes on the sessions of the ticker's market ending on last_day, with a volume spike on the last; and,
+    when 'closed_day' is given, one more row dated on it, as a price API might answer for a day the market was closed.
+    """
+    market = US if '.' not in ticker else CANADA
+    days: list[date] = []
+    day = last_day
+    while len(days) < 100:
+        if is_session(market, day):
+            days.append(day)
+        day -= timedelta(days=1)
+    rows = [
+        PriceData(id=0, subsector_id=1, ticker=ticker, date=d, close=100.0 + i, volume=2000 if i == 99 else 1000)
+        for i, d in enumerate(reversed(days))
+    ]
+    if closed_day is not None:
+        rows.append(PriceData(id=0, subsector_id=1, ticker=ticker, date=closed_day, close=500.0, volume=0))
+    return rows
+
+
+@pytest.mark.parametrize(
+    ('started_at', 'us_session', 'canada_session', 'closed_day'),
+    [
+        # the run that labelled its output 'Data as of 2026-11-15': Saturday evening in New York, Sunday in UTC
+        pytest.param(
+            datetime(2026, 11, 14, 20, tzinfo=NEW_YORK),
+            date(2026, 11, 13),
+            date(2026, 11, 13),
+            date(2026, 11, 14),
+            id='Saturday evening, Sunday in UTC',
+        ),
+        pytest.param(
+            datetime(2026, 11, 15, 12, tzinfo=NEW_YORK),
+            date(2026, 11, 13),
+            date(2026, 11, 13),
+            date(2026, 11, 15),
+            id='Sunday',
+        ),
+        # US Thanksgiving: Toronto trades, New York does not
+        pytest.param(
+            datetime(2026, 11, 26, 20, tzinfo=NEW_YORK),
+            date(2026, 11, 25),
+            date(2026, 11, 26),
+            date(2026, 11, 26),
+            id='US holiday',
+        ),
+        # Canadian Thanksgiving: New York trades, Toronto does not
+        pytest.param(
+            datetime(2026, 10, 12, 20, tzinfo=NEW_YORK),
+            date(2026, 10, 12),
+            date(2026, 10, 9),
+            date(2026, 10, 12),
+            id='Canadian holiday',
+        ),
+    ],
+)
+def test_each_market_is_dated_by_its_last_session(
+    path, container, caplog, started_at, us_session, canada_session, closed_day
+):
+    # every ticker's rows end on its market's last session; AAA and SHOP.TO also got a row dated on the closed day,
+    # in the market that was closed on it
+    us_closed = closed_day if not is_session(US, closed_day) else None
+    canada_closed = closed_day if not is_session(CANADA, closed_day) else None
+    container.price_data_repo.bulk_insert(market_rows('AAA', us_session, us_closed))
+    container.price_data_repo.bulk_insert(market_rows('BBB', us_session))
+    container.price_data_repo.bulk_insert(market_rows('SHOP.TO', canada_session, canada_closed))
+    container.price_data_repo.bulk_insert(market_rows('RY.TO', canada_session))
+
+    with caplog.at_level('WARNING', logger='app.analyzer'):
+        container.analyzer.analyze(started_at=started_at)
+
+    # every ticker is scored on its market's last session, none left stale by the dropped row, and dated by it
+    us, canada = us_session.isoformat(), canada_session.isoformat()
+    assert criteria(path) == {
+        'AAA': (199.0, us),
+        'BBB': (199.0, us),
+        'SHOP.TO': (199.0, canada),
+        'RY.TO': (199.0, canada),
+    }
+    assert [(market, session_date) for market, session_date, *_ in sessions(path)] == [(CANADA, canada), (US, us)]
+    dropped = {r.getMessage() for r in caplog.records if 'dated on no session' in r.getMessage()}
+    assert dropped == {
+        f'{ticker}: dropped 1 price row dated on no session ({closed_day})'
+        for ticker, closed in (('AAA', us_closed), ('SHOP.TO', canada_closed))
+        if closed is not None
+    }
+
+
+def test_score_as_of_ignores_a_row_dated_on_a_closed_day(container):
+    # a Saturday row in the stored prices is no session: scoring it scores nothing, and the Friday before is scored
+    # from the rows up to it alone
+    container.price_data_repo.bulk_insert(market_rows('AAA', date(2026, 11, 13), date(2026, 11, 14)))
+
+    assert container.analyzer.score_as_of(date(2026, 11, 14)) == []
+    (friday,) = container.analyzer.score_as_of(date(2026, 11, 13))
+    assert (friday.session_date, friday.close) == (date(2026, 11, 13), 199.0)
 
 
 def run_with_rules(container, monkeypatch, version: str, run_id: int) -> None:
@@ -1030,7 +1166,7 @@ def test_same_session_under_new_rules_is_archived_again(path, container, monkeyp
 
 def test_repeated_signal_links_to_the_previous_one(path, container):
     add_energy_oil(path)
-    earlier = TODAY - timedelta(days=3)
+    earlier = shift(TODAY, -3)
     container.price_data_repo.bulk_insert(price_rows('BRK', earlier))
     container.analyzer.analyze()
     # three more rising days: BRK breaks out again on TODAY, its volume still twice the average
@@ -1064,7 +1200,7 @@ def test_trading_days_between(previous, expected):
 
 
 # Scoring a past session: score_as_of reads only the rows dated on or before it.
-AS_OF = TODAY - timedelta(days=40)
+AS_OF = shift(TODAY, -40)
 LATER_DAYS = 40
 
 
@@ -1083,8 +1219,7 @@ def history_rows(ticker: str, step: float, last_day: date) -> list[PriceData]:
 
 def benchmark_prices(last_day: date) -> list[DailyPrice]:
     return [
-        DailyPrice(last_day - timedelta(days=367 - i), 200.0 + i, 1, 201.0 + i, 198.0 + i, 200.0 + i)
-        for i in range(368)
+        DailyPrice(d, 200.0 + i, 1, 201.0 + i, 198.0 + i, 200.0 + i) for i, d in enumerate(session_days(last_day, 368))
     ]
 
 
@@ -1095,7 +1230,7 @@ def extreme_rows(ticker: str, first_day: date, n: int) -> list[PriceData]:
             id=0,
             subsector_id=1,
             ticker=ticker,
-            date=first_day + timedelta(days=i),
+            date=shift(first_day, i),
             close=1e6 if i % 2 else 0.01,
             volume=10**12 if i % 2 else 0,
             high=2e6,
@@ -1106,7 +1241,7 @@ def extreme_rows(ticker: str, first_day: date, n: int) -> list[PriceData]:
 
 
 def extreme_benchmark(first_day: date, n: int) -> list[DailyPrice]:
-    return [DailyPrice(first_day + timedelta(days=i), 1e9 if i % 2 else 1e-3, 1, 2e9, 1e-4, 1.0) for i in range(n)]
+    return [DailyPrice(shift(first_day, i), 1e9 if i % 2 else 1e-3, 1, 2e9, 1e-4, 1.0) for i in range(n)]
 
 
 SUBSECTOR_STEPS = {'AAA': 1.0, 'BBB': 2.0, 'CCC': 0.5}
@@ -1136,10 +1271,10 @@ def test_score_as_of_ignores_every_row_after_the_session(container):
 
     # wild rows after the session for every ticker and benchmark, and a ticker of the same subsector with no row on
     # the session, stale as of it, whose later rows would move the subsector's medians if it were scored
-    first_later = AS_OF + timedelta(days=1)
+    first_later = shift(AS_OF, 1)
     for ticker in (*SUBSECTOR_STEPS, 'SHOP.TO'):
         container.price_data_repo.bulk_insert(extreme_rows(ticker, first_later, LATER_DAYS))
-    container.price_data_repo.bulk_insert(history_rows('GAP', 3.0, AS_OF - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(history_rows('GAP', 3.0, shift(AS_OF, -1)))
     container.price_data_repo.bulk_insert(extreme_rows('GAP', first_later, LATER_DAYS))
     for symbol in ('SPY', 'XIU.TO'):
         container.benchmark_price_repo.replace(
@@ -1150,7 +1285,7 @@ def test_score_as_of_ignores_every_row_after_the_session(container):
 
     assert scores(after) == scores(before)
     # the later rows are there to be read: the newest session scores differently
-    latest = container.analyzer.score_as_of(first_later + timedelta(days=LATER_DAYS - 1))
+    latest = container.analyzer.score_as_of(shift(first_later, LATER_DAYS - 1))
     assert scores(latest).keys() == {*scores(before), 'GAP'}
     assert all(scores(latest)[t][0] != scores(before)[t][0] for t in scores(before))
 
@@ -1171,7 +1306,7 @@ def test_score_as_of_the_latest_session_matches_what_a_run_stores(path, containe
 
 def test_score_as_of_leaves_out_a_market_closed_that_session(container):
     # Canada traded on AS_OF and the US did not
-    container.price_data_repo.bulk_insert(history_rows('AAA', 1.0, AS_OF - timedelta(days=1)))
+    container.price_data_repo.bulk_insert(history_rows('AAA', 1.0, shift(AS_OF, -1)))
     container.price_data_repo.bulk_insert(history_rows('SHOP.TO', 1.0, AS_OF))
 
     scored = container.analyzer.score_as_of(AS_OF)

@@ -19,6 +19,7 @@ from app.markets import (
     PUBLISH_DELAY,
     UnsupportedTicker,
     exchange_of,
+    is_session,
     last_complete_session,
     market_of,
 )
@@ -515,14 +516,19 @@ class Analyzer:
         Each ticker is judged against the newest price date of its own market (app/markets.py), since the markets
         close on different holidays: a US ticker is never left unscored because Canada traded on a US holiday.
 
-        A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with today's
-        date_created, so a ticker whose last price is older than its market's newest keeps its previous stock_criteria
-        row instead. So does a frozen one (see frozen_since), whose API repeats a dead ticker's last close every day:
-        its rows are current, but its price is not. A padded stop (see padded_stop), a ticker that traded every day
-        until its API began repeating its last close, counts as stale from its second flat day, dated by its last
-        trade, so both price APIs reach the same verdict on a ticker that stopped trading. For the same reason, after
-        a fetch only the markets the fetch's API covers are scored: a Tiingo run leaves every Canadian ticker's row
-        and date_created as they were. A standalone 'analyze' ('fetched_by' None) scores every market.
+        Each scored ticker's stock_criteria row is dated (date_created) by its market's session, the newest price date
+        of that market's complete candles, never by the run's own day: a run on a weekend, on a holiday in one market,
+        or after midnight UTC dates every market's rows by that market's last session. Price rows dated on a day their
+        market does not trade are dropped first, with a warning per ticker (_by_market).
+
+        A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with the
+        session's date_created, so a ticker whose last price is older than its market's newest keeps its previous
+        stock_criteria row instead. So does a frozen one (see frozen_since), whose API repeats a dead ticker's last
+        close every day: its rows are current, but its price is not. A padded stop (see padded_stop), a ticker that
+        traded every day until its API began repeating its last close, counts as stale from its second flat day, dated
+        by its last trade, so both price APIs reach the same verdict on a ticker that stopped trading. For the same
+        reason, after a fetch only the markets the fetch's API covers are scored: a Tiingo run leaves every Canadian
+        ticker's row and date_created as they were. A standalone 'analyze' ('fetched_by' None) scores every market.
 
         In the markets it scores, the run clears the status of every stock_criteria row it did not write, keeping its
         date and values: a stale or frozen ticker, one with fewer than MIN_ROWS rows, or one with no rows left. No row
@@ -554,7 +560,12 @@ class Analyzer:
             logger.info('No price data found.')
             return
 
-        by_market = self._by_market(df)
+        by_market, dropped = self._by_market(df)
+        for ticker, days in dropped.items():
+            listed = ', '.join(str(d) for d in days)
+            logger.warning(
+                f'{ticker}: dropped {len(days)} price row{"" if len(days) == 1 else "s"} dated on no session ({listed})'
+            )
         scored: list[Scored] = []
         # each market's session scored, and how many of its tickers were
         sessions: dict[str, tuple[date, int]] = {}
@@ -585,11 +596,9 @@ class Analyzer:
             )
 
         scored = with_strength_and_status(scored)
-        items = [s.criteria for s in scored]
-        date_created = datetime.now().date()
-        self.save_to_repository(items, date_created)
+        self.save_to_repository(scored)
         judged = fetched_by.markets if fetched_by is not None else MARKETS
-        self._clear_unscored_statuses(judged, {sc.ticker for sc in items})
+        self._clear_unscored_statuses(judged, {s.criteria.ticker for s in scored})
         settings = json.dumps(rule_settings(), sort_keys=True)
         commit = git_commit()
         self._record_sessions(sessions, run_id, settings, commit)
@@ -623,7 +632,7 @@ class Analyzer:
             return []
         df = df[df.index.get_level_values('date') <= session_date]
         scored: list[Scored] = []
-        for market, groups in self._by_market(df).items():
+        for market, groups in self._by_market(df)[0].items():
             if not groups or market not in markets:
                 continue
             result = self._score_market(market, groups, benchmarks)
@@ -632,15 +641,32 @@ class Analyzer:
         return with_strength_and_status(scored)
 
     @staticmethod
-    def _by_market(df: pd.DataFrame) -> dict[str, list[tuple[str, pd.DataFrame]]]:
-        """Each market's tickers with their rows, oldest first, leaving out (with a warning) a ticker of none."""
+    def _by_market(df: pd.DataFrame) -> tuple[dict[str, list[tuple[str, pd.DataFrame]]], dict[str, list[date]]]:
+        """
+        Each market's tickers with their rows, oldest first, leaving out (with a warning) a ticker of none, and the
+        dates of the rows it dropped, by ticker.
+
+        A row dated on a day its ticker's market does not trade (is_session: a weekend, or one of its exchange's
+        holidays) is dropped, and a ticker with no row left is left out. A price API's row dated on such a day is no
+        session, and scoring it would date the market's session, and every row and signal of it, by a day with no
+        trading. The caller decides whether to report the drops: a run does, a replay of many sessions does not.
+        """
         by_market: dict[str, list[tuple[str, pd.DataFrame]]] = {market: [] for market in MARKETS}
+        dropped: dict[str, list[date]] = {}
         for ticker, group_df in df.groupby(level='ticker'):
             try:
-                by_market[market_of(str(ticker))].append((str(ticker), group_df))
+                market = market_of(str(ticker))
             except UnsupportedTicker as err:
                 logger.warning(f'{ticker} not scored: {err}')
-        return by_market
+                continue
+            dates = group_df.index.get_level_values('date')
+            session = [is_session(market, d) for d in dates]
+            if not all(session):
+                dropped[str(ticker)] = [d for d, kept in zip(dates, session, strict=True) if not kept]
+                group_df = group_df[session]
+            if not group_df.empty:
+                by_market[market].append((str(ticker), group_df))
+        return by_market, dropped
 
     def _score_market(
         self,
@@ -795,7 +821,7 @@ class Analyzer:
         return kept
 
     def load_price_data(self) -> pd.DataFrame | None:
-        # Pull all rows via the repository
+        """Every stored price row, indexed by ticker and date, oldest first, or None when price_data is empty."""
         rows = list(self.price_data_repo.all())  # Iterable[PriceData] -> list
         if not rows:
             return None
@@ -969,9 +995,14 @@ class Analyzer:
             outperforms_market_3m=_positive(rs_market_3m),
         )
 
-    def save_to_repository(self, items: list[StockCriteria], date_created: date) -> None:
-        if not items:
+    def save_to_repository(self, scored: list[Scored]) -> None:
+        """Stores each ticker's criteria in stock_criteria, dated by the session its market was scored on."""
+        if not scored:
             print('No valid results to save.')
             return
-        print(f'saving {len(items)} criteria rows via StockCriteriaRepo')
-        self.stock_criteria_repo.bulk_insert(items, date_created)
+        print(f'saving {len(scored)} criteria rows via StockCriteriaRepo')
+        by_session: dict[date, list[StockCriteria]] = {}
+        for s in scored:
+            by_session.setdefault(s.session_date, []).append(s.criteria)
+        for session_date, items in by_session.items():
+            self.stock_criteria_repo.bulk_insert(items, session_date)

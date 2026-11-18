@@ -12,7 +12,8 @@ highs and indicators have closed forms. Each day's high equals its close unless 
 - An n-day SMA of a close rising by s a day lags it by (n - 1)s / 2. A 21-period EMA, started at the first close,
   lags such a close by 10s once the start has decayed, the start's share after k more values being 10s * (10/11)^k.
 - The rows' dates are consecutive calendar days from Thursday 1 January 2026, so the weekly closes are the Sundays'
-  closes and the scored day's own, 7 days of a daily rise apart.
+  closes and the scored day's own, 7 days of a daily rise apart. A whole run (Analyzer.analyze) drops the rows of a
+  day its market does not trade, so the tests of one date their rows by the US sessions from 2 January 2026 instead.
 - Where no closed form is at hand (the MACD's crossovers and histogram), the tests compare with reference_ema and
   reference_macd below, written out from the definitions rather than with the library the analyzer uses.
 """
@@ -23,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.analyzer import CONFIRMED, HIGH_CONVICTION, PRE_BREAKOUT, SECONDARY_INDICATORS, Analyzer, with_status
+from app.markets import US, is_session
 from app.models import PriceData, ScreenedSession, Signal, StockCriteria
 
 SUBSECTOR_ID = 7
@@ -88,19 +90,23 @@ def price_rows(
     volumes: list[int] | None = None,
     highs: list[float | None] | None = None,
     lows: list[float | None] | None = None,
+    sessions: bool = False,
 ) -> list[PriceData]:
-    """Each day's low is 1 under the lower of its close and high unless 'lows' says otherwise; none without a high."""
+    """
+    Each day's low is 1 under the lower of its close and high unless 'lows' says otherwise; none without a high. The
+    rows are dated by consecutive calendar days from 1 January 2026, or by its US sessions when 'sessions' is set.
+    """
     volumes = volumes if volumes is not None else [BASE_VOLUME] * len(closes)
     highs = highs if highs is not None else closes
     if lows is None:
         lows = [None if high is None else min(close, high) - 1 for close, high in zip(closes, highs, strict=True)]
-    start = date(2026, 1, 1)
+    days = us_sessions(len(closes)) if sessions else [date(2026, 1, 1) + timedelta(days=i) for i in range(len(closes))]
     return [
         PriceData(
             id=i + 1,
             subsector_id=SUBSECTOR_ID,
             ticker=ticker,
-            date=start + timedelta(days=i),
+            date=days[i],
             close=close,
             volume=volume,
             high=high,
@@ -108,6 +114,17 @@ def price_rows(
         )
         for i, (close, volume, high, low) in enumerate(zip(closes, volumes, highs, lows, strict=True))
     ]
+
+
+def us_sessions(n: int) -> list[date]:
+    """The first n US sessions of 2026."""
+    days: list[date] = []
+    day = date(2026, 1, 1)
+    while len(days) < n:
+        if is_session(US, day):
+            days.append(day)
+        day += timedelta(days=1)
+    return days
 
 
 def make_analyzer(
@@ -889,7 +906,7 @@ def test_market_strength_is_empty_where_the_benchmark_lacks_a_date():
 
 def run_subsector(tickers: dict[str, list[float]]) -> dict[str, StockCriteria]:
     """Analyzes the tickers as one run, every one in SUBSECTOR_ID, and returns what it saved by ticker."""
-    rows = [row for ticker, closes in tickers.items() for row in price_rows(ticker, closes)]
+    rows = [row for ticker, closes in tickers.items() for row in price_rows(ticker, closes, sessions=True)]
     analyzer, criteria_repo = make_analyzer(rows)
     analyzer.analyze()
     ((items, _),) = criteria_repo.saved
@@ -927,7 +944,7 @@ def run_one(closes: list[float], volumes: list[int]) -> StockCriteria:
     Analyzes one ticker as a whole run does, started after its last row's session, and returns what it saved: alone,
     it has no subsector median.
     """
-    rows = price_rows('TEST', closes, volumes)
+    rows = price_rows('TEST', closes, volumes, sessions=True)
     analyzer, criteria_repo = make_analyzer(rows)
     analyzer.analyze(started_at=datetime.combine(rows[-1].date + timedelta(days=1), time(12), UTC))
     (((sc,), _),) = criteria_repo.saved
@@ -1117,16 +1134,17 @@ def test_65_rows_is_enough_to_score_fully():
 
 def test_analyze_saves_one_row_per_ticker_with_enough_history():
     rows = (
-        price_rows('AAA', rising(100), volumes_with_last(100, 2000))
-        + price_rows('BBB', rising(100), volumes_with_last(100, 1499))
-        + price_rows('CCC', rising(64))
+        price_rows('AAA', rising(100), volumes_with_last(100, 2000), sessions=True)
+        + price_rows('BBB', rising(100), volumes_with_last(100, 1499), sessions=True)
+        + price_rows('CCC', rising(64), sessions=True)
     )
     analyzer, criteria_repo = make_analyzer(rows)
 
     analyzer.analyze()
 
+    # dated by the session scored, not by the day of the run
     ((items, date_created),) = criteria_repo.saved
-    assert date_created == date.today()
+    assert date_created == us_sessions(100)[-1]
     by_ticker = {sc.ticker: sc for sc in items}
     assert sorted(by_ticker) == ['AAA', 'BBB']
     assert by_ticker['AAA'].core_criteria_met is True
@@ -1137,9 +1155,9 @@ def test_analyze_saves_one_row_per_ticker_with_enough_history():
 def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(caplog, capsys):
     # STALE's download failed in the last fetch, so its rows end a day before everyone else's
     rows = (
-        price_rows('AAA', rising(100), volumes_with_last(100, 2000))
-        + price_rows('BBB', rising(100), volumes_with_last(100, 1500))
-        + price_rows('STALE', rising(99), volumes_with_last(99, 2000))
+        price_rows('AAA', rising(100), volumes_with_last(100, 2000), sessions=True)
+        + price_rows('BBB', rising(100), volumes_with_last(100, 1500), sessions=True)
+        + price_rows('STALE', rising(99), volumes_with_last(99, 2000), sessions=True)
     )
     analyzer, criteria_repo = make_analyzer(rows)
 
@@ -1148,7 +1166,7 @@ def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(c
 
     ((items, _),) = criteria_repo.saved
     assert sorted(sc.ticker for sc in items) == ['AAA', 'BBB']
-    newest, last = date(2026, 1, 1) + timedelta(days=99), date(2026, 1, 1) + timedelta(days=98)
+    *_, last, newest = us_sessions(100)
     warnings = [r for r in caplog.records if r.levelname == 'WARNING']
     assert [r.getMessage() for r in warnings] == [
         f'STALE not scored: its last price is from {last}, before the newest US market date {newest}'
@@ -1157,8 +1175,8 @@ def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(c
 
 
 def test_analyze_with_every_ticker_current_skips_none(capsys):
-    rows = price_rows('AAA', rising(100), volumes_with_last(100, 2000)) + price_rows(
-        'BBB', rising(100), volumes_with_last(100, 2000)
+    rows = price_rows('AAA', rising(100), volumes_with_last(100, 2000), sessions=True) + price_rows(
+        'BBB', rising(100), volumes_with_last(100, 2000), sessions=True
     )
     analyzer, criteria_repo = make_analyzer(rows)
 

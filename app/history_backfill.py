@@ -30,7 +30,7 @@ from app.backfill import quiet, replayable_sessions
 from app.container import Container
 from app.history_fetch import SHORT_HISTORY_SLACK, history_start
 from app.history_paths import HistoryPathUpdate
-from app.markets import BENCHMARKS, MARKET_CLOSES, MARKETS, US, UnsupportedTicker, market_of
+from app.markets import BENCHMARKS, MARKET_CLOSES, MARKETS, US, UnsupportedTicker, is_session, market_of
 from app.models import NEVER_SCORED, NO_HISTORY, SHORT_HISTORY, UNSUPPORTED, BackfillRun
 from app.provenance import git_commit
 from app.replay import TickerReplay, ticker_replay
@@ -223,9 +223,16 @@ class HistoryBackfill:
         return universe
 
     def _market_dates(self, universe: dict[str, int]) -> dict[str, pd.Index]:
-        """Each market's session dates: the days any of its tickers in 'universe' has a price in the history."""
+        """
+        Each market's session dates: the days any of its tickers in 'universe' has a price in the history, but those
+        the market does not trade (is_session), as Analyzer.score_as_of drops them.
+        """
         return {
-            market: pd.Index(self.history_repo.days(TICKER, [t for t in universe if market_of(t) == market]))
+            market: pd.Index(
+                d
+                for d in self.history_repo.days(TICKER, [t for t in universe if market_of(t) == market])
+                if is_session(market, d)
+            )
             for market in MARKETS
         }
 
@@ -251,7 +258,9 @@ class HistoryBackfill:
         candidates: list[tuple[int, int]] = []
         for ticker in tickers:
             market = market_of(ticker)
-            replay = ticker_replay(ticker, subsector_id, self.history_repo.prices(TICKER, ticker))
+            # a row dated on a day the market does not trade is dropped, as Analyzer.score_as_of drops it
+            prices = [p for p in self.history_repo.prices(TICKER, ticker) if is_session(market, p.date)]
+            replay = ticker_replay(ticker, subsector_id, prices)
             ordinals = np.array([d.toordinal() for d in replay.dates], dtype=np.int64)
             included = replay.scorable & np.isin(ordinals, replayable[market])
             if included.any():
