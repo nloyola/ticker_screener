@@ -7,6 +7,7 @@ dot, so any other dot is not a ticker the screener can fetch.
 """
 
 from datetime import date, datetime, time, timedelta
+from functools import cache
 from zoneinfo import ZoneInfo
 
 US = 'US'
@@ -200,9 +201,14 @@ def is_holiday(market: str, day: date) -> bool:
     observed on when it falls on a weekend, or an unscheduled closure. Neither exchange observes a holiday in the year
     before it: the NYSE skips a Saturday New Year's Day, and the TSX observes it after.
     """
-    if day in CLOSURES[market]:
-        return True
-    return day in (_tsx_holidays(day.year) if market == CANADA else _nyse_holidays(day.year))
+    return day in _closed_days(market, day.year)
+
+
+@cache
+def _closed_days(market: str, year: int) -> frozenset[date]:
+    """The weekdays 'market's exchange is closed in 'year': its holidays as observed, and its unscheduled closures."""
+    holidays = _tsx_holidays(year) if market == CANADA else _nyse_holidays(year)
+    return frozenset(holidays) | {d for d in CLOSURES[market] if d.year == year}
 
 
 def is_session(market: str, day: date) -> bool:

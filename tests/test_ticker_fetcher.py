@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 
 from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.db import init_db
-from app.markets import BENCHMARKS, CANADA, US
+from app.markets import BENCHMARKS, CANADA, US, is_session
 from app.models import PriceData
 from app.price_apis import DailyPrice
 from app.price_apis.http import (
@@ -36,6 +36,19 @@ from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 
 TODAY = date.today()
 OLD_DAY = window_start(TODAY) - timedelta(days=1)
+
+
+def days_ago(n: int) -> date:
+    """
+    The nth day before today both markets traded on, so a fetch never drops it as dated on no session
+    (app/price_apis on_sessions), whatever weekday the tests run on.
+    """
+    day = TODAY
+    while n:
+        day -= timedelta(days=1)
+        if is_session(US, day) and is_session(CANADA, day):
+            n -= 1
+    return day
 
 
 class FakeApi:
@@ -80,8 +93,8 @@ def tiingo_rows(rows: list[tuple[date, float]]) -> list[DailyPrice]:
     )
 
 
-# what the fakes answer for a benchmark with no response of its own: one close, yesterday
-BENCHMARK_ROWS = [(TODAY - timedelta(days=1), 500.0)]
+# what the fakes answer for a benchmark with no response of its own: one close, on the last session
+BENCHMARK_ROWS = [(days_ago(1), 500.0)]
 
 
 class FakeTiingo(FakeApi):
@@ -188,10 +201,6 @@ def store(repo: PriceDataRepo, ticker: str, rows: list[tuple[date, float]], subs
 
 def stored(repo: PriceDataRepo, ticker: str) -> list[tuple[int, date, float]]:
     return [(p.subsector_id, p.date, p.close) for p in repo.all_for_ticker(ticker)]
-
-
-def days_ago(n: int) -> date:
-    return TODAY - timedelta(days=n)
 
 
 def test_asks_for_the_whole_window_once_per_ticker(repo):
@@ -721,6 +730,39 @@ def test_benchmark_rows_store_each_days_open(repo):
     with closing(sqlite3.connect(repo.db_path)) as con:
         rows = con.execute("SELECT date, close, open FROM benchmark_price WHERE ticker = 'SPY'").fetchall()
     assert rows == [(days_ago(1).isoformat(), 450.0, 448.5)]
+
+
+def test_rows_dated_on_no_session_are_not_stored(repo, caplog):
+    # a Saturday row for a US ticker and its benchmark, and one on Canadian Thanksgiving, a day New York trades on,
+    # for a Canadian ticker: each is dropped in its own market only
+    saturday = next(d for d in (days_ago(1) - timedelta(days=i) for i in range(7)) if d.weekday() == 5)
+    canadian_thanksgiving = next(
+        d
+        for d in (date(TODAY.year - y, 10, 1) + timedelta(days=i) for y in (0, 1) for i in range(31))
+        if not is_session(CANADA, d) and is_session(US, d) and window_start(TODAY) < d < TODAY
+    )
+    eodhd = FakeTiingo(
+        {
+            'CVX': [(days_ago(1), 1.0), (saturday, 9.0)],
+            'SPY': [(days_ago(1), 450.0), (saturday, 9.0)],
+            'SHOP.TO': [(canadian_thanksgiving, 9.0), (days_ago(1), 2.0)],
+            'AAPL': [(canadian_thanksgiving, 3.0), (days_ago(1), 4.0)],
+        }
+    )
+    eodhd.name, eodhd.markets = 'EODHD', frozenset({US, CANADA})
+
+    with caplog.at_level('WARNING', logger='app.price_apis'):
+        make_fetcher(repo, eodhd, {1: ['CVX', 'SHOP.TO', 'AAPL']}).fetch()
+
+    assert stored(repo, 'CVX') == [(1, days_ago(1), 1.0)]
+    assert stored(repo, 'SHOP.TO') == [(1, days_ago(1), 2.0)]
+    assert stored(repo, 'AAPL') == [(1, canadian_thanksgiving, 3.0), (1, days_ago(1), 4.0)]
+    assert benchmark_closes(repo, 'SPY') == {days_ago(1): 450.0}
+    assert sorted(r.getMessage() for r in caplog.records) == [
+        f'CVX: dropped 1 price row dated on no session ({saturday})',
+        f'SHOP.TO: dropped 1 price row dated on no session ({canadian_thanksgiving})',
+        f'SPY: dropped 1 price row dated on no session ({saturday})',
+    ]
 
 
 def test_failed_benchmark_keeps_its_closes_and_fails_no_ticker(repo, caplog, capsys):

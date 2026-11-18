@@ -10,7 +10,7 @@ import pytest
 from app.commands.history_fetch_cmd import HistoryFetchCmd
 from app.db import init_db
 from app.history_fetch import HISTORY_YEARS, SHORT_HISTORY_SLACK, HistoryFetch, history_start
-from app.markets import CANADA, MARKET_CLOSES, US
+from app.markets import CANADA, MARKET_CLOSES, US, is_session
 from app.price_apis import DailyPrice, PriceApiStop
 from app.price_apis.eodhd import EodhdPrices
 from app.price_apis.http import RETRY_ATTEMPTS
@@ -22,12 +22,21 @@ NEW_YORK = MARKET_CLOSES[US][0]
 START = history_start(TODAY)
 
 
+def sessions(first: date, days: int) -> list[date]:
+    """The first 'days' US sessions on or after 'first', since a fetch drops a row dated on no session."""
+    out: list[date] = []
+    day = first
+    while len(out) < days:
+        if is_session(US, day):
+            out.append(day)
+        day += timedelta(days=1)
+    return out
+
+
 def prices(first: date, days: int, close: float = 10.0) -> list[DailyPrice]:
     return [
-        DailyPrice(
-            date=first + timedelta(days=i), close=close + i, volume=100, high=close + i, low=close + i, open=close + i
-        )
-        for i in range(days)
+        DailyPrice(date=d, close=close + i, volume=100, high=close + i, low=close + i, open=close + i)
+        for i, d in enumerate(sessions(first, days))
     ]
 
 
@@ -193,6 +202,26 @@ def test_an_answer_holding_only_a_candle_not_yet_final_keeps_the_stored_history(
 
     assert history.prices(TICKER, 'CVX') == prices(START, 5)
     assert (report.failed, report.no_history) == ([], [])
+
+
+def test_a_row_dated_on_no_session_is_not_stored(history, caplog):
+    # an answer holding a Saturday row and one on Thanksgiving, a US holiday, for the ticker and the benchmark
+    saturday, thanksgiving = date(2016, 11, 19), date(2016, 11, 24)
+    answer = sorted(
+        prices(START, 5)
+        + [DailyPrice(date=d, close=1.0, volume=0, high=1.0, low=1.0, open=1.0) for d in (saturday, thanksgiving)],
+        key=lambda p: p.date,
+    )
+    api = FakeApi({'CVX': [answer], 'SPY': [answer]})
+
+    with caplog.at_level('WARNING', logger='app.price_apis'):
+        run(make_fetch(history, api, {1: ['CVX']}))
+
+    assert history.prices(TICKER, 'CVX') == prices(START, 5)
+    assert history.prices(BENCHMARK, 'SPY') == prices(START, 5)
+    assert [r.getMessage() for r in caplog.records] == [
+        f'{name}: dropped 2 price rows dated on no session ({saturday}, {thanksgiving})' for name in ('CVX', 'SPY')
+    ]
 
 
 def test_a_late_start_is_reported_as_short_history(history):

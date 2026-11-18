@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from app.container import Container
 from app.markets import BENCHMARKS, MARKET_CLOSES, MARKETS, US, UnsupportedTicker, last_complete_session, market_of
-from app.price_apis import DailyPrice, PriceApi
+from app.price_apis import DailyPrice, PriceApi, on_sessions
 from app.price_apis.http import error_detail, response_of, with_retries
 from app.redaction import redact
 from app.repositories.history_repo import BENCHMARK, TICKER, Coverage
@@ -175,7 +175,7 @@ class HistoryFetch:
                 f'{redact(error_detail(e), self.api.api_key)}'
             )
             return False
-        prices = [p for p in prices if p.date <= last_session]
+        prices = [p for p in on_sessions(ticker, prices) if p.date <= last_session]
         if not prices:
             logger.warning(f'no final prices for {ticker} from {self.api.name} since {start}, stored history kept')
             self.history_repo.mark_fetched(kind, ticker, end, self.api.setting)

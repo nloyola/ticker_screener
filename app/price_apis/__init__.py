@@ -5,10 +5,15 @@ Each API lives in its own module (tiingo.py, eodhd.py), and only app/wiring.py p
 setting, so either can be deleted without touching the fetcher.
 """
 
+import logging
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
+
+from app.markets import is_session, market_of
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,22 @@ def daily_price(day: date, close: float, volume: int, high: float, low: float, o
     return DailyPrice(
         date=day, close=close, volume=volume, high=max(high, close, open), low=min(low, close, open), open=open
     )
+
+
+def on_sessions(ticker: str, prices: list[DailyPrice]) -> list[DailyPrice]:
+    """
+    The ticker's prices but those dated on a day its market does not trade (is_session: a weekend, or one of its
+    exchange's holidays), each ticker's drops logged as a warning. Every fetch stores only what this keeps, so no
+    stored row dates a session, a stock_criteria row or a signal by a day with no trading. 'ticker' must have a market.
+    """
+    market = market_of(ticker)
+    kept = [p for p in prices if is_session(market, p.date)]
+    if len(kept) < len(prices):
+        dropped = [p.date for p in prices if not is_session(market, p.date)]
+        rows = 'row' if len(dropped) == 1 else 'rows'
+        listed = ', '.join(str(d) for d in dropped)
+        logger.warning(f'{ticker}: dropped {len(dropped)} price {rows} dated on no session ({listed})')
+    return kept
 
 
 class PriceApiStop(Exception):

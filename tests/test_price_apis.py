@@ -15,7 +15,7 @@ from app.commands.ticker_fetcher_cmd import TickerFetcherCmd
 from app.markets import CANADA, US, UnsupportedTicker, market_of, market_sql
 from app.price_apis import PriceApiStop
 from app.price_apis.eodhd import USAGE_TIMEOUT, EodhdPrices, EodhdUsage, eodhd_symbol
-from app.ticker_fetcher import HISTORY_DAYS
+from app.ticker_fetcher import window_start
 from tests.test_ticker_fetcher import (  # noqa: F401
     FakeTiingo,
     ScriptedAdapter,
@@ -123,7 +123,7 @@ def test_eodhd_run_stores_adjusted_close_and_volume_for_bare_and_suffixed_ticker
     assert stored_rows(repo, 'SHOP.TO') == [(days_ago(1), 98.75, 3400)]
     urls = [request.url for request, _ in adapter.sent]
     assert urls[0].startswith('https://eodhd.com/api/user?')
-    assert urls[1].startswith(f'https://eodhd.com/api/eod/AAPL.US?from={days_ago(HISTORY_DAYS).isoformat()}&to=')
+    assert urls[1].startswith(f'https://eodhd.com/api/eod/AAPL.US?from={window_start(date.today()).isoformat()}&to=')
     assert urls[2].startswith('https://eodhd.com/api/eod/SHOP.TO?')
     # then each market's benchmark: EODHD covers both
     assert urls[3].startswith('https://eodhd.com/api/eod/SPY.US?')

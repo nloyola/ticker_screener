@@ -19,7 +19,6 @@ from app.markets import (
     PUBLISH_DELAY,
     UnsupportedTicker,
     exchange_of,
-    is_session,
     last_complete_session,
     market_of,
 )
@@ -518,8 +517,8 @@ class Analyzer:
 
         Each scored ticker's stock_criteria row is dated (date_created) by its market's session, the newest price date
         of that market's complete candles, never by the run's own day: a run on a weekend, on a holiday in one market,
-        or after midnight UTC dates every market's rows by that market's last session. Price rows dated on a day their
-        market does not trade are dropped first, with a warning per ticker (_by_market).
+        or after midnight UTC dates every market's rows by that market's last session. No stored price row is dated on
+        a day its market does not trade: every fetch drops those (app/price_apis on_sessions).
 
         A ticker whose download failed keeps its old rows. Scoring it again would stamp a stale score with the
         session's date_created, so a ticker whose last price is older than its market's newest keeps its previous
@@ -560,12 +559,7 @@ class Analyzer:
             logger.info('No price data found.')
             return
 
-        by_market, dropped = self._by_market(df)
-        for ticker, days in dropped.items():
-            listed = ', '.join(str(d) for d in days)
-            logger.warning(
-                f'{ticker}: dropped {len(days)} price row{"" if len(days) == 1 else "s"} dated on no session ({listed})'
-            )
+        by_market = self._by_market(df)
         scored: list[Scored] = []
         # each market's session scored, and how many of its tickers were
         sessions: dict[str, tuple[date, int]] = {}
@@ -632,7 +626,7 @@ class Analyzer:
             return []
         df = df[df.index.get_level_values('date') <= session_date]
         scored: list[Scored] = []
-        for market, groups in self._by_market(df)[0].items():
+        for market, groups in self._by_market(df).items():
             if not groups or market not in markets:
                 continue
             result = self._score_market(market, groups, benchmarks)
@@ -641,32 +635,15 @@ class Analyzer:
         return with_strength_and_status(scored)
 
     @staticmethod
-    def _by_market(df: pd.DataFrame) -> tuple[dict[str, list[tuple[str, pd.DataFrame]]], dict[str, list[date]]]:
-        """
-        Each market's tickers with their rows, oldest first, leaving out (with a warning) a ticker of none, and the
-        dates of the rows it dropped, by ticker.
-
-        A row dated on a day its ticker's market does not trade (is_session: a weekend, or one of its exchange's
-        holidays) is dropped, and a ticker with no row left is left out. A price API's row dated on such a day is no
-        session, and scoring it would date the market's session, and every row and signal of it, by a day with no
-        trading. The caller decides whether to report the drops: a run does, a replay of many sessions does not.
-        """
+    def _by_market(df: pd.DataFrame) -> dict[str, list[tuple[str, pd.DataFrame]]]:
+        """Each market's tickers with their rows, oldest first, leaving out (with a warning) a ticker of none."""
         by_market: dict[str, list[tuple[str, pd.DataFrame]]] = {market: [] for market in MARKETS}
-        dropped: dict[str, list[date]] = {}
         for ticker, group_df in df.groupby(level='ticker'):
             try:
-                market = market_of(str(ticker))
+                by_market[market_of(str(ticker))].append((str(ticker), group_df))
             except UnsupportedTicker as err:
                 logger.warning(f'{ticker} not scored: {err}')
-                continue
-            dates = group_df.index.get_level_values('date')
-            session = [is_session(market, d) for d in dates]
-            if not all(session):
-                dropped[str(ticker)] = [d for d, kept in zip(dates, session, strict=True) if not kept]
-                group_df = group_df[session]
-            if not group_df.empty:
-                by_market[market].append((str(ticker), group_df))
-        return by_market, dropped
+        return by_market
 
     def _score_market(
         self,

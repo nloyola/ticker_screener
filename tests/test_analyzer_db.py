@@ -857,15 +857,11 @@ def sessions(path: str) -> list[tuple]:
         ).fetchall()
 
 
-# Each market's rows are dated by its own last session, never by the run's day, and a price API's row dated on a day
-# its market does not trade is dropped before scoring.
+# Each market's rows are dated by its own last session, never by the run's day.
 
 
-def market_rows(ticker: str, last_day: date, closed_day: date | None = None) -> list[PriceData]:
-    """
-    100 rising closes on the sessions of the ticker's market ending on last_day, with a volume spike on the last; and,
-    when 'closed_day' is given, one more row dated on it, as a price API might answer for a day the market was closed.
-    """
+def market_rows(ticker: str, last_day: date) -> list[PriceData]:
+    """100 rising closes on the sessions of the ticker's market ending on last_day, with a volume spike on the last."""
     market = US if '.' not in ticker else CANADA
     days: list[date] = []
     day = last_day
@@ -873,67 +869,46 @@ def market_rows(ticker: str, last_day: date, closed_day: date | None = None) -> 
         if is_session(market, day):
             days.append(day)
         day -= timedelta(days=1)
-    rows = [
+    return [
         PriceData(id=0, subsector_id=1, ticker=ticker, date=d, close=100.0 + i, volume=2000 if i == 99 else 1000)
         for i, d in enumerate(reversed(days))
     ]
-    if closed_day is not None:
-        rows.append(PriceData(id=0, subsector_id=1, ticker=ticker, date=closed_day, close=500.0, volume=0))
-    return rows
 
 
 @pytest.mark.parametrize(
-    ('started_at', 'us_session', 'canada_session', 'closed_day'),
+    ('started_at', 'us_session', 'canada_session'),
     [
         # the run that labelled its output 'Data as of 2026-11-15': Saturday evening in New York, Sunday in UTC
         pytest.param(
             datetime(2026, 11, 14, 20, tzinfo=NEW_YORK),
             date(2026, 11, 13),
             date(2026, 11, 13),
-            date(2026, 11, 14),
             id='Saturday evening, Sunday in UTC',
         ),
-        pytest.param(
-            datetime(2026, 11, 15, 12, tzinfo=NEW_YORK),
-            date(2026, 11, 13),
-            date(2026, 11, 13),
-            date(2026, 11, 15),
-            id='Sunday',
-        ),
+        pytest.param(datetime(2026, 11, 15, 12, tzinfo=NEW_YORK), date(2026, 11, 13), date(2026, 11, 13), id='Sunday'),
         # US Thanksgiving: Toronto trades, New York does not
         pytest.param(
-            datetime(2026, 11, 26, 20, tzinfo=NEW_YORK),
-            date(2026, 11, 25),
-            date(2026, 11, 26),
-            date(2026, 11, 26),
-            id='US holiday',
+            datetime(2026, 11, 26, 20, tzinfo=NEW_YORK), date(2026, 11, 25), date(2026, 11, 26), id='US holiday'
         ),
         # Canadian Thanksgiving: New York trades, Toronto does not
         pytest.param(
-            datetime(2026, 10, 12, 20, tzinfo=NEW_YORK),
-            date(2026, 10, 12),
-            date(2026, 10, 9),
-            date(2026, 10, 12),
-            id='Canadian holiday',
+            datetime(2026, 10, 12, 20, tzinfo=NEW_YORK), date(2026, 10, 12), date(2026, 10, 9), id='Canadian holiday'
         ),
     ],
 )
-def test_each_market_is_dated_by_its_last_session(
-    path, container, caplog, started_at, us_session, canada_session, closed_day
-):
-    # every ticker's rows end on its market's last session; AAA and SHOP.TO also got a row dated on the closed day,
-    # in the market that was closed on it
-    us_closed = closed_day if not is_session(US, closed_day) else None
-    canada_closed = closed_day if not is_session(CANADA, closed_day) else None
-    container.price_data_repo.bulk_insert(market_rows('AAA', us_session, us_closed))
-    container.price_data_repo.bulk_insert(market_rows('BBB', us_session))
-    container.price_data_repo.bulk_insert(market_rows('SHOP.TO', canada_session, canada_closed))
-    container.price_data_repo.bulk_insert(market_rows('RY.TO', canada_session))
+def test_each_market_is_dated_by_its_last_session(path, container, started_at, us_session, canada_session):
+    # every ticker's rows end on its market's last session, as a fetch stores them (app/price_apis on_sessions)
+    for ticker, last in (
+        ('AAA', us_session),
+        ('BBB', us_session),
+        ('SHOP.TO', canada_session),
+        ('RY.TO', canada_session),
+    ):
+        container.price_data_repo.bulk_insert(market_rows(ticker, last))
 
-    with caplog.at_level('WARNING', logger='app.analyzer'):
-        container.analyzer.analyze(started_at=started_at)
+    container.analyzer.analyze(started_at=started_at)
 
-    # every ticker is scored on its market's last session, none left stale by the dropped row, and dated by it
+    # every ticker is scored on its market's last session, and dated by it
     us, canada = us_session.isoformat(), canada_session.isoformat()
     assert criteria(path) == {
         'AAA': (199.0, us),
@@ -942,22 +917,6 @@ def test_each_market_is_dated_by_its_last_session(
         'RY.TO': (199.0, canada),
     }
     assert [(market, session_date) for market, session_date, *_ in sessions(path)] == [(CANADA, canada), (US, us)]
-    dropped = {r.getMessage() for r in caplog.records if 'dated on no session' in r.getMessage()}
-    assert dropped == {
-        f'{ticker}: dropped 1 price row dated on no session ({closed_day})'
-        for ticker, closed in (('AAA', us_closed), ('SHOP.TO', canada_closed))
-        if closed is not None
-    }
-
-
-def test_score_as_of_ignores_a_row_dated_on_a_closed_day(container):
-    # a Saturday row in the stored prices is no session: scoring it scores nothing, and the Friday before is scored
-    # from the rows up to it alone
-    container.price_data_repo.bulk_insert(market_rows('AAA', date(2026, 11, 13), date(2026, 11, 14)))
-
-    assert container.analyzer.score_as_of(date(2026, 11, 14)) == []
-    (friday,) = container.analyzer.score_as_of(date(2026, 11, 13))
-    assert (friday.session_date, friday.close) == (date(2026, 11, 13), 199.0)
 
 
 def run_with_rules(container, monkeypatch, version: str, run_id: int) -> None:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from app.container import Container
 from app.markets import BENCHMARKS, MARKETS, UnsupportedTicker, market_of
 from app.models import PriceData
-from app.price_apis import PriceApi
+from app.price_apis import PriceApi, on_sessions
 from app.price_apis.http import error_detail, response_of, with_retries
 from app.progress import NO_PRICES, NOT_FOUND, report_flagged, report_progress
 from app.redaction import redact
@@ -259,7 +259,7 @@ class TickerFetcher:
         end = date.today()
         start = window_start(end)
         try:
-            prices = self._retrying(ticker, lambda: self.api.daily_prices(ticker, start, end))
+            prices = on_sessions(ticker, self._retrying(ticker, lambda: self.api.daily_prices(ticker, start, end)))
         except Exception as e:
             logger.warning(
                 f'⚠️ benchmark {ticker} not downloaded from {self.api.name}, stored closes kept: {self._redact(e)}'
@@ -328,8 +328,9 @@ class TickerFetcher:
                     low=price.low,
                     open=price.open,
                 )
-                for price in self._retrying(
-                    ticker, lambda: self.api.daily_prices(ticker, fetch_start_date, fetch_end_date)
+                for price in on_sessions(
+                    ticker,
+                    self._retrying(ticker, lambda: self.api.daily_prices(ticker, fetch_start_date, fetch_end_date)),
                 )
             ]
         except Exception as e:
