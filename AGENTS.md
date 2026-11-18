@@ -31,6 +31,8 @@ This guide is for human and AI coding agents contributing to the ticker screener
 
 ## Coding Standards
 
+**[CODING_STANDARDS.md](CODING_STANDARDS.md)** holds the rules code is held to: Python style, the layering, the database and its upgrades, rule and payload versions, logging and secrets, and testing. Read it before writing code, and check changes against it in review.
+
 - `uv run ruff check .` and `uv run ruff format --check .` clean (`pyproject.toml`: 120 columns, single quotes, rules `E`, `F`, `I`, `UP`, `B`).
 - Keep the layering: commands parse arguments and call a service or worker class; repositories own all SQL; `models.py` has no I/O. A new table gets a repository in `app/repositories/`, registered in `build_container` (`app/wiring.py`).
 - A new subcommand subclasses `BaseCommand` in `app/commands/`, lists the config keys it needs in `REQUIRED_CONFIG`, takes its workers from the container in `handle` (never in `__init__`), and is registered in `main()`.
