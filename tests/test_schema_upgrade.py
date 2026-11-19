@@ -636,6 +636,25 @@ def test_upgrade_lets_the_status_be_extended_keeping_every_row(version_15_db, cu
         _execute(version_15_db, "UPDATE stock_criteria SET status = 'watchlist' WHERE ticker = 'XOM'")
 
 
+def test_upgrade_leaves_a_stock_criteria_already_allowing_extended_as_it_is(current_db):
+    # a current table stamped behind its schema, as a database another tool built from schema.sql can be: the
+    # rebuild would drop the columns later upgrades added, and the breakout position with them
+    _execute(
+        current_db,
+        'INSERT INTO stock_criteria (id, ticker, date_created, status, breakout_margin_pct, invalidation_distance_pct, '
+        "sessions_since_breakout) VALUES (1, 'XOM', '2026-11-13', 'extended', 4.1, 3.9, 3)",
+        'PRAGMA user_version = 15',
+    )
+    before = _query(current_db, 'SELECT * FROM stock_criteria')
+    table_sql = _table_sql(current_db, 'stock_criteria')
+
+    upgrade_db(current_db)
+
+    assert _query(current_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(current_db, 'stock_criteria') == table_sql
+    assert _query(current_db, 'SELECT * FROM stock_criteria') == before
+
+
 POSITION_COLUMNS = (
     'breakout_margin_pct REAL,',
     'invalidation_distance_pct REAL,',

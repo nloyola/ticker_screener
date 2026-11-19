@@ -89,7 +89,9 @@ def build_dataset(
 
     Adds to the signal's columns and the outcome's:
     - breakout_level and breakout_margin_pct: the level the signal cleared (the 60-day high when it broke it, else
-      the 20-day high, as app/signal_outcomes.py's breakout_level) and the close's margin over it
+      the 20-day high, as app/signal_outcomes.py's breakout_level) and the close's margin over it, the signal's own
+      unrounded breakout_margin_pct where it has one, worked out from its rounded highs only for a signal archived
+      before the screener stored it
     - sma50_distance_pct: the close's distance above the 50-day SMA
     - sma50_slope_pct: the 50-day SMA's change over the SMA_RISING_DAYS sessions the rising rule looks back
     - volume_ratio, already a column of the signal: the day's volume over its average
@@ -110,7 +112,9 @@ def build_dataset(
 
     level = np.where(signals['breakout_60d'] == 1, signals['high_60d'], signals['high_20d']).astype(float)
     signals['breakout_level'] = level
-    signals['breakout_margin_pct'] = pct_change(signals['close'], level)
+    signals['breakout_margin_pct'] = (
+        signals['breakout_margin_pct'].astype(float).fillna(pct_change(signals['close'], level))
+    )
     signals['sma50_distance_pct'] = pct_change(signals['close'], signals['dma_50'])
     signals['sma50_slope_pct'] = pct_change(signals['dma_50'], signals['dma_50_prev_15d'])
 

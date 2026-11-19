@@ -184,9 +184,18 @@ class StockCriteriaRepo:
             con.executemany(sql, values)
 
     def clear_status(self, tickers: Iterable[str]) -> None:
-        """Clears the status of each of 'tickers' rows, leaving its date_created and every other value as it was."""
+        """
+        Clears the status of each of 'tickers' rows, with its breakout position (breakout_margin_pct,
+        invalidation_distance_pct and sessions_since_breakout), which only a breakout or extended session has, leaving
+        its date_created and every other value as it was.
+        """
+        sql = """
+        UPDATE stock_criteria
+        SET status = NULL, breakout_margin_pct = NULL, invalidation_distance_pct = NULL, sessions_since_breakout = NULL
+        WHERE ticker = ?
+        """
         with connect(self.db_path) as con:
-            con.executemany('UPDATE stock_criteria SET status = NULL WHERE ticker = ?', [(t,) for t in tickers])
+            con.executemany(sql, [(t,) for t in tickers])
 
     def tickers_with_status(self) -> list[str]:
         """The tickers whose row has a status."""

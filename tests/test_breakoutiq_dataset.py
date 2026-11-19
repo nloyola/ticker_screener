@@ -240,6 +240,20 @@ def test_the_dataset_has_one_row_per_signal_and_resolved_horizon(db):
     assert rows['gap_date'].isna().all()
 
 
+def test_a_signal_with_a_stored_margin_keeps_it_and_one_without_has_it_worked_out_from_its_highs(db):
+    # signal 1 stored its margin unrounded, over the 20-day high 99.996 that high_20d rounds to 100: 10.0044%, not
+    # the 10% its rounded high gives; signal 2 was archived before the screener stored a margin
+    day = date(2020, 1, 2)
+    _add_signal(db.db_path, 1, day, breakout_margin_pct=(110 / 99.996 - 1) * 100)
+    _add_signal(db.db_path, 2, day)
+    for signal_id in (1, 2):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+
+    rows = load_dataset(db, with_history=False)
+
+    assert list(rows['breakout_margin_pct']) == [pytest.approx((110 / 99.996 - 1) * 100), pytest.approx(10.0)]
+
+
 def test_a_pending_horizon_is_left_out(db):
     _add_signal(db.db_path, 1, date(2020, 1, 2))
     _add_outcome(db.db_path, 1, 5, 'complete')
@@ -272,6 +286,7 @@ def test_build_dataset_on_no_signals_is_empty():
             'high_20d',
             'high_60d',
             'breakout_60d',
+            'breakout_margin_pct',
             'dma_50',
             'dma_50_prev_15d',
         ]

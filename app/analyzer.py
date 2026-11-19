@@ -408,24 +408,53 @@ def with_sector_strength(items: list[StockCriteria]) -> list[StockCriteria]:
     return [with_subsector_medians(sc, medians) for sc in items]
 
 
-def core_met(closes: np.ndarray, highs: np.ndarray, volumes: np.ndarray) -> np.ndarray:
+@dataclass(frozen=True)
+class CoreConditions:
     """
-    At each row of one ticker's rows (oldest first), whether it meets the four core conditions as analyze_ticker
-    judges them from the rows up to it. 'highs' has a missing high already replaced by its close, and 'volumes' is
-    NaN where a volume is missing. False on a row with too few rows before it for any condition.
+    The four core conditions (GLOSSARY.md, "Core criteria") at each of one ticker's rows, oldest first, each judged
+    from the rows up to it: the close above the prior 20-day or 60-day high, the volume confirming it, the close above
+    the 50-day SMA, and that SMA rising. Every value is False on a row with too few rows before it for its condition.
+    """
+
+    breakout_20d: np.ndarray
+    breakout_60d: np.ndarray
+    confirmed: np.ndarray
+    above_sma: np.ndarray
+    sma_rising: np.ndarray
+
+    def met(self) -> np.ndarray:
+        """Whether each row meets all four conditions."""
+        return (self.breakout_20d | self.breakout_60d) & self.confirmed & self.above_sma & self.sma_rising
+
+    def at(self, row: int) -> list[bool]:
+        """The four conditions at 'row', in the order core_criteria_score counts them."""
+        return [
+            bool(self.breakout_20d[row] or self.breakout_60d[row]),
+            bool(self.confirmed[row]),
+            bool(self.above_sma[row]),
+            bool(self.sma_rising[row]),
+        ]
+
+
+def core_conditions(closes: np.ndarray, highs: np.ndarray, volumes: np.ndarray) -> CoreConditions:
+    """
+    The four core conditions at each of one ticker's rows (oldest first). 'highs' has a missing high already replaced
+    by its close, and 'volumes' is NaN where a volume is missing. Every lookback excludes the row it judges.
     """
     close = pd.Series(closes, dtype=float)
     before = pd.Series(highs, dtype=float).shift(1)
-    breakout = np.zeros(len(closes), dtype=bool)
-    for days in BREAKOUT_WINDOWS:
-        breakout |= (close > before.rolling(days).max()).to_numpy()
+    breakout_20d, breakout_60d = ((close > before.rolling(days).max()).to_numpy() for days in BREAKOUT_WINDOWS)
     volume = pd.Series(volumes, dtype=float)
-    # the average skips a missing volume, as analyze_ticker's does
+    # the average skips a missing volume
     average = volume.shift(1).rolling(VOLUME_AVG_DAYS, min_periods=1).mean()
-    confirmed = (average > 0) & (volume / average >= VOLUME_RATIO_MIN)
     sma = close.rolling(SMA_DAYS).mean()
-    trend = (close > sma) & (sma > sma.shift(SMA_RISING_DAYS))
-    return breakout & (confirmed & trend).to_numpy()
+    return CoreConditions(
+        breakout_20d=breakout_20d,
+        breakout_60d=breakout_60d,
+        confirmed=((average > 0) & (volume / average >= VOLUME_RATIO_MIN)).to_numpy(),
+        above_sma=(close > sma).to_numpy(),
+        sma_rising=(sma > sma.shift(SMA_RISING_DAYS)).to_numpy(),
+    )
 
 
 @dataclass(frozen=True)
@@ -436,7 +465,7 @@ class BreakoutRuns:
     the broken level of the run the row is in, and 'start' the row of that run's breakout: NaN and -1 outside a run.
     """
 
-    phase: list[str | None]
+    phase: np.ndarray
     level: np.ndarray
     start: np.ndarray
 
@@ -449,7 +478,8 @@ def _resistance_age(highs: np.ndarray, row: int, days: int) -> int:
 def breakout_runs(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, core: np.ndarray) -> BreakoutRuns:
     """
     One ticker's breakout runs from its rows (oldest first), each session judged only from the rows up to it, as the
-    constants before MARGIN_FLOOR_PCT describe: 'core' marks the rows meeting the four core conditions (core_met), and
+    constants before MARGIN_FLOOR_PCT describe: 'core' marks the rows meeting the four core conditions
+    (CoreConditions.met), and
     'highs' and 'lows' are as stored, NaN where missing. A missing high counts its close in the broken level, as
     analyze_ticker's breakout does, and a session missing its high or low is left out of the average daily range;
     with no range known, the margin is MARGIN_FLOOR_PCT.
@@ -472,7 +502,7 @@ def breakout_runs(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, core:
     average_range = pd.Series(ranges).shift(1).rolling(RANGE_DAYS, min_periods=1).mean().to_numpy()
     qualifying = core & (margin >= np.fmax(MARGIN_FLOOR_PCT, MARGIN_RANGE_FRACTION * average_range))
 
-    phase: list[str | None] = [None] * count
+    phase = np.full(count, None, dtype=object)
     run_level = np.full(count, np.nan)
     run_start = np.full(count, -1)
     began, current, below = -1, float('nan'), 0
@@ -1040,21 +1070,16 @@ class Analyzer:
         rs_market_1m = _difference(return_1m, _benchmark_return_pct(dates, RS_1M_DAYS, benchmark))
         rs_market_3m = _difference(return_3m, _benchmark_return_pct(dates, RS_3M_DAYS, benchmark))
 
-        breakout_20d = price > high_20d
-        breakout_60d = price > high_60d
-        breakout_confirmed = volume_ratio is not None and volume_ratio >= VOLUME_RATIO_MIN
-        price_above_50dma = price > dma_50
-        dma_slope_up = dma_50 > dma_50_prior
-
-        core = [breakout_20d or breakout_60d, breakout_confirmed, price_above_50dma, dma_slope_up]
-
-        # whether the scored session is a breakout or in the run of an earlier one, from every session before it
+        # the core conditions at every row, read on the scored one, and whether that session is a breakout or in the
+        # run of an earlier one, from every session before it
         closes = df['close'].to_numpy(dtype=float)
         volumes = df['volume'].to_numpy(dtype=float, na_value=np.nan)
         lows = df['low'].to_numpy(dtype=float)
-        core_rows = core_met(closes, highs.to_numpy(dtype=float), volumes)
-        runs = breakout_runs(closes, df['high'].to_numpy(dtype=float), lows, core_rows)
-        position = breakout_position(runs, closes, len(closes) - 1)
+        conditions = core_conditions(closes, highs.to_numpy(dtype=float), volumes)
+        last = len(closes) - 1
+        core = conditions.at(last)
+        runs = breakout_runs(closes, df['high'].to_numpy(dtype=float), lows, conditions.met())
+        position = breakout_position(runs, closes, last)
 
         return StockCriteria(
             id=0,
@@ -1074,11 +1099,11 @@ class Analyzer:
             rsi=round(rsi_val, 2),
             macd=round(macd_val, 2),
             signal=round(signal_val, 2),
-            breakout_20d=int(breakout_20d),
-            breakout_60d=int(breakout_60d),
-            breakout_confirmed=int(breakout_confirmed),
-            price_gt_50dma=int(price_above_50dma),
-            dma_50_rising=int(dma_slope_up),
+            breakout_20d=int(conditions.breakout_20d[last]),
+            breakout_60d=int(conditions.breakout_60d[last]),
+            breakout_confirmed=int(conditions.confirmed[last]),
+            price_gt_50dma=int(conditions.above_sma[last]),
+            dma_50_rising=int(conditions.sma_rising[last]),
             rsi_50_70=int(RSI_BAND[0] <= rsi_val <= RSI_BAND[1]),
             macd_above_signal=int(macd_val > signal_val),
             macd_hist=_round(hist_val),
@@ -1123,7 +1148,7 @@ class Analyzer:
             breakout_margin_pct=position.margin_pct,
             invalidation_distance_pct=position.invalidation_pct,
             sessions_since_breakout=position.sessions,
-            breakout_phase=runs.phase[-1],
+            breakout_phase=runs.phase[last],
         )
 
     def save_to_repository(self, scored: list[Scored]) -> None:

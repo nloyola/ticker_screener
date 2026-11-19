@@ -258,7 +258,7 @@ class HistoryBackfill:
             if included.any():
                 scored.add(ticker)
             replays.append((market, replay, ordinals))
-            breakouts = np.flatnonzero(included & (replay.phase == BREAKOUT_SESSION))
+            breakouts = np.flatnonzero(included & (replay.runs.phase == BREAKOUT_SESSION))
             candidates.extend((len(replays) - 1, int(row)) for row in breakouts)
         if not candidates:
             return []

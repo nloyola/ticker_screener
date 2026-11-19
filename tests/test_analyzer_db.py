@@ -1,7 +1,8 @@
 """
 Which tickers analyze scores, against a real database: a stale or frozen ticker keeps its previous stock_criteria
-row, date_created included, but not its status, freshness is judged per market, run-refresh scores only the markets
-it fetched, and a run started before a market's day is complete scores that market's previous session.
+row, date_created included, but not its status or breakout position, freshness is judged per market, run-refresh
+scores only the markets it fetched, and a run started before a market's day is complete scores that market's previous
+session.
 """
 
 import argparse
@@ -828,6 +829,12 @@ def statuses(path: str) -> dict[str, tuple[float, str, str | None]]:
     return {ticker: (price, date_created, status) for ticker, price, date_created, status in rows}
 
 
+def breakout_position(path: str, ticker: str) -> tuple[float | None, float | None, int | None]:
+    """The ticker's stored breakout margin, invalidation distance and sessions since its breakout."""
+    row = table_rows(path, 'stock_criteria')[ticker]
+    return tuple(row[c] for c in ('breakout_margin_pct', 'invalidation_distance_pct', 'sessions_since_breakout'))
+
+
 @pytest.mark.parametrize(
     'rows',
     [
@@ -842,6 +849,7 @@ def test_ticker_skipped_after_being_scored_the_same_day_loses_its_status(path, c
     container.analyzer.analyze()
     scored = statuses(path)
     assert scored['BRK'][2] is not None
+    assert breakout_position(path, 'BRK')[2] == 0
 
     # a later run the same day, with another price API, stored rows BRK is skipped on
     container.price_data_repo.replace_for_ticker('BRK', rows)
@@ -849,6 +857,8 @@ def test_ticker_skipped_after_being_scored_the_same_day_loses_its_status(path, c
 
     price, date_created, _ = scored['BRK']
     assert statuses(path) == {**scored, 'BRK': (price, date_created, None)}
+    # the breakout position goes with the status: only a breakout or extended session has one
+    assert breakout_position(path, 'BRK') == (None, None, None)
     assert len(flagged_lines(capsys.readouterr().out)) == 1
 
 
@@ -862,6 +872,7 @@ def test_ticker_left_unscored_after_being_scored_loses_its_status(path, containe
     container.analyzer.analyze()
     scored = statuses(path)
     assert scored['BRK'][2] is not None
+    assert breakout_position(path, 'BRK')[2] == 0
 
     # a later run stored fewer rows for BRK than scoring needs, or none at all
     container.price_data_repo.replace_for_ticker('BRK', rows)
@@ -869,6 +880,8 @@ def test_ticker_left_unscored_after_being_scored_loses_its_status(path, containe
 
     price, date_created, _ = scored['BRK']
     assert statuses(path) == {**scored, 'BRK': (price, date_created, None)}
+    # the breakout position goes with the status: only a breakout or extended session has one
+    assert breakout_position(path, 'BRK') == (None, None, None)
     assert flagged_lines(capsys.readouterr().out) == []
 
 

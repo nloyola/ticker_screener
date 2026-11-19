@@ -562,9 +562,11 @@ def _allow_extended_status(con: sqlite3.Connection) -> None:
     """
     Version 16: stock_criteria.status may be extended, a session in the run of an earlier breakout. SQLite cannot
     change a column's CHECK, so the table is rebuilt as _guard_price_data_date rebuilds price_data: every row copied
-    with its id, the AUTOINCREMENT sequence kept.
+    with its id, the AUTOINCREMENT sequence kept. A table whose CHECK already allows extended is left as it is, so a
+    database whose user_version is behind its tables never loses the columns added after this upgrade.
     """
-    if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stock_criteria'").fetchone():
+    table = con.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stock_criteria'").fetchone()
+    if not table or "'extended'" in table[0]:
         return  # schema.sql creates it this way
     seq = con.execute("SELECT seq FROM sqlite_sequence WHERE name = 'stock_criteria'").fetchone()
     # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade

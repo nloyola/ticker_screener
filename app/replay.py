@@ -51,8 +51,8 @@ from app.analyzer import (
     SMA_DAYS,
     SMA_RISING_DAYS,
     VOLUME_AVG_DAYS,
-    VOLUME_RATIO_MIN,
     BreakoutRuns,
+    CoreConditions,
     _above,
     _below,
     _benchmark_return_pct,
@@ -64,7 +64,7 @@ from app.analyzer import (
     _round,
     breakout_position,
     breakout_runs,
-    core_met,
+    core_conditions,
     ema,
 )
 from app.models import StockCriteria
@@ -146,10 +146,9 @@ def _value(values: np.ndarray, row: int) -> float | None:
 class TickerReplay:
     """
     One ticker's history scored on every row. 'scorable' marks the rows a run on that session would score: those
-    with MIN_ROWS rows up to them, not ending in a padded stop or a frozen stretch. 'core' marks those meeting the
-    four core conditions, 'runs' is each row's place in a breakout run (breakout_runs in app/analyzer.py), with
-    'phase' its phase as an array, and 'return_1m' and 'return_3m' are each row's returns, as criteria_at gives them,
-    NaN for none.
+    with MIN_ROWS rows up to them, not ending in a padded stop or a frozen stretch. 'conditions' are the four core
+    conditions at each row, 'runs' is each row's place in a breakout run (breakout_runs in app/analyzer.py), and
+    'return_1m' and 'return_3m' are each row's returns, as criteria_at gives them, NaN for none.
     """
 
     ticker: str
@@ -157,9 +156,8 @@ class TickerReplay:
     dates: pd.Index
     closes: np.ndarray
     scorable: np.ndarray
-    core: np.ndarray
+    conditions: CoreConditions
     runs: BreakoutRuns
-    phase: np.ndarray
     return_1m: np.ndarray
     return_3m: np.ndarray
     series: Mapping[str, np.ndarray]
@@ -204,12 +202,8 @@ class TickerReplay:
         rs_market_3m = _difference(return_3m, _benchmark_return_pct(dates, RS_3M_DAYS, benchmark))
         position = breakout_position(self.runs, self.closes, row)
 
-        breakout_20d = price > high_20d
-        breakout_60d = price > high_60d
-        breakout_confirmed = volume_ratio is not None and volume_ratio >= VOLUME_RATIO_MIN
-        price_above_50dma = price > dma_50
-        dma_slope_up = dma_50 > dma_50_prior
-        core = [breakout_20d or breakout_60d, breakout_confirmed, price_above_50dma, dma_slope_up]
+        conditions = self.conditions
+        core = conditions.at(row)
 
         return StockCriteria(
             id=0,
@@ -228,11 +222,11 @@ class TickerReplay:
             rsi=round(rsi_val, 2),
             macd=round(macd_val, 2),
             signal=round(signal_val, 2),
-            breakout_20d=int(breakout_20d),
-            breakout_60d=int(breakout_60d),
-            breakout_confirmed=int(breakout_confirmed),
-            price_gt_50dma=int(price_above_50dma),
-            dma_50_rising=int(dma_slope_up),
+            breakout_20d=int(conditions.breakout_20d[row]),
+            breakout_60d=int(conditions.breakout_60d[row]),
+            breakout_confirmed=int(conditions.confirmed[row]),
+            price_gt_50dma=int(conditions.above_sma[row]),
+            dma_50_rising=int(conditions.sma_rising[row]),
             rsi_50_70=int(RSI_BAND[0] <= rsi_val <= RSI_BAND[1]),
             macd_above_signal=int(macd_val > signal_val),
             macd_hist=_round(hist_val),
@@ -274,7 +268,7 @@ class TickerReplay:
             breakout_margin_pct=position.margin_pct,
             invalidation_distance_pct=position.invalidation_pct,
             sessions_since_breakout=position.sessions,
-            breakout_phase=self.phase[row],
+            breakout_phase=self.runs.phase[row],
         )
 
 
@@ -328,17 +322,17 @@ def ticker_replay(ticker: str, subsector_id: int, prices: Sequence[DailyPrice]) 
     closes = close.to_numpy()
     rows = np.arange(len(closes))
     scorable = (rows + 1 >= MIN_ROWS) & ~unscored(closes, volume)
-    core = scorable & core_met(closes, series['high'], volume_f.to_numpy())
-    runs = breakout_runs(closes, series['high'], series['low'], core)
+    filled = high.fillna(close).to_numpy()
+    conditions = core_conditions(closes, filled, volume_f.to_numpy())
+    runs = breakout_runs(closes, series['high'], series['low'], scorable & conditions.met())
     return TickerReplay(
         ticker=ticker,
         subsector_id=subsector_id,
         dates=dates,
         closes=closes,
         scorable=scorable,
-        core=core,
+        conditions=conditions,
         runs=runs,
-        phase=np.array(runs.phase, dtype=object),
         return_1m=_returns(close, RS_1M_DAYS),
         return_3m=_returns(close, RS_3M_DAYS),
         series=series,

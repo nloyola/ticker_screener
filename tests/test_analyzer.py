@@ -1219,6 +1219,29 @@ def test_a_run_ends_on_the_second_close_in_a_row_below_its_level(second_close, s
     assert session_statuses(closes, volumes) == statuses
 
 
+def test_under_a_higher_60_day_peak_the_run_breaks_the_20_day_high_and_its_pause_is_measured_over_20_days():
+    # a 160 high 40 sessions back is BASE's 60-day high, so 142 breaks only the 20-day high, 139.5, by 1.79%; 145
+    # clears the 142 high on 3000 shares by 2.1%, but that high was set 1 session before within the 20 days, so it is
+    # extended, though the 60 days' highest high, 160, was set 40 sessions before
+    closes = [*BASE, 142.0, 145.0]
+    volumes = [*BASE_VOLUMES, 2000, 3000]
+    highs = list(closes)
+    highs[40] = 160.0
+
+    breakout, extended = (analyze(closes[:end], volumes[:end], highs[:end]) for end in (len(BASE) + 1, len(closes)))
+
+    assert (breakout.breakout_20d, breakout.breakout_60d) == (1, 0)
+    assert (breakout.breakout_phase, breakout.breakout_margin_pct) == (
+        BREAKOUT_SESSION,
+        pytest.approx(2.5 / 139.5 * 100),
+    )
+    assert (extended.breakout_phase, extended.breakout_margin_pct, extended.sessions_since_breakout) == (
+        EXTENDED_SESSION,
+        pytest.approx(5.5 / 139.5 * 100),
+        1,
+    )
+
+
 def session_positions(closes: list[float], volumes: list[int]) -> list[tuple[float | None, float | None, int | None]]:
     """The breakout position of each session after BASE, scored from the rows up to it alone."""
     positions = []
