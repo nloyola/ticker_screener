@@ -692,6 +692,13 @@ def test_analyze_stores_the_extended_status_of_a_session_after_a_breakout(path, 
 
     assert statuses(path)['EXT'] == (203.0, TODAY.isoformat(), 'extended')
     assert signal_count(path) == 0
+    # measured against the run's 198 level, one session after its breakout
+    ext = table_rows(path, 'stock_criteria')['EXT']
+    assert tuple(ext[c] for c in ('breakout_margin_pct', 'invalidation_distance_pct', 'sessions_since_breakout')) == (
+        pytest.approx(5 / 198 * 100),
+        pytest.approx(5 / 203 * 100),
+        1,
+    )
 
 
 # Friday 2026-11-06 in the evening, once the US market has published that day's rows
@@ -1109,6 +1116,14 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
         'close': 202.0,
         'price': 202.0,
     }
+    # a signal is a breakout session: BRK's unrounded close clears its 198 level by 4.456, its margin taken over the
+    # level and its invalidation distance over the close
+    position = ('breakout_margin_pct', 'invalidation_distance_pct', 'sessions_since_breakout')
+    assert tuple(signals['BRK'][c] for c in position) == (
+        pytest.approx(4.456 / 198 * 100),
+        pytest.approx(4.456 / 202.456 * 100),
+        0,
+    )
     # the session's signals carry the rules its screened session records
     assert {(m, d, v, s, c, r) for m, d, v, s, c, r, _ in sessions(path)} == {
         (US, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),

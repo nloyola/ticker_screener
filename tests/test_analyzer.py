@@ -1219,6 +1219,45 @@ def test_a_run_ends_on_the_second_close_in_a_row_below_its_level(second_close, s
     assert session_statuses(closes, volumes) == statuses
 
 
+def session_positions(closes: list[float], volumes: list[int]) -> list[tuple[float | None, float | None, int | None]]:
+    """The breakout position of each session after BASE, scored from the rows up to it alone."""
+    positions = []
+    for end in range(len(BASE) + 1, len(closes) + 1):
+        sc = analyze(closes[:end], volumes[:end])
+        positions.append((sc.breakout_margin_pct, sc.invalidation_distance_pct, sc.sessions_since_breakout))
+    return positions
+
+
+def position(close: float, level: float, sessions: int) -> tuple[object, object, int]:
+    """The margin over 'level' in percent of it, the distance down to it in percent of 'close', and 'sessions'."""
+    return (pytest.approx((close - level) / level * 100), pytest.approx((close - level) / close * 100), sessions)
+
+
+def test_breakout_and_extended_sessions_are_measured_against_their_runs_level():
+    # the fixture of the first test above: the run breaks 139.5 at 142 and holds for 15 sessions, each measured
+    # against 139.5 and counted from 142's session; 154 breaks 151 and starts again at 0
+    closes = [*BASE, 142.0, 145.0, 148.0, 151.0, *[150.0] * 12, 154.0]
+    volumes = [*BASE_VOLUMES, 2000, 3000, 3000, 3000, *[BASE_VOLUME] * 12, 3000]
+
+    assert session_positions(closes, volumes) == [
+        position(142.0, 139.5, 0),  # margin 2.5 / 139.5 = 1.79%, distance 2.5 / 142 = 1.76%
+        position(145.0, 139.5, 1),
+        position(148.0, 139.5, 2),
+        position(151.0, 139.5, 3),
+        *(position(150.0, 139.5, n) for n in range(4, 16)),  # 10.5 / 139.5 = 7.53%, 10.5 / 150 = 7%
+        position(154.0, 151.0, 0),  # 3 / 151 = 1.99%, 3 / 154 = 1.95%
+    ]
+
+
+def test_a_session_neither_breakout_nor_extended_has_no_position():
+    # 139 is the run's first close below 139.5: still in the run, but not extended; and 140.5 misses the margin
+    closes = [*BASE, 142.0, 139.0]
+    volumes = [*BASE_VOLUMES, 2000, BASE_VOLUME]
+
+    assert session_positions(closes, volumes)[1] == (None, None, None)
+    assert session_positions([*BASE, 140.5], [*BASE_VOLUMES, 2000]) == [(None, None, None)]
+
+
 def test_an_extended_session_is_extended_whatever_its_secondary_indicators():
     assert with_status(flags(**passing(*INDICATOR_FLAGS), breakout_phase=EXTENDED_SESSION)).status == EXTENDED
 

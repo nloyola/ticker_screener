@@ -492,6 +492,33 @@ def breakout_runs(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, core:
     return BreakoutRuns(phase, run_level, run_start)
 
 
+@dataclass(frozen=True)
+class BreakoutPosition:
+    """
+    Where a breakout or extended session stands in its run (GLOSSARY.md, "Status"): 'margin_pct' is the close's
+    margin over the level the run broke, in percent of that level; 'invalidation_pct' the distance from the close
+    down to that level, the invalidation level, in percent of the close, the size of a stop placed there; and
+    'sessions' the sessions since the run's breakout, 0 on the breakout itself. On an extended session all three are
+    measured against the run's level, not a new one.
+    """
+
+    margin_pct: float | None = None
+    invalidation_pct: float | None = None
+    sessions: int | None = None
+
+
+def breakout_position(runs: BreakoutRuns, closes: np.ndarray, row: int) -> BreakoutPosition:
+    """The position of 'row' in its run (breakout_runs): every value None unless a breakout or extended session."""
+    if runs.phase[row] not in (BREAKOUT_SESSION, EXTENDED_SESSION):
+        return BreakoutPosition()
+    close, level = float(closes[row]), float(runs.level[row])
+    return BreakoutPosition(
+        margin_pct=(close / level - 1) * 100,
+        invalidation_pct=(close - level) / close * 100,
+        sessions=row - int(runs.start[row]),
+    )
+
+
 def with_status(sc: StockCriteria) -> StockCriteria:
     """
     'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none. Only a breakout
@@ -1027,6 +1054,7 @@ class Analyzer:
         lows = df['low'].to_numpy(dtype=float)
         core_rows = core_met(closes, highs.to_numpy(dtype=float), volumes)
         runs = breakout_runs(closes, df['high'].to_numpy(dtype=float), lows, core_rows)
+        position = breakout_position(runs, closes, len(closes) - 1)
 
         return StockCriteria(
             id=0,
@@ -1091,6 +1119,10 @@ class Analyzer:
             rs_market_3m=rs_market_3m,
             outperforms_market_1m=_positive(rs_market_1m),
             outperforms_market_3m=_positive(rs_market_3m),
+            # unrounded, like the distances to resistance
+            breakout_margin_pct=position.margin_pct,
+            invalidation_distance_pct=position.invalidation_pct,
+            sessions_since_breakout=position.sessions,
             breakout_phase=runs.phase[-1],
         )
 

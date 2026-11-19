@@ -52,6 +52,7 @@ from app.analyzer import (
     SMA_RISING_DAYS,
     VOLUME_AVG_DAYS,
     VOLUME_RATIO_MIN,
+    BreakoutRuns,
     _above,
     _below,
     _benchmark_return_pct,
@@ -61,6 +62,7 @@ from app.analyzer import (
     _near,
     _positive,
     _round,
+    breakout_position,
     breakout_runs,
     core_met,
     ema,
@@ -145,8 +147,9 @@ class TickerReplay:
     """
     One ticker's history scored on every row. 'scorable' marks the rows a run on that session would score: those
     with MIN_ROWS rows up to them, not ending in a padded stop or a frozen stretch. 'core' marks those meeting the
-    four core conditions, 'phase' is each row's place in a breakout run (breakout_runs in app/analyzer.py), and
-    'return_1m' and 'return_3m' are each row's returns, as criteria_at gives them, NaN for none.
+    four core conditions, 'runs' is each row's place in a breakout run (breakout_runs in app/analyzer.py), with
+    'phase' its phase as an array, and 'return_1m' and 'return_3m' are each row's returns, as criteria_at gives them,
+    NaN for none.
     """
 
     ticker: str
@@ -155,6 +158,7 @@ class TickerReplay:
     closes: np.ndarray
     scorable: np.ndarray
     core: np.ndarray
+    runs: BreakoutRuns
     phase: np.ndarray
     return_1m: np.ndarray
     return_3m: np.ndarray
@@ -198,6 +202,7 @@ class TickerReplay:
         return_1m, return_3m = _value(self.return_1m, row), _value(self.return_3m, row)
         rs_market_1m = _difference(return_1m, _benchmark_return_pct(dates, RS_1M_DAYS, benchmark))
         rs_market_3m = _difference(return_3m, _benchmark_return_pct(dates, RS_3M_DAYS, benchmark))
+        position = breakout_position(self.runs, self.closes, row)
 
         breakout_20d = price > high_20d
         breakout_60d = price > high_60d
@@ -266,6 +271,9 @@ class TickerReplay:
             rs_market_3m=rs_market_3m,
             outperforms_market_1m=_positive(rs_market_1m),
             outperforms_market_3m=_positive(rs_market_3m),
+            breakout_margin_pct=position.margin_pct,
+            invalidation_distance_pct=position.invalidation_pct,
+            sessions_since_breakout=position.sessions,
             breakout_phase=self.phase[row],
         )
 
@@ -329,6 +337,7 @@ def ticker_replay(ticker: str, subsector_id: int, prices: Sequence[DailyPrice]) 
         closes=closes,
         scorable=scorable,
         core=core,
+        runs=runs,
         phase=np.array(runs.phase, dtype=object),
         return_1m=_returns(close, RS_1M_DAYS),
         return_3m=_returns(close, RS_3M_DAYS),

@@ -634,3 +634,56 @@ def test_upgrade_lets_the_status_be_extended_keeping_every_row(version_15_db, cu
     _execute(version_15_db, "UPDATE stock_criteria SET status = 'extended' WHERE ticker = 'CVX'")
     with pytest.raises(sqlite3.IntegrityError):
         _execute(version_15_db, "UPDATE stock_criteria SET status = 'watchlist' WHERE ticker = 'XOM'")
+
+
+POSITION_COLUMNS = (
+    'breakout_margin_pct REAL,',
+    'invalidation_distance_pct REAL,',
+    'sessions_since_breakout INTEGER,',
+)
+
+
+@pytest.fixture
+def version_16_db(tmp_path) -> str:
+    """
+    A database at version 16: today's schema with neither stock_criteria nor signal holding the breakout position's
+    columns, stock_criteria holding two rows and signal one.
+    """
+    path = str(tmp_path / 'v16.db')
+    init_db(path)
+    statements = []
+    for table in ('stock_criteria', 'signal'):
+        old = _query(path, 'SELECT sql FROM sqlite_master WHERE name = ?', table)[0][0]
+        for column in POSITION_COLUMNS:
+            assert column in old
+            old = old.replace(column, '')
+        statements += [f'DROP TABLE {table}', old]
+    _execute(
+        path,
+        'DROP INDEX idx_signal_session_date',
+        *statements,
+        'INSERT INTO stock_criteria (id, subsector_id, ticker, price, date_created, status) '
+        "VALUES (1, 10, 'XOM', 110.5, '2026-11-13', 'extended')",
+        "INSERT INTO stock_criteria (id, ticker, date_created) VALUES (2, 'CVX', '2026-11-13')",
+        'INSERT INTO signal (ticker, market, time_zone, session_date, close, rsi, status, screener_version, '
+        "rule_settings, source) VALUES ('XOM', 'US', 'America/New_York', '2026-11-12', 108.0, 61.2, 'confirmed', "
+        "'1.0.0', '{}', 'live')",
+        'PRAGMA user_version = 16',
+    )
+    return path
+
+
+def test_upgrade_adds_the_breakout_position_keeping_every_row(version_16_db, current_db):
+    criteria_before = _query(version_16_db, 'SELECT * FROM stock_criteria ORDER BY id')
+    signals_before = _query(version_16_db, 'SELECT * FROM signal')
+
+    upgrade_db(version_16_db)
+
+    assert _query(version_16_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    for table in ('stock_criteria', 'signal'):
+        assert _table_sql(version_16_db, table) == _table_sql(current_db, table)
+    # the rows already stored keep every value, with no position until a run scores them again
+    assert _query(version_16_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
+        (*row, None, None, None) for row in criteria_before
+    ]
+    assert _query(version_16_db, 'SELECT * FROM signal') == [(*row, None, None, None) for row in signals_before]

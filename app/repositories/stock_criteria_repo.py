@@ -71,6 +71,9 @@ COLUMNS = (
     'outperforms_sector_3m',
     'secondary_passed',
     'status',
+    'breakout_margin_pct',
+    'invalidation_distance_pct',
+    'sessions_since_breakout',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -159,6 +162,9 @@ def row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_int(sc.outperforms_sector_3m),  # INTEGER
         _as_int(sc.secondary_passed),  # INTEGER
         sc.status,
+        _as_float(sc.breakout_margin_pct),
+        _as_float(sc.invalidation_distance_pct),
+        _as_int(sc.sessions_since_breakout),  # INTEGER
     )
 
 

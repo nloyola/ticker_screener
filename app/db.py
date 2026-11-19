@@ -664,6 +664,27 @@ def _allow_extended_status(con: sqlite3.Connection) -> None:
     logger.info('Rebuilt stock_criteria to allow the extended status, keeping its %d rows', rows)
 
 
+def _add_breakout_position(con: sqlite3.Connection) -> None:
+    """
+    Version 17: stock_criteria and signal gain the breakout position (breakout_position in app/analyzer.py), the
+    breakout margin, the invalidation distance and the sessions since the breakout, left NULL in the rows already
+    stored: until the next analyze replaces a stock_criteria row, and for good in a signal, which is append-only.
+    Adds only what a table lacks, so a table schema.sql created this way is left as it is.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    for table in ('stock_criteria', 'signal'):
+        columns = {row[1] for row in con.execute(f"PRAGMA table_info('{table}')")}
+        if not columns:
+            continue  # no table: schema.sql creates it this way
+        for column, kind in (
+            ('breakout_margin_pct', 'REAL'),
+            ('invalidation_distance_pct', 'REAL'),
+            ('sessions_since_breakout', 'INTEGER'),
+        ):
+            if column not in columns:
+                con.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -681,6 +702,7 @@ UPGRADES = (
     _add_analysis,
     _add_analysis_no_horizon_index,
     _allow_extended_status,
+    _add_breakout_position,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

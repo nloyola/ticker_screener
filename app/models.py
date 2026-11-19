@@ -123,6 +123,13 @@ class StockCriteria:
     # status: 'high_conviction', 'confirmed', 'extended', 'pre_breakout', or None for none
     secondary_passed: int | None = None
     status: str | None = None
+    # on a breakout or extended session, the run's position (breakout_position in app/analyzer.py): the close's
+    # margin over the level the run broke, in percent of the level, the distance from the close down to that level,
+    # the invalidation level, in percent of the close, and the sessions since the run's breakout, 0 on the breakout
+    # itself; None on any other session
+    breakout_margin_pct: float | None = None
+    invalidation_distance_pct: float | None = None
+    sessions_since_breakout: int | None = None
     # the session's place in a breakout run, which decides its status (breakout_runs in app/analyzer.py): 'breakout',
     # 'extended' or None; not stored
     breakout_phase: str | None = None
