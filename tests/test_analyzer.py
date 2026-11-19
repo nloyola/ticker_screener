@@ -23,7 +23,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.analyzer import CONFIRMED, HIGH_CONVICTION, PRE_BREAKOUT, SECONDARY_INDICATORS, Analyzer, with_status
+from app.analyzer import (
+    BREAKOUT_SESSION,
+    CONFIRMED,
+    EXTENDED,
+    EXTENDED_SESSION,
+    HIGH_CONVICTION,
+    PRE_BREAKOUT,
+    SECONDARY_INDICATORS,
+    Analyzer,
+    with_status,
+)
 from app.markets import US, is_session
 from app.models import PriceData, ScreenedSession, Signal, StockCriteria
 
@@ -956,26 +966,28 @@ def passed_indicators(sc: StockCriteria) -> list[str]:
 
 
 def test_a_breakout_passing_most_secondary_indicators_is_high_conviction():
-    # the zigzag passes every secondary indicator but relative strength, which has no benchmark or subsector median;
-    # each day closes at its high, and its last 20 days span (286 - 266) / 286 below the 10% of a tight base
-    sc = run_one(zigzag(368), volumes_with_last(368, 2000))
+    # the zigzag's last day rises 4 to 287, 1.06% above its 284 high, clearing the 1% margin; it passes every
+    # secondary indicator but relative strength, which has no benchmark or subsector median, and the RSI, which the
+    # jump lifts just above 70; each day closes at its high, and its last 20 days span (284 - 273) / 284, below the
+    # 10% of a tight base
+    sc = run_one(with_last(zigzag(368), 287.0), volumes_with_last(368, 2000))
 
     assert sc.core_criteria_met is True
     assert passed_indicators(sc) == [
-        'rsi',
         'macd',
         'moving_average_alignment',
         'consolidation_quality',
         'closing_strength',
         'ema_21_alignment',
     ]
-    assert (sc.secondary_passed, sc.status) == (6, HIGH_CONVICTION)
+    assert (sc.secondary_passed, sc.status) == (5, HIGH_CONVICTION)
 
 
 def test_a_breakout_passing_few_secondary_indicators_is_confirmed():
-    # 100 rows of a steady rise: RSI 100 is outside the band, there are too few rows for the 200-day average and the
-    # 21-week EMA, and the base spans 10.1%; only the MACD above its signal line and the close at the day's high pass
-    sc = run_one(rising(100), volumes_with_last(100, 2000))
+    # 100 rows of a steady rise, the last 3 above the day before to 201, 1.5% above the 198 high: RSI 100 is outside
+    # the band, there are too few rows for the 200-day average and the 21-week EMA, and the base spans 10.1%; only
+    # the MACD above its signal line and the close at the day's high pass
+    sc = run_one(with_last(rising(100), 201.0), volumes_with_last(100, 2000))
 
     assert sc.core_criteria_met is True
     assert passed_indicators(sc) == ['macd', 'closing_strength']
@@ -999,9 +1011,16 @@ def test_a_falling_ticker_has_no_status():
     assert (sc.secondary_passed, sc.status) == (1, None)  # it closes at the day's high
 
 
-def flags(**values: int | None) -> StockCriteria:
-    """A ticker passing every core condition and none of the secondary indicators, but for 'values'."""
-    core = dict(core_criteria_met=True, core_criteria_score=4, breakout_20d=1, breakout_confirmed=1, dma_50_rising=1)
+def flags(**values: int | str | None) -> StockCriteria:
+    """A ticker on its breakout session passing none of the secondary indicators, but for 'values'."""
+    core = dict(
+        core_criteria_met=True,
+        core_criteria_score=4,
+        breakout_20d=1,
+        breakout_confirmed=1,
+        dma_50_rising=1,
+        breakout_phase=BREAKOUT_SESSION,
+    )
     return StockCriteria(id=0, subsector_id=SUBSECTOR_ID, ticker='TEST', **(core | {'price_gt_50dma': 1} | values))
 
 
@@ -1078,7 +1097,13 @@ def test_empty_flags_count_as_not_passed():
 
 
 def test_the_watchlist_needs_both_trend_conditions_and_a_close_near_resistance():
-    not_met = {'core_criteria_met': False, 'core_criteria_score': 3, 'breakout_20d': 0, 'near_resistance': 1}
+    not_met = {
+        'core_criteria_met': False,
+        'core_criteria_score': 3,
+        'breakout_20d': 0,
+        'near_resistance': 1,
+        'breakout_phase': None,
+    }
 
     assert with_status(flags(**not_met)).status == PRE_BREAKOUT
     assert with_status(flags(**(not_met | {'price_gt_50dma': 0}))).status is None
@@ -1103,6 +1128,99 @@ def test_a_status_counts_the_subsector_comparison():
         'CCC': ['macd', 'consolidation_quality', 'closing_strength'],
     }
     assert {t: sc.secondary_passed for t, sc in by_ticker.items()} == {'AAA': 2, 'BBB': 3, 'CCC': 3}
+
+
+# --- A breakout is one session ----------------------------------------------
+#
+# BASE is 80 sessions rising by 0.5 from 100 to 139.5 on 1000 shares a day, each closing at its high with its low 1
+# under it: a daily range of 1 / close, about 0.7%, half of which is below the 1% floor, so the margin is 1%. A close
+# on the 81st session above 139.5, the prior 20- and 60-day high, on doubled volume meets the four core conditions.
+
+BASE = rising(80, start=100.0, step=0.5)
+BASE_VOLUMES = [BASE_VOLUME] * len(BASE)
+
+
+def session_statuses(
+    closes: list[float], volumes: list[int], lows: list[float | None] | None = None
+) -> list[str | None]:
+    """The status of each session after BASE, scored from the rows up to it alone, as a run on that session would."""
+    statuses = []
+    for end in range(len(BASE) + 1, len(closes) + 1):
+        sc = analyze(closes[:end], volumes[:end], lows=None if lows is None else lows[:end])
+        statuses.append(with_status(sc).status)
+    return statuses
+
+
+def test_a_breakout_is_confirmed_on_its_first_session_and_extended_until_a_higher_break_after_a_pause():
+    # 142 clears 139.5 by 1.79%. 145, 148 and 151 each clear the day before's high by 2% or more on 3000 shares,
+    # meeting every condition again, but the high each clears was set 1 session before: a run of new highs, so
+    # Extended. 12 sessions at 150 hold above the 139.5 level, Extended. 154 clears the 151 high, set 13 sessions
+    # before, by 1.99% on 3000 shares, over an average of (12 * 1000 + 3 * 3000 + 2000 + 4 * 1000) / 20 = 1350: a
+    # break of a higher level after a pause, a breakout again
+    closes = [*BASE, 142.0, 145.0, 148.0, 151.0, *[150.0] * 12, 154.0]
+    volumes = [*BASE_VOLUMES, 2000, 3000, 3000, 3000, *[BASE_VOLUME] * 12, 3000]
+
+    assert session_statuses(closes, volumes) == [CONFIRMED, *[EXTENDED] * 15, CONFIRMED]
+
+
+def test_a_close_clearing_resistance_by_less_than_the_margin_is_not_a_breakout():
+    # 140.5 clears 139.5 by 0.72%, under the 1% floor: every core condition is met, but no breakout
+    sc = with_status(analyze([*BASE, 140.5], [*BASE_VOLUMES, 2000]))
+
+    assert sc.core_criteria_met is True
+    assert (sc.breakout_phase, sc.status) == (None, None)
+
+
+def wide_lows(closes: list[float]) -> list[float | None]:
+    """Each session's low 6 under its close: over BASE's last 14 sessions, 133 to 139.5, an average range of 4.40%."""
+    return [close - 6 for close in closes]
+
+
+@pytest.mark.parametrize(('close', 'status'), [(142.0, None), (143.0, CONFIRMED)])
+def test_the_margin_is_half_the_average_daily_range_when_that_is_above_the_floor(close, status):
+    # half of the 4.40% average range is 2.20%: 142 clears 139.5 by 1.79%, short of it, and 143 by 2.51%
+    closes = [*BASE, close]
+
+    assert session_statuses(closes, [*BASE_VOLUMES, 2000], wide_lows(closes)) == [status]
+
+
+def test_a_session_missing_its_low_is_left_out_of_the_average_range():
+    # every other of the 14 sessions has no low: the 7 left still average 4.40%, so 142 falls short of the 2.20%
+    # margin; counting the others as ranges of 0 would halve it to 1.10% and let 142 through
+    closes = [*BASE, 142.0]
+    lows = wide_lows(closes)
+    for row in range(len(BASE) - 14, len(BASE), 2):
+        lows[row] = None
+
+    assert session_statuses(closes, [*BASE_VOLUMES, 2000], lows) == [None]
+
+
+def test_with_no_daily_range_known_the_margin_is_the_floor():
+    closes = [*BASE, 142.0]
+    lows = [*[None] * len(BASE), 136.0]
+
+    assert session_statuses(closes, [*BASE_VOLUMES, 2000], lows) == [CONFIRMED]
+
+
+@pytest.mark.parametrize(
+    ('second_close', 'statuses'),
+    [
+        # 139 then 138: two closes in a row below 139.5 end the run, so 144 is a first qualifying session again
+        pytest.param(138.0, [CONFIRMED, PRE_BREAKOUT, PRE_BREAKOUT, CONFIRMED], id='two closes below'),
+        # 139 then 141: one close below does not end it, and 144 clears the 142 high set 3 sessions before
+        pytest.param(141.0, [CONFIRMED, PRE_BREAKOUT, EXTENDED, EXTENDED], id='one close below'),
+    ],
+)
+def test_a_run_ends_on_the_second_close_in_a_row_below_its_level(second_close, statuses):
+    # 144 clears the 142 high by 1.41% on 3000 shares; 139 and 138 close within 5% under 142, on the watchlist
+    closes = [*BASE, 142.0, 139.0, second_close, 144.0]
+    volumes = [*BASE_VOLUMES, 2000, BASE_VOLUME, BASE_VOLUME, 3000]
+
+    assert session_statuses(closes, volumes) == statuses
+
+
+def test_an_extended_session_is_extended_whatever_its_secondary_indicators():
+    assert with_status(flags(**passing(*INDICATOR_FLAGS), breakout_phase=EXTENDED_SESSION)).status == EXTENDED
 
 
 # --- How much history is needed ---------------------------------------------

@@ -75,10 +75,20 @@ LISTED = {
 }
 
 
+SPIKE_SHARE = 0.12
+SPIKE_JUMP = 0.03
+
+
 def walk(rng: np.random.Generator, days: list[date], start: float = 50.0) -> list[DailyPrice]:
-    """A rising random walk with a volume spike on about one day in eight, so breakouts happen often."""
-    closes = start * np.exp(np.cumsum(rng.normal(0.002, 0.02, len(days))))
-    spikes = rng.random(len(days)) < 0.12
+    """
+    A rising random walk with a volume spike on about one day in eight, each spike day's return 3% higher and every
+    other day's lower by as much in all, so breakouts clear the minimum margin and their runs end.
+    """
+    returns = rng.normal(0.002, 0.02, len(days))
+    spikes = rng.random(len(days)) < SPIKE_SHARE
+    closes = start * np.exp(
+        np.cumsum(returns + np.where(spikes, SPIKE_JUMP, -SPIKE_JUMP * SPIKE_SHARE / (1 - SPIKE_SHARE)))
+    )
     volumes = (rng.lognormal(7, 0.3, len(days)) * np.where(spikes, 3.5, 1.0)).astype(int) + 1
     return [
         DailyPrice(
@@ -315,10 +325,10 @@ def test_every_backfill_signal_120_sessions_old_has_six_completed_outcomes(path,
 def test_a_spot_checked_signals_outcomes_match_its_prices_in_the_history(path, container, prices, benchmarks):
     container.history_backfill.run()
 
-    # the oldest signal, with every horizon in its path
-    s = next(s for s in signals(path) if s['ticker'] == 'CCC')
-    assert s['session_date'] == '2024-12-19'
-    rows = prices['CCC']
+    # the oldest signal, with every horizon in its path, of GGG, listed 120 sessions late
+    s = min(signals(path), key=lambda s: s['session_date'])
+    assert (s['ticker'], s['session_date']) == ('GGG', '2024-12-19')
+    rows = prices['GGG']
     start = [p.date.isoformat() for p in rows].index(s['session_date'])
     bench = {p.date: p for p in benchmarks[BENCHMARKS[US]]}
     entry = rows[start + 1]
@@ -352,14 +362,14 @@ def test_a_spot_checked_signals_outcomes_match_its_prices_in_the_history(path, c
 
 
 def test_a_signal_whose_tickers_history_stops_early_is_ended(path, container, prices):
-    # CCC's history stops 50 sessions before its market's
-    container.history_repo.store(TICKER, 'CCC', prices['CCC'][:-50], FETCHED, 'eodhd')
-    last = prices['CCC'][-51].date
+    # FFF's history stops 15 sessions before its market's
+    container.history_repo.store(TICKER, 'FFF', prices['FFF'][:-15], FETCHED, 'eodhd')
+    last = prices['FFF'][-16].date
 
     container.history_backfill.run()
 
-    days = [p.date.isoformat() for p in prices['CCC'][:-50]]
-    young = [s for s in signals(path) if s['ticker'] == 'CCC' and len(days) - 1 - days.index(s['session_date']) < 120]
+    days = [p.date.isoformat() for p in prices['FFF'][:-15]]
+    young = [s for s in signals(path) if s['ticker'] == 'FFF' and len(days) - 1 - days.index(s['session_date']) < 120]
     assert len(young) == 3
     for s in young:
         reached = len(days) - 1 - days.index(s['session_date'])
@@ -374,7 +384,7 @@ def test_a_signal_whose_tickers_history_stops_early_is_ended(path, container, pr
     others = rows_of(
         path,
         "SELECT COUNT(*) FROM signal_outcome o JOIN signal s ON s.id = o.signal_id WHERE o.status = 'ended' "
-        "AND s.ticker <> 'CCC'",
+        "AND s.ticker <> 'FFF'",
     )
     assert others == [(0,)]
 

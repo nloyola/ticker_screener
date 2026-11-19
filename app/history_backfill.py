@@ -16,6 +16,7 @@ import pandas as pd
 
 from app.analyzer import (
     BACKFILL,
+    BREAKOUT_SESSION,
     SCREENER_VERSION,
     SIGNAL_STATUSES,
     Analyzer,
@@ -247,7 +248,7 @@ class HistoryBackfill:
         makes it a signal.
         """
         replays: list[tuple[str, TickerReplay, np.ndarray]] = []
-        # the rows meeting the core conditions, the only ones that can be signals: (replay index, row)
+        # the breakout sessions, the only ones that can be signals: (replay index, row)
         candidates: list[tuple[int, int]] = []
         for ticker in tickers:
             market = market_of(ticker)
@@ -257,7 +258,8 @@ class HistoryBackfill:
             if included.any():
                 scored.add(ticker)
             replays.append((market, replay, ordinals))
-            candidates.extend((len(replays) - 1, int(row)) for row in np.flatnonzero(included & replay.core))
+            breakouts = np.flatnonzero(included & (replay.phase == BREAKOUT_SESSION))
+            candidates.extend((len(replays) - 1, int(row)) for row in breakouts)
         if not candidates:
             return []
 

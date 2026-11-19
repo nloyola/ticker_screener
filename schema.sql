@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- dma_50_25d_ago, price_gt_10ema) and adds volume_ratio, the fifth renames rsi_50_75 and macd_bullish and adds the
 -- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, and the
 -- seventh the relative strength columns after those, and the eighth secondary_passed and status after those, where
--- ALTER TABLE places them; change both together. status is the strategy's status (with_status in app/analyzer.py),
+-- ALTER TABLE places them, and the sixteenth rebuilds the table to let status be extended; change both together. status is the strategy's status (with_status in app/analyzer.py),
 -- NULL for a ticker with none.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        outperforms_sector_1m INTEGER,
        outperforms_sector_3m INTEGER,
        secondary_passed INTEGER,
-       status TEXT CHECK (status IN ('high_conviction', 'confirmed', 'pre_breakout')),
+       status TEXT CHECK (status IN ('high_conviction', 'confirmed', 'extended', 'pre_breakout')),
        UNIQUE (ticker)
 );
 

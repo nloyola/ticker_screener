@@ -1,7 +1,8 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
 stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), and the
-status, price_data and benchmark_price have the day's open, and older databases are upgraded to all of them.
+status, extended among its values, price_data and benchmark_price have the day's open, and older databases are
+upgraded to all of them.
 """
 
 import os
@@ -592,3 +593,44 @@ def test_screened_session_refuses_a_bad_row(current_db, values):
             '(market, session_date, screener_version, rule_settings, git_commit, run_id, tickers_scored) '
             f'VALUES {values}',
         )
+
+
+@pytest.fixture
+def version_15_db(tmp_path) -> str:
+    """
+    A database at version 15: today's schema with stock_criteria's status refusing extended, holding two rows, one
+    confirmed, after its highest id (3) was deleted, so the AUTOINCREMENT sequence is above every id left.
+    """
+    path = str(tmp_path / 'v15.db')
+    init_db(path)
+    current = _query(path, "SELECT sql FROM sqlite_master WHERE name = 'stock_criteria'")[0][0]
+    old = current.replace("'confirmed', 'extended', ", "'confirmed', ")
+    assert old != current
+    _execute(
+        path,
+        'DROP TABLE stock_criteria',
+        old,
+        'INSERT INTO stock_criteria (id, subsector_id, ticker, price, rsi, date_created, rs_market_3m, '
+        "secondary_passed, status) VALUES (1, 10, 'XOM', 110.5, 61.2, '2026-11-13', 2.5, 5, 'confirmed')",
+        "INSERT INTO stock_criteria (id, ticker, date_created) VALUES (2, 'CVX', '2026-11-13')",
+        "INSERT INTO stock_criteria (id, ticker, date_created) VALUES (3, 'SHOP.TO', '2026-11-13')",
+        'DELETE FROM stock_criteria WHERE id = 3',
+        'PRAGMA user_version = 15',
+    )
+    return path
+
+
+def test_upgrade_lets_the_status_be_extended_keeping_every_row(version_15_db, current_db):
+    before = _query(version_15_db, 'SELECT * FROM stock_criteria ORDER BY id')
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(version_15_db, "UPDATE stock_criteria SET status = 'extended' WHERE ticker = 'CVX'")
+
+    upgrade_db(version_15_db)
+
+    assert _query(version_15_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_15_db, 'stock_criteria') == _table_sql(current_db, 'stock_criteria')
+    assert _query(version_15_db, 'SELECT * FROM stock_criteria ORDER BY id') == before
+    assert _query(version_15_db, "SELECT seq FROM sqlite_sequence WHERE name = 'stock_criteria'") == [(3,)]
+    _execute(version_15_db, "UPDATE stock_criteria SET status = 'extended' WHERE ticker = 'CVX'")
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(version_15_db, "UPDATE stock_criteria SET status = 'watchlist' WHERE ticker = 'XOM'")

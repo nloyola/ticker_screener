@@ -558,6 +558,112 @@ def _add_analysis_no_horizon_index(con: sqlite3.Connection) -> None:
                WHERE horizon IS NULL""")
 
 
+def _allow_extended_status(con: sqlite3.Connection) -> None:
+    """
+    Version 16: stock_criteria.status may be extended, a session in the run of an earlier breakout. SQLite cannot
+    change a column's CHECK, so the table is rebuilt as _guard_price_data_date rebuilds price_data: every row copied
+    with its id, the AUTOINCREMENT sequence kept.
+    """
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stock_criteria'").fetchone():
+        return  # schema.sql creates it this way
+    seq = con.execute("SELECT seq FROM sqlite_sequence WHERE name = 'stock_criteria'").fetchone()
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE stock_criteria_new (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               subsector_id INTEGER,
+               ticker TEXT NOT NULL,
+               price REAL,
+               core_criteria_met BOOLEAN,
+               core_criteria_score INTEGER,
+               high_20d REAL,
+               high_60d REAL,
+               volume INTEGER,
+               avg_vol_20d INTEGER,
+               dma_50 REAL,
+               dma_50_prev_15d REAL,
+               rsi REAL,
+               macd REAL,
+               signal REAL,
+               breakout_20d INTEGER,
+               breakout_60d INTEGER,
+               breakout_confirmed INTEGER,
+               price_gt_50dma INTEGER,
+               dma_50_rising INTEGER,
+               rsi_50_70 INTEGER,
+               macd_above_signal INTEGER,
+               date_created DATE NOT NULL DEFAULT (date('now')),
+               volume_ratio REAL,
+               macd_hist REAL,
+               macd_hist_prev REAL,
+               macd_days_above INTEGER,
+               macd_crossover INTEGER,
+               macd_hist_rising INTEGER,
+               dma_20 REAL,
+               dma_20_prev_15d REAL,
+               dma_200 REAL,
+               dma_200_prev_15d REAL,
+               price_gt_20dma INTEGER,
+               dma_20_rising INTEGER,
+               price_gt_200dma INTEGER,
+               dma_200_rising INTEGER,
+               ema_21 REAL,
+               ema_21_prev_5d REAL,
+               price_gt_21ema INTEGER,
+               ema_21_rising INTEGER,
+               ema_21w REAL,
+               ema_21w_prev_1w REAL,
+               price_gt_21wema INTEGER,
+               ema_21w_rising INTEGER,
+               close_position REAL,
+               close_upper_quarter INTEGER,
+               consolidation_range_pct REAL,
+               consolidation_tight INTEGER,
+               consolidation_vol_ratio REAL,
+               consolidation_vol_declining INTEGER,
+               dist_high_20d_pct REAL,
+               dist_high_60d_pct REAL,
+               near_resistance INTEGER,
+               return_1m_pct REAL,
+               return_3m_pct REAL,
+               rs_market_1m REAL,
+               rs_market_3m REAL,
+               rs_sector_1m REAL,
+               rs_sector_3m REAL,
+               outperforms_market_1m INTEGER,
+               outperforms_market_3m INTEGER,
+               outperforms_sector_1m INTEGER,
+               outperforms_sector_3m INTEGER,
+               secondary_passed INTEGER,
+               status TEXT CHECK (status IN ('high_conviction', 'confirmed', 'extended', 'pre_breakout')),
+               UNIQUE (ticker)
+        )""")
+    columns = """
+        id, subsector_id, ticker, price, core_criteria_met, core_criteria_score, high_20d, high_60d, volume,
+        avg_vol_20d, dma_50, dma_50_prev_15d, rsi, macd, signal, breakout_20d, breakout_60d, breakout_confirmed,
+        price_gt_50dma, dma_50_rising, rsi_50_70, macd_above_signal, date_created, volume_ratio, macd_hist,
+        macd_hist_prev, macd_days_above, macd_crossover, macd_hist_rising, dma_20, dma_20_prev_15d, dma_200,
+        dma_200_prev_15d, price_gt_20dma, dma_20_rising, price_gt_200dma, dma_200_rising, ema_21, ema_21_prev_5d,
+        price_gt_21ema, ema_21_rising, ema_21w, ema_21w_prev_1w, price_gt_21wema, ema_21w_rising, close_position,
+        close_upper_quarter, consolidation_range_pct, consolidation_tight, consolidation_vol_ratio,
+        consolidation_vol_declining, dist_high_20d_pct, dist_high_60d_pct, near_resistance, return_1m_pct,
+        return_3m_pct, rs_market_1m, rs_market_3m, rs_sector_1m, rs_sector_3m, outperforms_market_1m,
+        outperforms_market_3m, outperforms_sector_1m, outperforms_sector_3m, secondary_passed, status
+    """
+    rows = con.execute(f'INSERT INTO stock_criteria_new ({columns}) SELECT {columns} FROM stock_criteria').rowcount
+    con.execute('DROP TABLE stock_criteria')
+    con.execute('ALTER TABLE stock_criteria_new RENAME TO stock_criteria')
+    if seq is not None:
+        # the copy set the sequence to the highest id copied, which is below the old one if the top rows were deleted
+        con.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'stock_criteria'", (seq[0],))
+        con.execute(
+            "INSERT INTO sqlite_sequence (name, seq) SELECT 'stock_criteria', ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'stock_criteria')",
+            (seq[0],),
+        )
+    logger.info('Rebuilt stock_criteria to allow the extended status, keeping its %d rows', rows)
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -574,6 +680,7 @@ UPGRADES = (
     _add_backfill_run,
     _add_analysis,
     _add_analysis_no_horizon_index,
+    _allow_extended_status,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

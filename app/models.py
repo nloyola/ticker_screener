@@ -120,9 +120,12 @@ class StockCriteria:
     outperforms_sector_1m: int | None = None
     outperforms_sector_3m: int | None = None
     # how many of the strategy's secondary indicators it passes (SECONDARY_INDICATORS in app/analyzer.py), and its
-    # status: 'high_conviction', 'confirmed', 'pre_breakout', or None for none
+    # status: 'high_conviction', 'confirmed', 'extended', 'pre_breakout', or None for none
     secondary_passed: int | None = None
     status: str | None = None
+    # the session's place in a breakout run, which decides its status (breakout_runs in app/analyzer.py): 'breakout',
+    # 'extended' or None; not stored
+    breakout_phase: str | None = None
 
 
 @dataclass(frozen=True)

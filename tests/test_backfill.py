@@ -79,24 +79,30 @@ def test_replayable_sessions_leave_out_a_session_not_yet_final():
     assert list(replayable_sessions({US: pd.Index(DAYS)}, market_hours)) == DAYS[FIRST_REPLAYABLE:-1]
 
 
+# each session's close above or below the trend, 100 + its row, by its place in its cycle of SPIKE_EVERY sessions
+CYCLE_OFFSETS = (4.0, -3.0, -4.0, -3.0, -2.0)
+
+
 def rows(ticker: str, days: list[date] = DAYS) -> list[PriceData]:
     """
-    Closes rising by 1 a day from 100, each day's range from 2 below its close to half a point above it, so every
-    close clears the highs before it, on 1000 shares a day and 3000 every SPIKE_EVERY-th day: a confirmed breakout on
-    every spike day with enough history.
+    Closes rising by 1 a day from 100 in cycles of SPIKE_EVERY sessions (CYCLE_OFFSETS), each day's range from 2
+    below its close to half a point above it, on 1000 shares a day and 3000 on the first of each cycle. That spike
+    day closes 4.5 above the previous spike's high, clearing it by more than the margin, and the next 2 days close
+    below that high, ending the breakout's run: a confirmed breakout on every spike day with enough history.
     """
+    closes = [100.0 + i + CYCLE_OFFSETS[i % SPIKE_EVERY] for i in range(len(days))]
     return [
         PriceData(
             id=0,
             subsector_id=1,
             ticker=ticker,
             date=day,
-            close=100.0 + i,
-            high=100.5 + i,
-            low=98.0 + i,
+            close=close,
+            high=close + 0.5,
+            low=close - 2,
             volume=3000 if i % SPIKE_EVERY == 0 else 1000,
         )
-        for i, day in enumerate(days)
+        for i, (day, close) in enumerate(zip(days, closes, strict=True))
     ]
 
 

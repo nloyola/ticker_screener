@@ -85,6 +85,14 @@ def price_rows(ticker: str, last_day: date, n: int = 100) -> list[PriceData]:
     ]
 
 
+def with_breakout(rows: list[PriceData]) -> list[PriceData]:
+    """
+    'rows' with the last close 4 above the one before it, over 2% above the high it clears (the close before, with no
+    high stored), so the last session, on doubled volume, is a breakout clearing the 1% minimum margin.
+    """
+    return [*rows[:-1], replace(rows[-1], close=rows[-2].close + 4)]
+
+
 def criteria(path: str) -> dict[str, tuple[float, str]]:
     with sqlite3.connect(path) as con:
         rows = con.execute('SELECT ticker, price, date_created FROM stock_criteria').fetchall()
@@ -652,7 +660,7 @@ def test_analyze_stores_every_relative_strength_value(path, container):
 
 def test_analyze_stores_each_tickers_status(path, container):
     # BRK breaks out on doubled volume; NEAR closes at 197, 1.5% under its 200 high; FALL closes lower every day
-    container.price_data_repo.bulk_insert(price_rows('BRK', TODAY))
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('BRK', TODAY)))
     near = price_rows('NEAR', TODAY, n=101)
     container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1000)])
     fall = price_rows('FALL', TODAY)
@@ -671,6 +679,19 @@ def test_analyze_stores_each_tickers_status(path, container):
         'NEAR': (2, 0, 'pre_breakout'),
         'FALL': (1, 0, None),
     }
+
+
+def test_analyze_stores_the_extended_status_of_a_session_after_a_breakout(path, container):
+    # EXT broke out yesterday, closing at 202 over its 198 high, and closes at 203 today on its usual volume: still
+    # above the 198 level, in the breakout's run
+    yesterday = with_breakout(price_rows('EXT', shift(TODAY, -1)))
+    today = replace(price_rows('EXT', TODAY, n=1)[0], close=203.0, volume=1000)
+    container.price_data_repo.bulk_insert([*yesterday, today])
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    assert statuses(path)['EXT'] == (203.0, TODAY.isoformat(), 'extended')
+    assert signal_count(path) == 0
 
 
 # Friday 2026-11-06 in the evening, once the US market has published that day's rows
@@ -810,7 +831,7 @@ def statuses(path: str) -> dict[str, tuple[float, str, str | None]]:
 )
 def test_ticker_skipped_after_being_scored_the_same_day_loses_its_status(path, container, capsys, rows):
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
-    container.price_data_repo.bulk_insert(price_rows('BRK', TODAY))
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('BRK', TODAY)))
     container.analyzer.analyze()
     scored = statuses(path)
     assert scored['BRK'][2] is not None
@@ -830,7 +851,7 @@ def test_ticker_skipped_after_being_scored_the_same_day_loses_its_status(path, c
 )
 def test_ticker_left_unscored_after_being_scored_loses_its_status(path, container, capsys, rows):
     container.price_data_repo.bulk_insert(price_rows('AAA', TODAY))
-    container.price_data_repo.bulk_insert(price_rows('BRK', TODAY))
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('BRK', TODAY)))
     container.analyzer.analyze()
     scored = statuses(path)
     assert scored['BRK'][2] is not None
@@ -1026,13 +1047,14 @@ def signal_count(path: str) -> int:
 
 def breakout_rows(path: str, container) -> None:
     """
-    BRK and SHOP.TO break out on doubled volume on TODAY, BRK closing at 199.456; NEAR closes 1.5% under its high, on
-    the pre-breakout watchlist; FALL closes lower every day.
+    BRK and SHOP.TO break out on doubled volume on TODAY, BRK closing at 202.456 and SHOP.TO at 202, clearing their
+    198 highs by more than the 1% margin; NEAR closes 1.5% under its high, on the pre-breakout watchlist; FALL closes
+    lower every day.
     """
     add_energy_oil(path)
     brk = price_rows('BRK', TODAY)
-    container.price_data_repo.bulk_insert([*brk[:-1], replace(brk[-1], close=199.456)])
-    container.price_data_repo.bulk_insert(price_rows('SHOP.TO', TODAY))
+    container.price_data_repo.bulk_insert([*brk[:-1], replace(brk[-1], close=202.456)])
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('SHOP.TO', TODAY)))
     near = price_rows('NEAR', TODAY, n=101)
     container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1000)])
     fall = price_rows('FALL', TODAY)
@@ -1076,16 +1098,16 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
         'market': US,
         'exchange': None,
         'time_zone': 'America/New_York',
-        'close': 199.456,
-        'price': 199.46,
+        'close': 202.456,
+        'price': 202.46,
     }
     assert {c: signals['SHOP.TO'][c] for c in own} == {
         **common,
         'market': CANADA,
         'exchange': 'TSX',
         'time_zone': 'America/Toronto',
-        'close': 199.0,
-        'price': 199.0,
+        'close': 202.0,
+        'price': 202.0,
     }
     # the session's signals carry the rules its screened session records
     assert {(m, d, v, s, c, r) for m, d, v, s, c, r, _ in sessions(path)} == {
@@ -1126,12 +1148,18 @@ def test_same_session_under_new_rules_is_archived_again(path, container, monkeyp
 def test_repeated_signal_links_to_the_previous_one(path, container):
     add_energy_oil(path)
     earlier = shift(TODAY, -3)
-    container.price_data_repo.bulk_insert(price_rows('BRK', earlier))
+    first = with_breakout(price_rows('BRK', earlier))
+    container.price_data_repo.bulk_insert(first)
     container.analyzer.analyze()
-    # three more rising days: BRK breaks out again on TODAY, its volume still twice the average
-    rows = price_rows('BRK', TODAY, n=103)
-    rows[99] = replace(rows[99], volume=2000)
-    container.price_data_repo.replace_for_ticker('BRK', rows)
+    # two closes below the 198 level it broke end its run, and BRK breaks out again on TODAY, clearing the 202 high
+    # by 1.5% on twice the average volume
+    later = [
+        replace(row, id=0, close=close, volume=volume)
+        for row, close, volume in zip(
+            price_rows('BRK', TODAY, n=3), (197.0, 196.0, 205.0), (1000, 1000, 2000), strict=True
+        )
+    ]
+    container.price_data_repo.replace_for_ticker('BRK', [*first, *later])
 
     container.analyzer.analyze()
 
@@ -1166,12 +1194,14 @@ LATER_DAYS = 40
 def history_rows(ticker: str, step: float, last_day: date) -> list[PriceData]:
     """
     A year of closes rising by 'step' a day from 100 to last_day, each day's range 2 below its close to half a step
-    above it, so every close breaks out above the day before's high, with a volume spike on last_day: long enough for
-    every indicator, the 200-day average and 21-week EMA included.
+    above it, so every close breaks out above the day before's high, with a volume spike on last_day, whose close
+    jumps 2% to clear that high by more than the 1% margin: a breakout, and long enough for every indicator, the
+    200-day average and 21-week EMA included.
     """
     rows = []
-    for i, row in enumerate(price_rows(ticker, last_day, n=368)):
-        close = 100.0 + step * i
+    days = price_rows(ticker, last_day, n=368)
+    for i, row in enumerate(days):
+        close = (100.0 + step * i) * (1.02 if i == len(days) - 1 else 1.0)
         rows.append(replace(row, close=close, high=close + step / 2, low=close - 2))
     return rows
 
@@ -1259,7 +1289,8 @@ def test_score_as_of_the_latest_session_matches_what_a_run_stores(path, containe
     assert {s.criteria.ticker for s in scored} == set(stored) == {*SUBSECTOR_STEPS, 'SHOP.TO'}
     for s in scored:
         row = stored[s.criteria.ticker]
-        expected = {f: row[f] for f in vars(s.criteria) if f != 'id'}
+        # the breakout phase is not stored; the status it decides is
+        expected = {f: row[f] for f in vars(s.criteria) if f not in ('id', 'breakout_phase')}
         assert {f: getattr(s.criteria, f) for f in expected} == expected, s.criteria.ticker
 
 

@@ -8,9 +8,10 @@ series and reading it on the session's row gives the value score_as_of computes 
 one exception is the 21-week EMA, whose last weekly close is the session's own close rather than its week's: it is
 one EMA step from the previous week's value, taken with pandas' own EMA so the arithmetic is the same.
 
-ticker_replay() returns the rows a run would score and, per row, the core criteria and returns that decide which rows
-need their full criteria (TickerReplay.criteria_at), the subsector comparison and the status being left to the caller,
-which knows every ticker scored on each session. tests/test_history_backfill.py checks the values against score_as_of.
+ticker_replay() returns the rows a run would score and, per row, the core criteria, the place in a breakout run and the
+returns that decide which rows need their full criteria (TickerReplay.criteria_at), the subsector comparison and the
+status being left to the caller, which knows every ticker scored on each session. tests/test_history_backfill.py
+checks the values against score_as_of.
 
 The history database's rows are never missing a value (its columns are NOT NULL), so the analyzer's handling of
 missing highs, lows and volumes never applies here.
@@ -60,6 +61,8 @@ from app.analyzer import (
     _near,
     _positive,
     _round,
+    breakout_runs,
+    core_met,
     ema,
 )
 from app.models import StockCriteria
@@ -142,8 +145,8 @@ class TickerReplay:
     """
     One ticker's history scored on every row. 'scorable' marks the rows a run on that session would score: those
     with MIN_ROWS rows up to them, not ending in a padded stop or a frozen stretch. 'core' marks those meeting the
-    four core conditions, and 'return_1m' and 'return_3m' are each row's returns, as criteria_at gives them, NaN for
-    none.
+    four core conditions, 'phase' is each row's place in a breakout run (breakout_runs in app/analyzer.py), and
+    'return_1m' and 'return_3m' are each row's returns, as criteria_at gives them, NaN for none.
     """
 
     ticker: str
@@ -152,6 +155,7 @@ class TickerReplay:
     closes: np.ndarray
     scorable: np.ndarray
     core: np.ndarray
+    phase: np.ndarray
     return_1m: np.ndarray
     return_3m: np.ndarray
     series: Mapping[str, np.ndarray]
@@ -262,6 +266,7 @@ class TickerReplay:
             rs_market_3m=rs_market_3m,
             outperforms_market_1m=_positive(rs_market_1m),
             outperforms_market_3m=_positive(rs_market_3m),
+            breakout_phase=self.phase[row],
         )
 
 
@@ -313,22 +318,18 @@ def ticker_replay(ticker: str, subsector_id: int, prices: Sequence[DailyPrice]) 
     series['consolidation_earlier_vol'] = volume_f.shift(1 + half).rolling(half).mean().to_numpy()
 
     closes = close.to_numpy()
-    with np.errstate(invalid='ignore', divide='ignore'):
-        volume_ratio = np.where(series['avg_vol'] > 0, volume / series['avg_vol'], np.nan)
-    sma_values = series['sma']
-    sma_prior = sma.shift(SMA_RISING_DAYS).to_numpy()
-    breakout = (closes > series[f'high_{BREAKOUT_WINDOWS[0]}d']) | (closes > series[f'high_{BREAKOUT_WINDOWS[1]}d'])
-    core = breakout & (volume_ratio >= VOLUME_RATIO_MIN) & (closes > sma_values) & (sma_values > sma_prior)
-
     rows = np.arange(len(closes))
     scorable = (rows + 1 >= MIN_ROWS) & ~unscored(closes, volume)
+    core = scorable & core_met(closes, series['high'], volume_f.to_numpy())
+    runs = breakout_runs(closes, series['high'], series['low'], core)
     return TickerReplay(
         ticker=ticker,
         subsector_id=subsector_id,
         dates=dates,
         closes=closes,
         scorable=scorable,
-        core=scorable & core,
+        core=core,
+        phase=np.array(runs.phase, dtype=object),
         return_1m=_returns(close, RS_1M_DAYS),
         return_3m=_returns(close, RS_3M_DAYS),
         series=series,

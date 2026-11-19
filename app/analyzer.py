@@ -98,14 +98,33 @@ RS_3M_DAYS = 63
 SECTOR_MIN_TICKERS = 3
 
 # The strategy's statuses (GLOSSARY.md, "Status"), set once a ticker's subsector comparison is known
-# (with_status). A confirmed breakout meets the four core conditions, and is high-conviction when it also passes at
-# least HIGH_CONVICTION_MIN of the SECONDARY_INDICATORS. A ticker on the pre-breakout watchlist is not a confirmed
-# breakout, but passes both trend conditions and closes near its resistance (PROXIMITY_PCT).
+# (with_status). A confirmed breakout is a breakout session (breakout_runs, below), and is high-conviction when it
+# also passes at least HIGH_CONVICTION_MIN of the SECONDARY_INDICATORS. An extended ticker is in the run of an
+# earlier breakout, closing above the level it broke (the strategy's "post-breakout"). A ticker on the pre-breakout
+# watchlist is neither, but passes both trend conditions and closes near its resistance (PROXIMITY_PCT).
 HIGH_CONVICTION = 'high_conviction'
 CONFIRMED = 'confirmed'
 PRE_BREAKOUT = 'pre_breakout'
+EXTENDED = 'extended'
 HIGH_CONVICTION_MIN = 4
-# The statuses that make a scored ticker a signal, archived in the signal table: all four mandatory conditions met.
+
+# A breakout is one session (breakout_runs, GLOSSARY.md "Status"): the first on which a ticker meets the four core
+# conditions with its close clearing the broken level, the prior 60-day high when the 60-day breakout passed and the
+# prior 20-day high otherwise, by the minimum margin. That margin is the larger of MARGIN_FLOOR_PCT and
+# MARGIN_RANGE_FRACTION times the ticker's average daily range, (high - low) / close in percent, over the RANGE_DAYS
+# sessions before the scored one, so a move the stock's own noise makes is not a breakout. The sessions after it
+# whose close stays above that level are EXTENDED, never a breakout again, until RUN_END_CLOSES closes in a row below
+# the level end the run. During a run, a session meeting the conditions with the margin is a new breakout only when
+# the resistance it clears was set at least PAUSE_SESSIONS sessions before it: a base, not a run of new highs.
+MARGIN_FLOOR_PCT = 1.0
+MARGIN_RANGE_FRACTION = 0.5
+RANGE_DAYS = 14
+RUN_END_CLOSES = 2
+PAUSE_SESSIONS = 10
+# A session's place in a breakout run (StockCriteria.breakout_phase): its breakout session, or an Extended one.
+BREAKOUT_SESSION = 'breakout'
+EXTENDED_SESSION = 'extended'
+# The statuses that make a scored ticker a signal, archived in the signal table: a breakout session.
 # A signal archived by the run that scored its session is LIVE, and one archived by replaying a past session from the
 # stored prices (app/backfill.py) is BACKFILL.
 SIGNAL_STATUSES = (CONFIRMED, HIGH_CONVICTION)
@@ -188,6 +207,11 @@ def rule_settings() -> dict[str, object]:
         'RS_3M_DAYS': RS_3M_DAYS,
         'SECTOR_MIN_TICKERS': SECTOR_MIN_TICKERS,
         'HIGH_CONVICTION_MIN': HIGH_CONVICTION_MIN,
+        'MARGIN_FLOOR_PCT': MARGIN_FLOOR_PCT,
+        'MARGIN_RANGE_FRACTION': MARGIN_RANGE_FRACTION,
+        'RANGE_DAYS': RANGE_DAYS,
+        'RUN_END_CLOSES': RUN_END_CLOSES,
+        'PAUSE_SESSIONS': PAUSE_SESSIONS,
         'SECONDARY_INDICATORS': list(SECONDARY_INDICATORS),
         'MIN_ROWS': MIN_ROWS,
         'FROZEN_DAYS': FROZEN_DAYS,
@@ -384,12 +408,102 @@ def with_sector_strength(items: list[StockCriteria]) -> list[StockCriteria]:
     return [with_subsector_medians(sc, medians) for sc in items]
 
 
+def core_met(closes: np.ndarray, highs: np.ndarray, volumes: np.ndarray) -> np.ndarray:
+    """
+    At each row of one ticker's rows (oldest first), whether it meets the four core conditions as analyze_ticker
+    judges them from the rows up to it. 'highs' has a missing high already replaced by its close, and 'volumes' is
+    NaN where a volume is missing. False on a row with too few rows before it for any condition.
+    """
+    close = pd.Series(closes, dtype=float)
+    before = pd.Series(highs, dtype=float).shift(1)
+    breakout = np.zeros(len(closes), dtype=bool)
+    for days in BREAKOUT_WINDOWS:
+        breakout |= (close > before.rolling(days).max()).to_numpy()
+    volume = pd.Series(volumes, dtype=float)
+    # the average skips a missing volume, as analyze_ticker's does
+    average = volume.shift(1).rolling(VOLUME_AVG_DAYS, min_periods=1).mean()
+    confirmed = (average > 0) & (volume / average >= VOLUME_RATIO_MIN)
+    sma = close.rolling(SMA_DAYS).mean()
+    trend = (close > sma) & (sma > sma.shift(SMA_RISING_DAYS))
+    return breakout & (confirmed & trend).to_numpy()
+
+
+@dataclass(frozen=True)
+class BreakoutRuns:
+    """
+    One ticker's breakout runs, at each of its rows (oldest first). 'phase' is BREAKOUT_SESSION on a breakout,
+    EXTENDED_SESSION on a later session of its run that closes above the run's level, and None otherwise. 'level' is
+    the broken level of the run the row is in, and 'start' the row of that run's breakout: NaN and -1 outside a run.
+    """
+
+    phase: list[str | None]
+    level: np.ndarray
+    start: np.ndarray
+
+
+def _resistance_age(highs: np.ndarray, row: int, days: int) -> int:
+    """How many sessions before 'row' the highest of the 'days' highs before it was first set: 1 for the day before."""
+    return days - int(np.argmax(highs[row - days : row]))
+
+
+def breakout_runs(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, core: np.ndarray) -> BreakoutRuns:
+    """
+    One ticker's breakout runs from its rows (oldest first), each session judged only from the rows up to it, as the
+    constants before MARGIN_FLOOR_PCT describe: 'core' marks the rows meeting the four core conditions (core_met), and
+    'highs' and 'lows' are as stored, NaN where missing. A missing high counts its close in the broken level, as
+    analyze_ticker's breakout does, and a session missing its high or low is left out of the average daily range;
+    with no range known, the margin is MARGIN_FLOOR_PCT.
+
+    A run begins on a breakout, with the level that breakout cleared. It ends on the RUN_END_CLOSES-th close in a row
+    below that level, and the next session meeting the conditions with the margin is a breakout again. A session of
+    the run meeting them with the margin is a new breakout, beginning a new run at its own level, only when the
+    resistance it clears was first set at least PAUSE_SESSIONS sessions before it.
+    """
+    count = len(closes)
+    filled = np.where(np.isnan(highs), closes, highs)
+    before = pd.Series(filled).shift(1)
+    short, long = BREAKOUT_WINDOWS
+    high_short, high_long = (before.rolling(days).max().to_numpy() for days in (short, long))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        long_break = closes > high_long
+        level = np.where(long_break, high_long, high_short)
+        margin = (closes / level - 1) * 100
+        ranges = (highs - lows) / closes * 100
+    average_range = pd.Series(ranges).shift(1).rolling(RANGE_DAYS, min_periods=1).mean().to_numpy()
+    qualifying = core & (margin >= np.fmax(MARGIN_FLOOR_PCT, MARGIN_RANGE_FRACTION * average_range))
+
+    phase: list[str | None] = [None] * count
+    run_level = np.full(count, np.nan)
+    run_start = np.full(count, -1)
+    began, current, below = -1, float('nan'), 0
+    for row in range(int(np.argmax(qualifying)) if qualifying.any() else count, count):
+        if began >= 0:
+            below = below + 1 if closes[row] < current else 0
+            if below >= RUN_END_CLOSES:
+                began = -1
+        window = long if long_break[row] else short
+        if qualifying[row] and (began < 0 or _resistance_age(filled, row, window) >= PAUSE_SESSIONS):
+            began, current, below = row, float(level[row]), 0
+            phase[row] = BREAKOUT_SESSION
+        elif began >= 0 and closes[row] > current:
+            phase[row] = EXTENDED_SESSION
+        if began >= 0:
+            run_level[row], run_start[row] = current, began
+    return BreakoutRuns(phase, run_level, run_start)
+
+
 def with_status(sc: StockCriteria) -> StockCriteria:
-    """'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none."""
+    """
+    'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none. Only a breakout
+    session (breakout_phase) is confirmed or high-conviction; a later session of its run is extended; any other
+    session passing both trend conditions and closing near its resistance is on the pre-breakout watchlist.
+    """
     passed = sum(passes(sc) for passes in SECONDARY_INDICATORS.values())
     status = None
-    if sc.core_criteria_met:
+    if sc.breakout_phase == BREAKOUT_SESSION:
         status = HIGH_CONVICTION if passed >= HIGH_CONVICTION_MIN else CONFIRMED
+    elif sc.breakout_phase == EXTENDED_SESSION:
+        status = EXTENDED
     elif _all_pass(sc, 'price_gt_50dma', 'dma_50_rising', 'near_resistance'):
         status = PRE_BREAKOUT
     return replace(sc, secondary_passed=passed, status=status)
@@ -907,6 +1021,13 @@ class Analyzer:
 
         core = [breakout_20d or breakout_60d, breakout_confirmed, price_above_50dma, dma_slope_up]
 
+        # whether the scored session is a breakout or in the run of an earlier one, from every session before it
+        closes = df['close'].to_numpy(dtype=float)
+        volumes = df['volume'].to_numpy(dtype=float, na_value=np.nan)
+        lows = df['low'].to_numpy(dtype=float)
+        core_rows = core_met(closes, highs.to_numpy(dtype=float), volumes)
+        runs = breakout_runs(closes, df['high'].to_numpy(dtype=float), lows, core_rows)
+
         return StockCriteria(
             id=0,
             subsector_id=df['subsector_id'].iloc[-1].item(),
@@ -970,6 +1091,7 @@ class Analyzer:
             rs_market_3m=rs_market_3m,
             outperforms_market_1m=_positive(rs_market_1m),
             outperforms_market_3m=_positive(rs_market_3m),
+            breakout_phase=runs.phase[-1],
         )
 
     def save_to_repository(self, scored: list[Scored]) -> None:
