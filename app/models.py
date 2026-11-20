@@ -109,7 +109,7 @@ class StockCriteria:
     near_resistance: int | None = None
     # the 120-day tier (TIER_WINDOW in app/analyzer.py): the highest high of the 120 days before today, how far the
     # close is below it as a percentage of it (negative above it), and whether the close is above it; None where the
-    # ticker has 120 rows or fewer before today
+    # ticker has fewer than 120 rows before today
     high_120d: float | None = None
     dist_high_120d_pct: float | None = None
     breakout_120d: int | None = None

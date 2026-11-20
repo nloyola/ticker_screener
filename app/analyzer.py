@@ -50,7 +50,7 @@ SCREENER_VERSION = '1.0.0'
 BREAKOUT_WINDOWS = (20, 60)
 # The 120-day tier (GLOSSARY.md, "120-day tier"): a breakout whose close is also above the highest high of the
 # TIER_WINDOW trading days before it, a longer lookback that BreakoutIQ can test as a higher tier. It is stored
-# beside the breakout windows' flags but is never a core condition, and a ticker with TIER_WINDOW rows or fewer
+# beside the breakout windows' flags but is never a core condition, and a ticker with fewer than TIER_WINDOW rows
 # before the scored day has no such high and is not in the tier.
 TIER_WINDOW = 120
 # Volume confirmation: the day's volume is at least VOLUME_RATIO_MIN times the average of the VOLUME_AVG_DAYS days

@@ -70,8 +70,10 @@ _DERIVED = {
     'ema21w_distance_pct': ('close', 'ema_21w'),
 }
 
-# the secondary flags. The close above a rising 50-day SMA is a mandatory condition every signal passes, so its two
-# flags are left out, and so is breakout proximity, which defines the watchlist rather than a breakout's quality
+# the secondary flags, and the 120-day tier's (breakout_120d), which is empty, so in neither group, for a signal with no
+# 120-day high and those archived before the screener stored it. The close above a rising 50-day SMA is a mandatory
+# condition every signal passes, so its two flags are left out, and so is breakout proximity, which defines the
+# watchlist rather than a breakout's quality
 FLAGS = (
     'rsi_50_70',
     'macd_above_signal',
@@ -92,6 +94,7 @@ FLAGS = (
     'outperforms_market_3m',
     'outperforms_sector_1m',
     'outperforms_sector_3m',
+    'breakout_120d',
 )
 
 # the strategy's secondary indicators (SECONDARY_INDICATORS) that combine several flags; the rest are one flag each

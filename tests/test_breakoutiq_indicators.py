@@ -111,6 +111,26 @@ def test_a_planted_flag_effect_is_found_and_nothing_else():
     assert payload['p_adjusted'] <= FDR
 
 
+def test_the_120_day_tier_is_compared_as_a_flag_leaving_out_signals_with_no_120_day_high():
+    rows = _dataset(8, plant={'flag': ('breakout_120d', 4.0)})
+    # the first 50 dates' 200 signals have no 120-day high, as a newer listing or a signal archived before the screener
+    # stored it: in neither group
+    rows.loc[rows['session_date'] < SESSIONS[50], 'breakout_120d'] = np.nan
+
+    results = indicators(rows)
+
+    finding = f'{FLAG}:breakout_120d:{MAIN_OUTCOME}'
+    assert _significant(results) == {finding}
+    payload = _payload(results, finding)
+    assert payload['compared'] == ['fail', 'pass']
+    assert sum(g['signals'] for g in payload['groups']) == 1200 - 200
+    assert payload['effect']['ci_low'] <= 4.0 <= payload['effect']['ci_high']
+    # compared beside the secondary flags, in the same family
+    assert {r.finding for r in results if r.finding.startswith(f'{FLAG}:') and r.horizon == 20} == {
+        f'{FLAG}:{name}:{outcome}' for name in FLAGS for outcome in HORIZON_OUTCOMES
+    }
+
+
 def test_a_planted_value_effect_is_found_and_nothing_else():
     results = indicators(_dataset(2, plant={'value': ('rs_market_3m', 4.0)}))
 

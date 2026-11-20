@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- app/analyzer.py); all three are NULL on any other session. high_120d is the highest high of the TIER_WINDOW days
 -- before the scored one, dist_high_120d_pct the close's distance below it in percent of it, negative above it, and
 -- breakout_120d whether the close is above it (tier in app/analyzer.py); all three are NULL for a ticker with
--- TIER_WINDOW rows or fewer before the scored one. A breakout with breakout_120d set is in the 120-day tier.
+-- fewer than TIER_WINDOW rows before the scored one. A breakout with breakout_120d set is in the 120-day tier.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,

@@ -155,8 +155,9 @@ def test_a_rule_that_only_fits_development_noise_stays_preliminary():
 
 def test_a_rule_that_holds_below_the_economic_bar_stays_preliminary():
     rows = _plant_volume(_dataset(1))
-    # every signal loses the same amount: the planted signals still beat the others, but keep too little
-    rows['excess_return_pct'] -= 3.5
+    # every signal loses the same amount: the planted signals still beat the others, but keep too little, their
+    # expected excess return 4.0 - 4.5 = -0.5, well below the bar of 1.0 whatever the seed's noise
+    rows['excess_return_pct'] -= 4.5
 
     rules = _rules(candidates(rows))
 
@@ -170,7 +171,7 @@ def test_a_rule_that_holds_below_the_economic_bar_stays_preliminary():
 
 def test_a_lower_economic_bar_validates_the_rule_the_default_bar_holds_back():
     rows = _plant_volume(_dataset(1))
-    rows['excess_return_pct'] -= 3.5
+    rows['excess_return_pct'] -= 4.5
     kept = _rules(candidates(rows))[0]['expected_excess_return']
     lower = DEFAULTS.with_bars({20: kept - 0.01})
 
