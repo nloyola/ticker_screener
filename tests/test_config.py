@@ -99,13 +99,23 @@ def test_db_init_runs_without_a_tiingo_key(tmp_path):
 
 @pytest.mark.parametrize('command', ['run-refresh', 'ticker-fetcher', 'ticker-sync'])
 def test_tiingo_commands_stop_naming_the_missing_key(tmp_path, command):
-    result = run_main(tmp_path, command, DB_NAME=str(tmp_path / 'a.db'))
+    result = run_main(tmp_path, command, DB_NAME=str(tmp_path / 'a.db'), SCREEN_EXPORT_DIR=str(tmp_path / 'screens'))
 
     assert result.returncode == 2
     assert result.stderr.strip() == (
         f'main.py {command}: missing required config: TIINGO_API_KEY (set in the environment or in .env)'
     )
     assert 'PROGRESS' not in result.stdout
+    assert not (tmp_path / 'a.db').exists()
+
+
+def test_run_refresh_stops_naming_a_missing_screen_export_dir(tmp_path):
+    result = run_main(tmp_path, 'run-refresh', DB_NAME=str(tmp_path / 'a.db'), TIINGO_API_KEY='tiingo-key')
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == (
+        'main.py run-refresh: missing required config: SCREEN_EXPORT_DIR (set in the environment or in .env)'
+    )
     assert not (tmp_path / 'a.db').exists()
 
 
@@ -207,7 +217,14 @@ def test_eodhd_key_is_loaded_from_the_env_file(clean_env):
 
 @pytest.mark.parametrize('command', ['run-refresh', 'ticker-fetcher'])
 def test_eodhd_commands_stop_naming_the_missing_eodhd_key(tmp_path, command):
-    result = run_main(tmp_path, command, DB_NAME=str(tmp_path / 'a.db'), PRICE_API='eodhd', TIINGO_API_KEY='tiingo-key')
+    result = run_main(
+        tmp_path,
+        command,
+        DB_NAME=str(tmp_path / 'a.db'),
+        PRICE_API='eodhd',
+        TIINGO_API_KEY='tiingo-key',
+        SCREEN_EXPORT_DIR=str(tmp_path / 'screens'),
+    )
 
     assert result.returncode == 2
     assert result.stderr.strip() == (

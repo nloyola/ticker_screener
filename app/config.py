@@ -12,7 +12,9 @@ DB_NAME = 'DB_NAME'
 PRICE_API = 'PRICE_API'
 # the price history database's path (app/repositories/history_repo.py): years of daily prices, kept out of DB_NAME
 HISTORY_DATABASE_FILE = 'HISTORY_DATABASE_FILE'
-KEYS = (TIINGO_API_KEY, EODHD_API_KEY, DB_NAME, PRICE_API, HISTORY_DATABASE_FILE)
+# the directory run-refresh writes each session's screen export to (app/screen_export.py), created when missing
+SCREEN_EXPORT_DIR = 'SCREEN_EXPORT_DIR'
+KEYS = (TIINGO_API_KEY, EODHD_API_KEY, DB_NAME, PRICE_API, HISTORY_DATABASE_FILE, SCREEN_EXPORT_DIR)
 
 TIINGO = 'tiingo'
 EODHD = 'eodhd'
@@ -35,6 +37,7 @@ class Config:
     # one of PRICE_API_KEYS, when the command requires PRICE_API
     price_api: str | None = None
     history_database_file: str | None = None
+    screen_export_dir: str | None = None
 
 
 def load_config(require: Iterable[str]) -> Config:
@@ -81,6 +84,7 @@ def load_config(require: Iterable[str]) -> Config:
         eodhd_api_key=values[EODHD_API_KEY],
         price_api=price_api,
         history_database_file=values[HISTORY_DATABASE_FILE],
+        screen_export_dir=values[SCREEN_EXPORT_DIR],
     )
 
 

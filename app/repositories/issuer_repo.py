@@ -20,6 +20,13 @@ class IssuerRepo:
         Each listing that is not its issuer's primary, upper case, mapped to that primary, upper case. A ticker no
         issuer holds is its own primary and is left out, so the result is empty when there are no issuers.
         """
+        return {ticker: primary for ticker, primary in self.listings().items() if ticker != primary}
+
+    def listings(self) -> dict[str, str]:
+        """
+        Each listing an issuer holds, its primary included, upper case, mapped to that issuer's primary, upper case.
+        A ticker no issuer holds is left out, so the result is empty when there are no issuers.
+        """
         with connect(self.db_path) as con:
             found = {
                 row['name']
@@ -34,7 +41,6 @@ class IssuerRepo:
                 """
                 SELECT upper(l.ticker) AS ticker, upper(i.primary_ticker) AS primary_ticker
                   FROM issuer_listing l JOIN issuer i ON i.id = l.issuer_id
-                 WHERE upper(l.ticker) <> upper(i.primary_ticker)
                 """
             )
             return {row['ticker']: row['primary_ticker'] for row in rows}

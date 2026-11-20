@@ -10,6 +10,7 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -29,12 +30,14 @@ from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
+from app.repositories.screen_export_repo import ScreenExportRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.security_state_repo import SecurityStateRepo
 from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
+from app.screen_export import ScreenExport
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import HORIZONS, REMOVED, SignalPaths
@@ -113,7 +116,7 @@ def path(tmp_path) -> str:
 
 @pytest.fixture
 def container(path) -> SimpleNamespace:
-    container = SimpleNamespace(db_path=path)
+    container = SimpleNamespace(db_path=path, screen_export_dir=str(Path(path).parent / 'screens'))
     container.price_data_repo = PriceDataRepo(container)
     container.benchmark_price_repo = BenchmarkPriceRepo(container)
     container.company_name_repo = CompanyNameRepo(container)
@@ -126,6 +129,7 @@ def container(path) -> SimpleNamespace:
     container.signal_paths = SignalPaths(container)
     container.signal_outcome_repo = SignalOutcomeRepo(container)
     container.signal_outcome_updates = SignalOutcomeUpdates(container)
+    container.screen_export_repo = ScreenExportRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     return container
 
@@ -254,6 +258,7 @@ def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path,
     container.sector_service = SectorServiceStub(['AAA', 'SHOP.TO'])
     container.ticker_fetcher = TickerFetcher(container)
     cmd = RunRefreshCmd()
+    container.screen_export = ScreenExport(container)
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args([]), container)
@@ -265,6 +270,12 @@ def test_tiingo_run_refresh_leaves_canadian_scores_and_prices_as_they_were(path,
         f'US: skipped 0 stale tickers (stopped trading, or last price before {TODAY}) and 0 frozen tickers',
         'Canada: not scored, not fetched by this run (Tiingo)',
     ]
+    # the run's screen export holds the US session alone, from Tiingo
+    export = json.loads((Path(path).parent / 'screens' / f'screen_{TODAY.isoformat()}.json').read_text())
+    assert (export['run']['sessions'], export['run']['data_source']) == (
+        {US: TODAY.isoformat(), CANADA: None},
+        'tiingo',
+    )
 
 
 def test_stale_ticker_already_flagged_is_counted_but_not_flagged_again(path, container, capsys):
@@ -304,6 +315,7 @@ def test_run_refresh_flags_each_dead_or_stale_ticker_once(path, container, capsy
     container.sector_service = SectorServiceStub(['AAA', 'GONE', 'EMPTY'])
     container.ticker_fetcher = TickerFetcher(container)
     cmd = RunRefreshCmd()
+    container.screen_export = ScreenExport(container)
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args([]), container)
@@ -340,6 +352,7 @@ def test_run_refresh_keeps_each_signals_path_and_ends_those_it_got_no_prices_for
     container.sector_service = SectorServiceStub(['AAA', 'GONE', 'EMPTY'])
     container.ticker_fetcher = TickerFetcher(container)
     cmd = RunRefreshCmd()
+    container.screen_export = ScreenExport(container)
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args([]), container)
@@ -518,6 +531,7 @@ def test_run_refresh_judges_completeness_by_when_it_started(path, container):
     container.sector_service = SectorServiceStub(['AAA'])
     container.ticker_fetcher = TickerFetcher(container)
     cmd = RunRefreshCmd()
+    container.screen_export = ScreenExport(container)
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args([]), container)
@@ -1075,6 +1089,7 @@ def test_run_refresh_records_its_run_id_for_the_markets_it_fetched(path, contain
     container.sector_service = SectorServiceStub(['AAA', 'SHOP.TO'])
     container.ticker_fetcher = TickerFetcher(container)
     cmd = RunRefreshCmd()
+    container.screen_export = ScreenExport(container)
     parser = argparse.ArgumentParser()
     cmd.add_arguments(parser)
     cmd.handle(parser.parse_args([]), container)

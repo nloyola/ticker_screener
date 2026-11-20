@@ -864,6 +864,8 @@ class Analyzer:
         self.now = now
         # each ticker the last analyze left unscored as stale or frozen, with that reason, flagged or not
         self.flagged: dict[str, str] = {}
+        # each market's session the last analyze scored, with how many of its tickers it scored
+        self.sessions: dict[str, tuple[date, int]] = {}
 
     def analyze(
         self,
@@ -942,6 +944,7 @@ class Analyzer:
         Prints one summary line per market that has prices.
         """
         self.flagged = {}
+        self.sessions = {}
         df = self.load_price_data()
         if df is None:
             logger.info('No price data found.')
@@ -986,6 +989,7 @@ class Analyzer:
         commit = git_commit()
         self._record_sessions(sessions, run_id, settings, commit)
         self.archive_signals(scored, run_id, settings, commit)
+        self.sessions = sessions
 
     def score_as_of(
         self,

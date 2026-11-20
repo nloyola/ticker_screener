@@ -1,6 +1,6 @@
 """
-IssuerRepo, which reads the dashboard's issuers: each non-primary listing mapped to its primary, matched without
-regard to case, and none at all when the dashboard has not yet created the tables.
+IssuerRepo, which reads the dashboard's issuers: each listing, and each non-primary one, mapped to its primary,
+matched without regard to case, and none at all when the dashboard has not yet created the tables.
 """
 
 import sqlite3
@@ -58,3 +58,13 @@ def test_each_non_primary_listing_maps_to_its_primary_upper_case(path):
     add_issuer(path, 'Alphabet', 'googl', 'GOOG', 'GOOGL')
 
     assert IssuerRepo(SimpleNamespace(db_path=path)).non_primary() == {'STN.TO': 'STN', 'GOOG': 'GOOGL'}
+
+
+def test_every_listing_maps_to_its_primary_upper_case_the_primary_included(path):
+    add_issuer(path, 'Stantec', 'STN', 'STN', 'stn.to')
+
+    assert IssuerRepo(SimpleNamespace(db_path=path)).listings() == {'STN': 'STN', 'STN.TO': 'STN'}
+
+
+def test_a_database_without_the_issuer_tables_has_no_listings(path):
+    assert IssuerRepo(SimpleNamespace(db_path=path)).listings() == {}

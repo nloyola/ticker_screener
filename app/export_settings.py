@@ -5,6 +5,10 @@ breakout failure. None of them decides a status or a score, so they are not rule
 app/analyzer.py) and changing one leaves SCREENER_VERSION as it is: the export's own version names them instead.
 """
 
+# The screen export's schema version (app/screen_export.py), the run header's export_version: bumped when a field is
+# added, renamed or removed, or when one of the settings below changes.
+EXPORT_VERSION = 1
+
 # The swing low (swing_low in app/analyzer.py): the latest session within the SWING_LOOKBACK sessions before the
 # scored one whose low is below the lows of the SWING_PIVOT_SESSIONS sessions on each side of it.
 SWING_PIVOT_SESSIONS = 3
@@ -16,3 +20,14 @@ WIDE_RISK_PCT = 8.0
 # on volume below its prior 20-day average.
 RETEST_SESSIONS = 10
 RETEST_TOUCH_PCT = 1.0
+
+
+def export_settings() -> dict[str, object]:
+    """The settings above, keyed by their constants' names, as the screen export's header reports them."""
+    return {
+        'SWING_PIVOT_SESSIONS': SWING_PIVOT_SESSIONS,
+        'SWING_LOOKBACK': SWING_LOOKBACK,
+        'WIDE_RISK_PCT': WIDE_RISK_PCT,
+        'RETEST_SESSIONS': RETEST_SESSIONS,
+        'RETEST_TOUCH_PCT': RETEST_TOUCH_PCT,
+    }

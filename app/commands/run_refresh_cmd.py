@@ -4,7 +4,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
-from app.config import DB_NAME, PRICE_API
+from app.config import DB_NAME, PRICE_API, SCREEN_EXPORT_DIR
 from app.container import Container
 from app.screener_lock import ScreenerLockHeld, screener_lock
 
@@ -13,6 +13,7 @@ from .ticker_fetcher_cmd import failure_rate_arg, fetch_or_exit, strict_fetch_su
 
 if TYPE_CHECKING:
     from app.analyzer import Analyzer
+    from app.screen_export import ScreenExport
     from app.signal_outcome_updates import SignalOutcomeUpdates
     from app.signal_paths import SignalPaths
     from app.ticker_fetcher import TickerFetcher
@@ -41,11 +42,11 @@ class RunRefreshCmd(BaseCommand):
     _NAME = 'run-refresh'
     _DESCRIPTION = (
         'holding the screener lock, runs ticker-fetcher --strict and then analyze, then updates the signal price '
-        'paths and outcomes; '
+        'paths and outcomes, and writes the screen export of the sessions it scored to SCREEN_EXPORT_DIR; '
         f'exits {EXIT_LOCK_HELD} if another refresh holds the lock'
     )
 
-    REQUIRED_CONFIG = (DB_NAME, PRICE_API)
+    REQUIRED_CONFIG = (DB_NAME, PRICE_API, SCREEN_EXPORT_DIR)
 
     def __init__(self) -> None:
         super().__init__(self._NAME, self._DESCRIPTION)
@@ -92,6 +93,9 @@ class RunRefreshCmd(BaseCommand):
                 # then the outcomes from those paths, as compute-outcomes stores them
                 outcome_updates: SignalOutcomeUpdates = container.signal_outcome_updates
                 outcome_updates.update()
+                # last, the screen export of the sessions analyze scored, from every value now stored
+                screen_export: ScreenExport = container.screen_export
+                screen_export.write(analyzer.sessions, run_id=run_id, data_source=ticker_fetcher.api.setting)
         except ScreenerLockHeld as err:
             print(f'run-refresh: another refresh holds the lock: {err}', file=sys.stderr)
             sys.exit(EXIT_LOCK_HELD)

@@ -64,7 +64,7 @@ def test_lock_is_released_when_its_holder_is_killed(db_path):
 
 
 class FakeFetcher:
-    api = SimpleNamespace(name='Tiingo', markets=frozenset({'US'}))
+    api = SimpleNamespace(name='Tiingo', setting='tiingo', markets=frozenset({'US'}))
 
     def __init__(self, stats: FetchStats) -> None:
         self.stats = stats
@@ -94,11 +94,15 @@ def make_cmd(db_path: str, stats: FetchStats) -> tuple[RunRefreshCmd, SimpleName
                 (fetched_by, already_flagged, started_at, run_id)
             ),
             flagged={'OLD': 'stale', 'BOTH': 'stale'},
+            sessions={'US': ('2026-11-09', 3)},
         ),
         signal_paths=SimpleNamespace(
             update=lambda markets, flagged, started_at: analyzed.append(('paths', markets, flagged, started_at))
         ),
         signal_outcome_updates=SimpleNamespace(update=lambda: analyzed.append('outcomes')),
+        screen_export=SimpleNamespace(
+            write=lambda sessions, run_id, data_source: analyzed.append(('export', sessions, run_id, data_source))
+        ),
     )
     return RunRefreshCmd(), container, fetcher, analyzed
 
@@ -120,11 +124,13 @@ def test_fetches_strictly_then_analyzes(db_path, monkeypatch):
     # analyze scores only the markets this run's API fetched, does not flag again what the fetch flagged, and
     # judges which sessions are complete by when the run started; it records the sessions with the runner's run id
     # then the signal paths of the markets fetched, ending the signals of each ticker flagged, by the fetch's reason
-    # where both flagged it, and last the outcomes from those paths
+    # where both flagged it, then the outcomes from those paths, and last the screen export of the sessions analyze
+    # scored, with the run id and the API the fetch used
     assert analyzed == [
         (fetcher.api, fetcher.flagged, STARTED_AT, 5),
         ('paths', fetcher.api.markets, {'GONE': 'not_found', 'BOTH': 'no_prices', 'OLD': 'stale'}, STARTED_AT),
         'outcomes',
+        ('export', {'US': ('2026-11-09', 3)}, 5, 'tiingo'),
     ]
 
 
@@ -164,7 +170,7 @@ def test_held_lock_exits_75_without_fetching(db_path, capsys):
 
 
 def test_main_exits_75_when_the_lock_is_held(db_path):
-    env = {**os.environ, 'DB_NAME': db_path, 'TIINGO_API_KEY': 'test-key'}
+    env = {**os.environ, 'DB_NAME': db_path, 'TIINGO_API_KEY': 'test-key', 'SCREEN_EXPORT_DIR': '/nonexistent'}
     with screener_lock(db_path):
         result = subprocess.run(
             [sys.executable, 'main.py', 'run-refresh'], env=env, capture_output=True, text=True, timeout=120

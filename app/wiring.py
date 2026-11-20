@@ -2,7 +2,17 @@
 from app.analyzer import Analyzer
 from app.backfill import Backfill
 from app.breakoutiq.run import Analysis
-from app.config import DB_NAME, EODHD, EODHD_API_KEY, HISTORY_DATABASE_FILE, PRICE_API, TIINGO, TIINGO_API_KEY, Config
+from app.config import (
+    DB_NAME,
+    EODHD,
+    EODHD_API_KEY,
+    HISTORY_DATABASE_FILE,
+    PRICE_API,
+    SCREEN_EXPORT_DIR,
+    TIINGO,
+    TIINGO_API_KEY,
+    Config,
+)
 from app.container import Container, Required, Singleton
 from app.db import SQLite
 from app.history_backfill import HistoryBackfill
@@ -20,6 +30,7 @@ from app.repositories.history_repo import HistoryRepo
 from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
+from app.repositories.screen_export_repo import ScreenExportRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
 from app.repositories.security_state_repo import SecurityStateRepo
@@ -29,6 +40,7 @@ from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.repositories.subsector_repo import SubsectorRepo
 from app.repositories.ticker_repo import TickerRepo
+from app.screen_export import ScreenExport
 from app.services.sector_service import SectorService
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import SignalPaths
@@ -45,6 +57,7 @@ def build_container(config: Config) -> Container:
     c.register('price_api', Required(PRICE_API, config.price_api))
     c.register('db_path', Required(DB_NAME, config.db_name))
     c.register('history_db_path', Required(HISTORY_DATABASE_FILE, config.history_database_file))
+    c.register('screen_export_dir', Required(SCREEN_EXPORT_DIR, config.screen_export_dir))
 
     # Core infra
     c.register('db', Singleton(lambda: SQLite(c.db_path)))  # one SQLite wrapper
@@ -67,6 +80,7 @@ def build_container(config: Config) -> Container:
     c.register('backfill_run_repo', Singleton(lambda: BackfillRunRepo(c)))
     c.register('analysis_repo', Singleton(lambda: AnalysisRepo(c)))
     c.register('analysis_data_repo', Singleton(lambda: AnalysisDataRepo(c)))
+    c.register('screen_export_repo', Singleton(lambda: ScreenExportRepo(c)))
 
     c.register('price_api_client', Singleton(lambda: price_api_client(c)))
     c.register('sector_service', Singleton(lambda: SectorService(c)))
@@ -80,6 +94,7 @@ def build_container(config: Config) -> Container:
     c.register('history_paths', Singleton(lambda: HistoryPaths(c)))
     c.register('history_backfill', Singleton(lambda: HistoryBackfill(c)))
     c.register('breakoutiq_analysis', Singleton(lambda: Analysis(c)))
+    c.register('screen_export', Singleton(lambda: ScreenExport(c)))
     return c
 
 
