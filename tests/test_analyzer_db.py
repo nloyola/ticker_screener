@@ -1367,6 +1367,30 @@ def test_repeated_signal_links_to_the_previous_one(path, container):
     assert [row[1:] for row in signals] == [(earlier.isoformat(), None, None), (TODAY.isoformat(), first_id, 3)]
 
 
+def test_repeated_signal_never_links_to_another_versions_signal(path, container, monkeypatch):
+    add_energy_oil(path)
+    earlier = shift(TODAY, -3)
+    first = with_breakout(price_rows('BRK', earlier))
+    container.price_data_repo.bulk_insert(first)
+    run_with_rules(container, monkeypatch, '1.0.0', run_id=1)
+    # BRK's run ends and it breaks out again on TODAY, as in the test above, but scored under new rules
+    later = [
+        replace(row, id=0, close=close, volume=volume)
+        for row, close, volume in zip(
+            price_rows('BRK', TODAY, n=3), (197.0, 196.0, 205.0), (1_000_000, 1_000_000, 2_000_000), strict=True
+        )
+    ]
+    container.price_data_repo.replace_for_ticker('BRK', [*first, *later])
+
+    run_with_rules(container, monkeypatch, '2.0.0', run_id=2)
+
+    with sqlite3.connect(path) as con:
+        signals = con.execute(
+            "SELECT session_date, screener_version, previous_signal_id FROM signal WHERE kind = 'signal' ORDER BY id"
+        ).fetchall()
+    assert signals == [(earlier.isoformat(), '1.0.0', None), (TODAY.isoformat(), '2.0.0', None)]
+
+
 @pytest.mark.parametrize(
     ('previous', 'expected'),
     [

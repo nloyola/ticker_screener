@@ -18,6 +18,7 @@ from app.analyzer import (
     BACKFILL,
     EMA_MIN_PERIODS,
     LONG_SMA_DAYS,
+    SCREENER_VERSION,
     SMA_RISING_DAYS,
     Analyzer,
     archive_kind,
@@ -153,13 +154,14 @@ class Backfill:
 
     def relink(self, tickers: set[str], dates_of: Callable[[str], pd.Index]) -> int:
         """
-        Links each signal of 'tickers' whose previous signal is no longer the ticker's latest signal on an earlier
-        session, as SignalRepo.previous finds it, to that one, with the trading days since it counted from the
-        ticker's price dates ('dates_of', oldest first). Returns how many it relinked.
+        Links each signal of 'tickers' archived under the current screener version whose previous signal is no longer
+        the ticker's latest signal of that version on an earlier session, as SignalRepo.previous finds it, to that
+        one, with the trading days since it counted from the ticker's price dates ('dates_of', oldest first). A
+        signal of another version is left as it is. Returns how many it relinked.
         """
         changed: list[SignalLink] = []
         by_ticker: dict[str, list[SignalLink]] = {}
-        for link in self.signal_repo.links(sorted(tickers)):
+        for link in self.signal_repo.links(sorted(tickers), SCREENER_VERSION):
             by_ticker.setdefault(link.ticker, []).append(link)
         for ticker, links in by_ticker.items():
             dates = dates_of(ticker)

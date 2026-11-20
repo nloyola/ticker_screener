@@ -226,6 +226,30 @@ def test_backfill_relinks_a_live_signal_archived_before_it(path, container):
     assert container.backfill.run().relinked == 0
 
 
+def test_backfill_leaves_another_versions_signals_unlinked(path, container, monkeypatch):
+    # a run on the last spike session archived a live signal under an earlier screener version
+    last_spike = DAYS.index(SPIKE_SESSIONS[-1])
+    container.price_data_repo.bulk_insert(rows('AAA', DAYS[: last_spike + 1]))
+    with monkeypatch.context() as patched:
+        patched.setattr('app.analyzer.SCREENER_VERSION', '0.9.0')
+        container.analyzer.analyze(started_at=EVENING)
+    container.price_data_repo.replace_for_ticker('AAA', rows('AAA'))
+
+    result = container.backfill.run()
+
+    by_version: dict[str, list[dict]] = {}
+    for s in signals(path):
+        by_version.setdefault(s['screener_version'], []).append(s)
+    [old] = by_version.pop('0.9.0')
+    [current] = by_version.values()
+    # the earlier version's signal is not relinked to the backfill signal before it, and the backfill archives its
+    # own signal on that session, linked only to its own version's signals
+    assert (old['source'], old['previous_signal_id'], old['trading_days_since_previous']) == ('live', None, None)
+    assert result.relinked == 0
+    assert [s['session_date'] for s in current] == [day.isoformat() for day in SPIKE_SESSIONS]
+    assert [s['previous_signal_id'] for s in current] == [None, *(s['id'] for s in current[:-1])]
+
+
 def test_backfill_with_no_prices_replays_nothing(container, capsys):
     assert container.backfill.run().sessions == 0
     assert 'nothing to replay' in capsys.readouterr().out

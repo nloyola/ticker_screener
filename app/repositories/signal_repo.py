@@ -80,19 +80,24 @@ class SignalLink:
 class SignalRepo:
     """
     The append-only signal archive, one record per ticker, session and screener version, each of one kind (KINDS in
-    app/models.py). The links between signals, previous and links, read signals alone.
+    app/models.py). The links between signals, previous and links, read signals of one screener version alone, so
+    records scored under different rules never link to each other.
     """
 
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
-    def previous(self, ticker: str, before: date) -> tuple[int, date] | None:
-        """The id and session date of the ticker's latest signal on a session before 'before', of any version."""
+    def previous(self, ticker: str, before: date, screener_version: str) -> tuple[int, date] | None:
+        """
+        The id and session date of the ticker's latest signal archived under 'screener_version' on a session before
+        'before'.
+        """
         with connect(self.db_path) as con:
             row = con.execute(
-                'SELECT id, session_date FROM signal WHERE ticker = ? AND session_date < ? AND kind = ? '
+                'SELECT id, session_date FROM signal '
+                'WHERE ticker = ? AND session_date < ? AND screener_version = ? AND kind = ? '
                 'ORDER BY session_date DESC, id DESC LIMIT 1',
-                (ticker, before.isoformat(), SIGNAL_KIND),
+                (ticker, before.isoformat(), screener_version, SIGNAL_KIND),
             ).fetchone()
         return (row['id'], date.fromisoformat(row['session_date'])) if row else None
 
@@ -126,16 +131,20 @@ class SignalRepo:
                 stored[s.kind] += con.execute(_INSERT, _values(s)).rowcount
         return stored
 
-    def links(self, tickers: Iterable[str]) -> list[SignalLink]:
-        """Each signal of 'tickers', with its previous signal's id and the trading days since it, oldest first."""
+    def links(self, tickers: Iterable[str], screener_version: str) -> list[SignalLink]:
+        """
+        Each signal of 'tickers' archived under 'screener_version', with its previous signal's id and the trading days
+        since it, oldest first.
+        """
         tickers = list(tickers)
         if not tickers:
             return []
         with connect(self.db_path) as con:
             rows = con.execute(
                 'SELECT id, ticker, session_date, previous_signal_id, trading_days_since_previous FROM signal '
-                f'WHERE ticker IN ({",".join(["?"] * len(tickers))}) AND kind = ? ORDER BY ticker, session_date, id',
-                [*tickers, SIGNAL_KIND],
+                f'WHERE ticker IN ({",".join(["?"] * len(tickers))}) AND screener_version = ? AND kind = ? '
+                'ORDER BY ticker, session_date, id',
+                [*tickers, screener_version, SIGNAL_KIND],
             ).fetchall()
         return [
             SignalLink(

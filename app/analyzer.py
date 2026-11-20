@@ -1024,15 +1024,15 @@ class Analyzer:
     ) -> Counter[str]:
         """
         Archives each of 'scored' the signal archive keeps (archive_kind) as a record of its kind of the session it
-        was scored on from 'source' (LIVE or BACKFILL). A signal is linked to the ticker's previous signal with the
-        trading days since it. A continuation is linked to the signal of its run's breakout session, the session
-        sessions_since_breakout before it under the same screener version, and left out when that breakout is not
-        archived, as when its run began before the archive or under other rules. A record already archived for the
-        same ticker, session and version is left as it was, so a rerun of a session adds nothing. A listing that is
-        not its issuer's primary (IssuerRepo) is left out, whatever its kind, keeping its status in stock_criteria, so
-        a company listed twice is archived once, under its primary listing, by today's issuers: 'non_primary'
-        (IssuerRepo.non_primary), read here when not given, so a backfill archiving session after session reads it
-        once. Logs and returns how many it archived of each kind.
+        was scored on from 'source' (LIVE or BACKFILL). A signal is linked to the ticker's previous signal under the
+        same screener version with the trading days since it. A continuation is linked to the signal of its run's
+        breakout session, the session sessions_since_breakout before it under the same screener version, and left out
+        when that breakout is not archived, as when its run began before the archive or under other rules. A record
+        already archived for the same ticker, session and version is left as it was, so a rerun of a session adds
+        nothing. A listing that is not its issuer's primary (IssuerRepo) is left out, whatever its kind, keeping its
+        status in stock_criteria, so a company listed twice is archived once, under its primary listing, by today's
+        issuers: 'non_primary' (IssuerRepo.non_primary), read here when not given, so a backfill archiving session
+        after session reads it once. Logs and returns how many it archived of each kind.
         """
         if non_primary is None:
             non_primary = self.issuer_repo.non_primary()
@@ -1060,7 +1060,7 @@ class Analyzer:
             market, session_date, close, dates = s.market, s.session_date, s.close, s.dates
             previous, breakout_id = None, None
             if kind == SIGNAL_KIND:
-                previous = self.signal_repo.previous(sc.ticker, session_date)
+                previous = self.signal_repo.previous(sc.ticker, session_date, SCREENER_VERSION)
             elif breakout_session is not None:
                 breakout_id = breakouts.get((sc.ticker, breakout_session))
                 if breakout_id is None:

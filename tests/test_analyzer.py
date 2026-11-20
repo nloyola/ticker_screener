@@ -74,7 +74,7 @@ class FakeSignalRepo:
     def __init__(self) -> None:
         self.archived: list[Signal] = []
 
-    def previous(self, ticker: str, before: date) -> None:
+    def previous(self, ticker: str, before: date, screener_version: str) -> None:
         return None
 
     def breakouts(self, wanted, screener_version: str) -> dict[tuple[str, date], int]:
