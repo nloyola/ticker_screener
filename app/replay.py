@@ -50,6 +50,7 @@ from app.analyzer import (
     SHORT_SMA_DAYS,
     SMA_DAYS,
     SMA_RISING_DAYS,
+    TIER_WINDOW,
     VOLUME_AVG_DAYS,
     BreakoutRuns,
     CoreConditions,
@@ -68,6 +69,7 @@ from app.analyzer import (
     core_conditions,
     ema,
     liquidity_row,
+    tier,
 )
 from app.models import StockCriteria
 from app.price_apis import DailyPrice
@@ -173,6 +175,7 @@ class TickerReplay:
         price = float(self.closes[row])
         volume = int(s['volume'][row])
         high_20d, high_60d = (float(s[f'high_{days}d'][row]) for days in BREAKOUT_WINDOWS)
+        longer = tier(price, _value(s[f'high_{TIER_WINDOW}d'], row))
         avg_vol = float(s['avg_vol'][row])
         volume_ratio = volume / avg_vol if avg_vol > 0 else None
         dma_50 = float(s['sma'][row])
@@ -261,6 +264,9 @@ class TickerReplay:
             dist_high_20d_pct=dist_20d,
             dist_high_60d_pct=dist_60d,
             near_resistance=_near([dist_20d, dist_60d]),
+            high_120d=longer.high,
+            dist_high_120d_pct=longer.distance_pct,
+            breakout_120d=longer.broken,
             return_1m_pct=return_1m,
             return_3m_pct=return_3m,
             rs_market_1m=rs_market_1m,
@@ -295,7 +301,7 @@ def ticker_replay(ticker: str, subsector_id: int, prices: Sequence[DailyPrice]) 
     # each lookback excludes the row's own day, as the analyzer's do
     before = high.shift(1)
     series: dict[str, np.ndarray] = {
-        f'high_{days}d': before.rolling(days).max().to_numpy() for days in BREAKOUT_WINDOWS
+        f'high_{days}d': before.rolling(days).max().to_numpy() for days in (*BREAKOUT_WINDOWS, TIER_WINDOW)
     }
     series['avg_vol'] = volume_f.shift(1).rolling(VOLUME_AVG_DAYS).mean().to_numpy()
     sma = close.rolling(window=SMA_DAYS).mean()

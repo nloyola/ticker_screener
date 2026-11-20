@@ -1,8 +1,8 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
 stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), the
-status, extended among its values, and the average dollar volume, price_data and benchmark_price have the day's
-open, and older databases are upgraded to all of them.
+status, extended among its values, the average dollar volume and the 120-day tier, price_data and benchmark_price have
+the day's open, and older databases are upgraded to all of them.
 """
 
 import os
@@ -661,6 +661,7 @@ POSITION_COLUMNS = (
     'sessions_since_breakout INTEGER,',
 )
 DOLLAR_VOLUME_COLUMNS = ('avg_dollar_volume REAL,',)
+TIER_COLUMNS = ('high_120d REAL,', 'dist_high_120d_pct REAL,', 'breakout_120d INTEGER,')
 
 
 def _without_columns(path: str, columns: tuple[str, ...], version: int) -> str:
@@ -694,13 +695,19 @@ def _without_columns(path: str, columns: tuple[str, ...], version: int) -> str:
 @pytest.fixture
 def version_16_db(tmp_path) -> str:
     """A database at version 16: neither the breakout position's columns nor the average dollar volume."""
-    return _without_columns(str(tmp_path / 'v16.db'), POSITION_COLUMNS + DOLLAR_VOLUME_COLUMNS, 16)
+    return _without_columns(str(tmp_path / 'v16.db'), POSITION_COLUMNS + DOLLAR_VOLUME_COLUMNS + TIER_COLUMNS, 16)
 
 
 @pytest.fixture
 def version_17_db(tmp_path) -> str:
-    """A database at version 17: the breakout position's columns, but not the average dollar volume."""
-    return _without_columns(str(tmp_path / 'v17.db'), DOLLAR_VOLUME_COLUMNS, 17)
+    """A database at version 17: the breakout position's columns, but neither the average dollar volume nor the tier."""
+    return _without_columns(str(tmp_path / 'v17.db'), DOLLAR_VOLUME_COLUMNS + TIER_COLUMNS, 17)
+
+
+@pytest.fixture
+def version_18_db(tmp_path) -> str:
+    """A database at version 18: the average dollar volume, but not the 120-day tier's columns."""
+    return _without_columns(str(tmp_path / 'v18.db'), TIER_COLUMNS, 18)
 
 
 def test_upgrade_adds_the_breakout_position_keeping_every_row(version_16_db, current_db):
@@ -714,9 +721,9 @@ def test_upgrade_adds_the_breakout_position_keeping_every_row(version_16_db, cur
         assert _table_sql(version_16_db, table) == _table_sql(current_db, table)
     # the rows already stored keep every value, with no position until a run scores them again
     assert _query(version_16_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
-        (*row, None, None, None, None) for row in criteria_before
+        (*row, *[None] * 7) for row in criteria_before
     ]
-    assert _query(version_16_db, 'SELECT * FROM signal') == [(*row, None, None, None, None) for row in signals_before]
+    assert _query(version_16_db, 'SELECT * FROM signal') == [(*row, *[None] * 7) for row in signals_before]
 
 
 def test_upgrade_adds_the_average_dollar_volume_keeping_every_row(version_17_db, current_db):
@@ -730,6 +737,22 @@ def test_upgrade_adds_the_average_dollar_volume_keeping_every_row(version_17_db,
         assert _table_sql(version_17_db, table) == _table_sql(current_db, table)
     # the rows already stored keep every value, with no dollar volume until a run scores them again
     assert _query(version_17_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
-        (*row, None) for row in criteria_before
+        (*row, None, None, None, None) for row in criteria_before
     ]
-    assert _query(version_17_db, 'SELECT * FROM signal') == [(*row, None) for row in signals_before]
+    assert _query(version_17_db, 'SELECT * FROM signal') == [(*row, None, None, None, None) for row in signals_before]
+
+
+def test_upgrade_adds_the_120_day_tier_keeping_every_row(version_18_db, current_db):
+    criteria_before = _query(version_18_db, 'SELECT * FROM stock_criteria ORDER BY id')
+    signals_before = _query(version_18_db, 'SELECT * FROM signal')
+
+    upgrade_db(version_18_db)
+
+    assert _query(version_18_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    for table in ('stock_criteria', 'signal'):
+        assert _table_sql(version_18_db, table) == _table_sql(current_db, table)
+    # the rows already stored keep every value, with no tier until a run scores them again
+    assert _query(version_18_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
+        (*row, None, None, None) for row in criteria_before
+    ]
+    assert _query(version_18_db, 'SELECT * FROM signal') == [(*row, None, None, None) for row in signals_before]

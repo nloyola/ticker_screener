@@ -181,6 +181,10 @@ def test_replayed_signal_matches_the_prices_on_its_session(path, container):
     assert signal['close'] == prices[i].close
     assert signal['high_20d'] == max(p.high for p in before)
     assert signal['high_60d'] == max(p.high for p in prices[i - 60 : i])
+    high_120d = max(p.high for p in prices[i - 120 : i])
+    assert signal['high_120d'] == high_120d
+    assert signal['dist_high_120d_pct'] == pytest.approx((high_120d - prices[i].close) / high_120d * 100)
+    assert signal['breakout_120d'] == 1
     assert signal['volume'] == prices[i].volume == 3_000_000
     assert signal['avg_vol_20d'] == sum(p.volume for p in before) / 20 == 1_400_000
     assert signal['volume_ratio'] == pytest.approx(3_000_000 / 1_400_000)

@@ -107,6 +107,12 @@ class StockCriteria:
     dist_high_20d_pct: float | None = None
     dist_high_60d_pct: float | None = None
     near_resistance: int | None = None
+    # the 120-day tier (TIER_WINDOW in app/analyzer.py): the highest high of the 120 days before today, how far the
+    # close is below it as a percentage of it (negative above it), and whether the close is above it; None where the
+    # ticker has 120 rows or fewer before today
+    high_120d: float | None = None
+    dist_high_120d_pct: float | None = None
+    breakout_120d: int | None = None
     # the close's return over 21 and 63 trading days, in percent, and its differences, in percentage points, from the
     # market benchmark's return over the same dates and from the median return of the subsector's scored tickers
     return_1m_pct: float | None = None

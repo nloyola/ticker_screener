@@ -610,6 +610,21 @@ def test_analyze_stores_every_price_action_indicator(path, container):
     assert row['core_criteria_score'] == 3  # no breakout: the close only equals the prior high
 
 
+def test_analyze_stores_the_120_day_tier(path, container):
+    # closes rising by 1 to 249, the last 4 above the day before: above the 248 high of the 120 days before it
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('AAA', TODAY, n=150)))
+    container.price_data_repo.bulk_insert(price_rows('BBB', TODAY, n=100))
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    with sqlite3.connect(path) as con:
+        rows = con.execute(
+            'SELECT ticker, high_120d, dist_high_120d_pct, breakout_120d FROM stock_criteria ORDER BY ticker'
+        ).fetchall()
+    # BBB has 99 sessions before today: no 120-day high
+    assert rows == [('AAA', 248.0, pytest.approx(-400 / 248), 1), ('BBB', None, None, None)]
+
+
 RELATIVE_STRENGTH_COLUMNS = (
     'return_1m_pct',
     'return_3m_pct',

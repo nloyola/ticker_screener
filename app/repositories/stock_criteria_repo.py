@@ -75,6 +75,9 @@ COLUMNS = (
     'invalidation_distance_pct',
     'sessions_since_breakout',
     'avg_dollar_volume',
+    'high_120d',
+    'dist_high_120d_pct',
+    'breakout_120d',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -167,6 +170,9 @@ def row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_float(sc.invalidation_distance_pct),
         _as_int(sc.sessions_since_breakout),  # INTEGER
         _as_float(sc.avg_dollar_volume),
+        _as_float(sc.high_120d),
+        _as_float(sc.dist_high_120d_pct),
+        _as_int(sc.breakout_120d),  # INTEGER
     )
 
 

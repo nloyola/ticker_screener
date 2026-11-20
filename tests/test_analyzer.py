@@ -317,6 +317,55 @@ def test_a_row_without_a_high_counts_its_close():
     assert sc.core_criteria_met is True
 
 
+# --- The 120-day tier -------------------------------------------------------
+
+
+def test_a_breakout_above_its_120_day_high_is_in_the_tier():
+    # closes 100..248, then a jump to 252: 1.6% above the 248 high of the 20, 60 and 120 days before it, clearing
+    # the 1% margin
+    sc = run_one(with_last(rising(150), 252.0), volumes_with_last(150, 2_000_000))
+
+    assert sc.status == CONFIRMED
+    assert sc.high_120d == 248.0
+    assert sc.dist_high_120d_pct == pytest.approx(-400 / 248)
+    assert sc.breakout_120d == 1
+
+
+def test_a_breakout_of_only_its_20_day_high_is_not_in_the_tier():
+    # closes 100..229, then 20 days at 210 and a jump to 222: above the 20-day high (210), below the 120-day one (229)
+    closes = rising(130) + [210.0] * 20 + [222.0]
+    sc = run_one(closes, volumes_with_last(len(closes), 2_000_000))
+
+    assert sc.status == CONFIRMED
+    assert (sc.breakout_20d, sc.breakout_60d) == (1, 0)
+    assert sc.high_120d == 229.0
+    assert sc.dist_high_120d_pct == pytest.approx(700 / 229)
+    assert sc.breakout_120d == 0
+
+
+@pytest.mark.parametrize(('rows', 'high_120d'), [(120, None), (121, 219.0)])
+def test_the_120_day_high_needs_120_rows_before_today(rows, high_120d):
+    sc = analyze(rising(rows), volumes_with_last(rows, 2_000_000))
+
+    assert sc.core_criteria_met is True
+    assert sc.high_120d == high_120d
+    if high_120d is None:
+        assert (sc.dist_high_120d_pct, sc.breakout_120d) == (None, None)
+    else:
+        assert (sc.dist_high_120d_pct, sc.breakout_120d) == (pytest.approx(-100 / 219), 1)
+
+
+def test_the_120_day_high_never_changes_the_core_score():
+    # a 300 high 100 days ago is outside the 20- and 60-day windows and blocks only the 120-day breakout
+    closes = rising(150)
+    highs = list(closes)
+    highs[-101] = 300.0
+    sc = analyze(closes, volumes_with_last(150, 2_000_000), highs)
+
+    assert (sc.high_120d, sc.breakout_120d) == (300.0, 0)
+    assert sc.core_criteria_score == 4
+
+
 # --- Volume confirmation ----------------------------------------------------
 
 

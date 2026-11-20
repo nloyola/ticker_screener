@@ -75,8 +75,9 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, and the
 -- seventh the relative strength columns after those, and the eighth secondary_passed and status after those, where
 -- ALTER TABLE places them, the sixteenth rebuilds the table to let status be extended, the seventeenth adds
--- breakout_margin_pct, invalidation_distance_pct and sessions_since_breakout after status, and the eighteenth
--- avg_dollar_volume after those; change both together. status is the strategy's status (with_status in
+-- breakout_margin_pct, invalidation_distance_pct and sessions_since_breakout after status, the eighteenth
+-- avg_dollar_volume after those, and the nineteenth the 120-day tier's columns after it; change both together.
+-- status is the strategy's status (with_status in
 -- app/analyzer.py), NULL for a ticker with none, and always NULL below the liquidity floor (above_liquidity_floor).
 -- avg_dollar_volume, the floor's measure, is the mean close times volume of the DOLLAR_VOLUME_DAYS sessions before
 -- the scored one, or before its run's breakout on a breakout or extended session (liquidity_row), in the market's own
@@ -84,7 +85,10 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- breakout_margin_pct is the close's margin over the level its run broke, in percent of the level,
 -- invalidation_distance_pct the distance from the close down to that level, in percent of the close, and
 -- sessions_since_breakout the sessions since the run's breakout, 0 on the breakout (breakout_position in
--- app/analyzer.py); all three are NULL on any other session.
+-- app/analyzer.py); all three are NULL on any other session. high_120d is the highest high of the TIER_WINDOW days
+-- before the scored one, dist_high_120d_pct the close's distance below it in percent of it, negative above it, and
+-- breakout_120d whether the close is above it (tier in app/analyzer.py); all three are NULL for a ticker with
+-- TIER_WINDOW rows or fewer before the scored one. A breakout with breakout_120d set is in the 120-day tier.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -156,6 +160,9 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        invalidation_distance_pct REAL,
        sessions_since_breakout INTEGER,
        avg_dollar_volume REAL,
+       high_120d REAL,
+       dist_high_120d_pct REAL,
+       breakout_120d INTEGER,
        UNIQUE (ticker)
 );
 
@@ -201,8 +208,8 @@ CREATE TABLE IF NOT EXISTS screened_session (
 -- a session adds nothing: one signal per ticker, session and screener version, whose unique index also serves the
 -- lookups by ticker. Not market data: db-init and the dashboard's ticker removals never touch it. The eleventh
 -- upgrade in app/db.py creates it in databases from before it, and the seventeenth adds the breakout position's
--- columns after archived_at and the eighteenth avg_dollar_volume after those, NULL in the signals archived before
--- them; change both together.
+-- columns after archived_at, the eighteenth avg_dollar_volume after those and the nineteenth the 120-day tier's
+-- columns after it, NULL in the signals archived before them; change both together.
 CREATE TABLE IF NOT EXISTS signal (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        ticker TEXT NOT NULL,
@@ -287,6 +294,9 @@ CREATE TABLE IF NOT EXISTS signal (
        invalidation_distance_pct REAL,
        sessions_since_breakout INTEGER,
        avg_dollar_volume REAL,
+       high_120d REAL,
+       dist_high_120d_pct REAL,
+       breakout_120d INTEGER,
        CHECK ((previous_signal_id IS NULL) = (trading_days_since_previous IS NULL)),
        UNIQUE (ticker, session_date, screener_version)
 );

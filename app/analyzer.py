@@ -48,6 +48,11 @@ SCREENER_VERSION = '1.0.0'
 # The four mandatory conditions of the breakout strategy (GLOSSARY.md, "Core criteria"), scored on the last row.
 # The breakout compares the close with the highest high of the BREAKOUT_WINDOWS trading days before it.
 BREAKOUT_WINDOWS = (20, 60)
+# The 120-day tier (GLOSSARY.md, "120-day tier"): a breakout whose close is also above the highest high of the
+# TIER_WINDOW trading days before it, a longer lookback that BreakoutIQ can test as a higher tier. It is stored
+# beside the breakout windows' flags but is never a core condition, and a ticker with TIER_WINDOW rows or fewer
+# before the scored day has no such high and is not in the tier.
+TIER_WINDOW = 120
 # Volume confirmation: the day's volume is at least VOLUME_RATIO_MIN times the average of the VOLUME_AVG_DAYS days
 # before it. The strategy calls 2 times or more stronger; the ratio is stored so the app can show it.
 VOLUME_AVG_DAYS = 20
@@ -201,6 +206,7 @@ def rule_settings() -> dict[str, object]:
     """
     return {
         'BREAKOUT_WINDOWS': list(BREAKOUT_WINDOWS),
+        'TIER_WINDOW': TIER_WINDOW,
         'VOLUME_AVG_DAYS': VOLUME_AVG_DAYS,
         'VOLUME_RATIO_MIN': VOLUME_RATIO_MIN,
         'SMA_DAYS': SMA_DAYS,
@@ -352,6 +358,26 @@ def _below(value: float | None, limit: float) -> int | None:
 def _distance_pct(price: float, resistance: float) -> float | None:
     """How far 'price' is below 'resistance', as a percentage of it: negative above it."""
     return (resistance - price) / resistance * 100 if resistance > 0 else None
+
+
+@dataclass(frozen=True)
+class Tier:
+    """
+    The 120-day tier's values for one session (TIER_WINDOW): the prior TIER_WINDOW-day high, rounded as the other
+    highs are, the close's distance below it in percent (negative above it), and whether the close is above it.
+    All three are None when the ticker has too few rows for that high.
+    """
+
+    high: float | None
+    distance_pct: float | None
+    broken: int | None
+
+
+def tier(price: float, high: float | None) -> Tier:
+    """The 120-day tier's values for a close of 'price' against the prior TIER_WINDOW-day 'high', None if unknown."""
+    if high is None:
+        return Tier(None, None, None)
+    return Tier(round(high, 2), _distance_pct(price, high), int(price > high))
 
 
 def _near(distances: list[float | None]) -> int | None:
@@ -1121,6 +1147,7 @@ class Analyzer:
         volume = df['volume'].iloc[-1].item()
         # every lookback excludes the scored day: its own high and volume must not raise the bar it is measured by
         high_20d, high_60d = (highs.iloc[-1 - days : -1].max().item() for days in BREAKOUT_WINDOWS)
+        longer = tier(price, highs.iloc[-1 - TIER_WINDOW : -1].max().item() if len(df) > TIER_WINDOW else None)
         avg_vol = df['volume'].iloc[-1 - VOLUME_AVG_DAYS : -1].mean().item()
         volume_ratio = volume / avg_vol if avg_vol > 0 else None
         dma_50 = sma.iloc[-1].item()
@@ -1228,6 +1255,10 @@ class Analyzer:
             dist_high_20d_pct=dist_20d,
             dist_high_60d_pct=dist_60d,
             near_resistance=_near([dist_20d, dist_60d]),
+            high_120d=longer.high,
+            # unrounded, like the distances to resistance
+            dist_high_120d_pct=longer.distance_pct,
+            breakout_120d=longer.broken,
             # unrounded, like volume_ratio; differences in percentage points
             return_1m_pct=return_1m,
             return_3m_pct=return_3m,

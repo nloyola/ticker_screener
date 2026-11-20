@@ -700,6 +700,27 @@ def _add_avg_dollar_volume(con: sqlite3.Connection) -> None:
             con.execute(f'ALTER TABLE {table} ADD COLUMN avg_dollar_volume REAL')
 
 
+def _add_tier(con: sqlite3.Connection) -> None:
+    """
+    Version 19: stock_criteria and signal gain the 120-day tier's columns (TIER_WINDOW in app/analyzer.py), the prior
+    120-day high, the close's distance below it and whether the close broke it, left NULL in the rows already stored:
+    until the next analyze replaces a stock_criteria row, and for good in a signal, which is append-only. Adds only
+    what a table lacks, so a table schema.sql created this way is left as it is.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    for table in ('stock_criteria', 'signal'):
+        columns = {row[1] for row in con.execute(f"PRAGMA table_info('{table}')")}
+        if not columns:
+            continue  # no table: schema.sql creates it this way
+        for column, kind in (
+            ('high_120d', 'REAL'),
+            ('dist_high_120d_pct', 'REAL'),
+            ('breakout_120d', 'INTEGER'),
+        ):
+            if column not in columns:
+                con.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -719,6 +740,7 @@ UPGRADES = (
     _allow_extended_status,
     _add_breakout_position,
     _add_avg_dollar_volume,
+    _add_tier,
 )
 SCHEMA_VERSION = len(UPGRADES)
 
