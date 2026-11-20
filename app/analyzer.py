@@ -91,7 +91,7 @@ CONSOLIDATION_DAYS = 20
 CONSOLIDATION_TIGHT_PCT = 10.0
 # Breakout proximity: the close at most PROXIMITY_PCT percent below the 20- or 60-day resistance (the highest high of
 # BREAKOUT_WINDOWS), and not above it.
-PROXIMITY_PCT = 5.0
+PROXIMITY_PCT = 3.0
 # Relative strength: the close's return over RS_1M_DAYS and RS_3M_DAYS trading days (about 1 and 3 months), each
 # compared with the return of the market's benchmark (BENCHMARKS in app/markets.py) between the same two dates, and
 # with the median return of the tickers scored in the same run in the ticker's subsector, itself included. The
@@ -105,12 +105,13 @@ SECTOR_MIN_TICKERS = 3
 # (with_status). A confirmed breakout is a breakout session (breakout_runs, below), and is high-conviction when it
 # also passes at least HIGH_CONVICTION_MIN of the SECONDARY_INDICATORS. An extended ticker is in the run of an
 # earlier breakout, closing above the level it broke (the strategy's "post-breakout"). A ticker on the pre-breakout
-# watchlist is neither, but passes both trend conditions and closes near its resistance (PROXIMITY_PCT).
+# watchlist is neither, but passes both trend conditions, closes near its resistance (PROXIMITY_PCT) and has a tight
+# base (CONSOLIDATION_TIGHT_PCT).
 HIGH_CONVICTION = 'high_conviction'
 CONFIRMED = 'confirmed'
 PRE_BREAKOUT = 'pre_breakout'
 EXTENDED = 'extended'
-HIGH_CONVICTION_MIN = 4
+HIGH_CONVICTION_MIN = 5
 
 # The liquidity floor (GLOSSARY.md, "Liquidity floor"): a ticker whose average daily dollar volume, its close times
 # its volume averaged over the DOLLAR_VOLUME_DAYS sessions before the scored one, is below its market's
@@ -612,8 +613,8 @@ def with_status(sc: StockCriteria) -> StockCriteria:
     market's liquidity floor (above_liquidity_floor) has none, nor a breakout position, which only a breakout or
     extended session with its status keeps, as when a later run clears a status (StockCriteriaRepo.clear_status).
     Otherwise only a breakout session (breakout_phase) is confirmed or high-conviction; a later session of its run is
-    extended; any other session passing both trend conditions and closing near its resistance is on the pre-breakout
-    watchlist.
+    extended; any other session passing both trend conditions, closing near its resistance and with a tight base is on
+    the pre-breakout watchlist.
     """
     passed = sum(passes(sc) for passes in SECONDARY_INDICATORS.values())
     if not above_liquidity_floor(sc):
@@ -630,7 +631,7 @@ def with_status(sc: StockCriteria) -> StockCriteria:
         status = HIGH_CONVICTION if passed >= HIGH_CONVICTION_MIN else CONFIRMED
     elif sc.breakout_phase == EXTENDED_SESSION:
         status = EXTENDED
-    elif _all_pass(sc, 'price_gt_50dma', 'dma_50_rising', 'near_resistance'):
+    elif _all_pass(sc, 'price_gt_50dma', 'dma_50_rising', 'near_resistance', 'consolidation_tight'):
         status = PRE_BREAKOUT
     return replace(sc, secondary_passed=passed, status=status)
 

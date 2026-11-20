@@ -824,8 +824,8 @@ def test_a_breakout_is_above_its_resistance_not_near_it():
 
 @pytest.mark.parametrize(
     ('last', 'distance', 'near'),
-    [(200.0, 0.0, 1), (195.0, 2.5, 1), (190.0, 5.0, 1), (189.0, 5.5, 0)],
-    ids=['at resistance', 'just below', '5% below', 'over 5% below'],
+    [(200.0, 0.0, 1), (197.0, 1.5, 1), (194.0, 3.0, 1), (192.0, 4.0, 0)],
+    ids=['at resistance', 'just below', '3% below', '4% below'],
 )
 def test_the_close_near_its_resistance(last, distance, near):
     # closes 100..200 then today's: both resistances are the 200 high
@@ -838,13 +838,13 @@ def test_the_close_near_its_resistance(last, distance, near):
 
 
 def test_near_the_20_day_resistance_far_below_the_60_day_one():
-    closes = [*rising(99), 190.0]
+    closes = [*rising(99), 193.0]
     highs = list(closes)
     highs[-40] = 250.0
     sc = analyze(closes, highs=highs)
 
-    assert sc.dist_high_20d_pct == pytest.approx(800 / 198)
-    assert sc.dist_high_60d_pct == pytest.approx(24.0)
+    assert sc.dist_high_20d_pct == pytest.approx(500 / 198)
+    assert sc.dist_high_60d_pct == pytest.approx(22.8)
     assert sc.near_resistance == 1
 
 
@@ -1019,6 +1019,16 @@ def test_a_rising_ticker_just_below_its_resistance_is_on_the_watchlist():
     assert sc.secondary_passed == 4
 
 
+def test_a_rising_ticker_4_percent_below_its_resistance_is_not_on_the_watchlist():
+    # the same rise closing at 447, (466 - 447) / 466 = 4.08% below its high: still above its rising 50-day
+    # average, with a tight base, but further below its resistance than the 3% of PROXIMITY_PCT
+    sc = run_one(with_last(YEAR, 447.0), volumes_with_last(368, 2_000_000))
+
+    assert (sc.price_gt_50dma, sc.dma_50_rising, sc.consolidation_tight) == (1, 1, 1)
+    assert sc.dist_high_20d_pct == pytest.approx(1900 / 466)
+    assert (sc.near_resistance, sc.status) == (0, None)
+
+
 def test_a_falling_ticker_has_no_status():
     sc = run_one(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2_000_000))
 
@@ -1067,9 +1077,9 @@ def test_each_indicators_flags_pass_it_alone(name):
 
 
 @pytest.mark.parametrize(
-    ('passed', 'status'), [(3, CONFIRMED), (4, HIGH_CONVICTION), (7, HIGH_CONVICTION)], ids=['3', '4', 'all 7']
+    ('passed', 'status'), [(4, CONFIRMED), (5, HIGH_CONVICTION), (7, HIGH_CONVICTION)], ids=['4', '5', 'all 7']
 )
-def test_high_conviction_takes_4_secondary_indicators(passed, status):
+def test_high_conviction_takes_5_secondary_indicators(passed, status):
     sc = with_status(flags(**passing(*list(INDICATOR_FLAGS)[:passed])))
 
     assert (sc.secondary_passed, sc.status) == (passed, status)
@@ -1117,12 +1127,13 @@ def test_empty_flags_count_as_not_passed():
     assert (sc.secondary_passed, sc.status) == (0, CONFIRMED)
 
 
-def test_the_watchlist_needs_both_trend_conditions_and_a_close_near_resistance():
+def test_the_watchlist_needs_both_trend_conditions_a_close_near_resistance_and_a_tight_base():
     not_met = {
         'core_criteria_met': False,
         'core_criteria_score': 3,
         'breakout_20d': 0,
         'near_resistance': 1,
+        'consolidation_tight': 1,
         'breakout_phase': None,
     }
 
@@ -1131,10 +1142,12 @@ def test_the_watchlist_needs_both_trend_conditions_and_a_close_near_resistance()
     assert with_status(flags(**(not_met | {'dma_50_rising': 0}))).status is None
     assert with_status(flags(**(not_met | {'near_resistance': 0}))).status is None
     assert with_status(flags(**(not_met | {'near_resistance': None}))).status is None
+    assert with_status(flags(**(not_met | {'consolidation_tight': 0}))).status is None
+    assert with_status(flags(**(not_met | {'consolidation_tight': None}))).status is None
 
 
 def test_a_confirmed_breakout_near_a_higher_resistance_is_not_on_the_watchlist():
-    # above its 20-day high but within 5% below its 60-day one
+    # above its 20-day high but within 3% below its 60-day one
     assert with_status(flags(near_resistance=1)).status == CONFIRMED
 
 
@@ -1215,7 +1228,13 @@ def test_a_breakout_below_the_price_floor_has_no_status(ticker, cents_below, sta
     [
         pytest.param({'breakout_phase': EXTENDED_SESSION}, id='extended'),
         pytest.param(
-            {'breakout_phase': None, 'core_criteria_met': False, 'breakout_20d': 0, 'near_resistance': 1},
+            {
+                'breakout_phase': None,
+                'core_criteria_met': False,
+                'breakout_20d': 0,
+                'near_resistance': 1,
+                'consolidation_tight': 1,
+            },
             id='watchlist',
         ),
     ],
@@ -1328,7 +1347,7 @@ def test_with_no_daily_range_known_the_margin_is_the_floor():
     ],
 )
 def test_a_run_ends_on_the_second_close_in_a_row_below_its_level(second_close, statuses):
-    # 144 clears the 142 high by 1.41% on 3,000,000 shares; 139 and 138 close within 5% under 142, on the watchlist
+    # 144 clears the 142 high by 1.41% on 3,000,000 shares; 139 and 138 close within 3% under 142, on the watchlist
     closes = [*BASE, 142.0, 139.0, second_close, 144.0]
     volumes = [*BASE_VOLUMES, 2_000_000, BASE_VOLUME, BASE_VOLUME, 3_000_000]
 
