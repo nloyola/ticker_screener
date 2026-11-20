@@ -17,6 +17,7 @@ from app.repositories.backfill_run_repo import BackfillRunRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.history_repo import HistoryRepo
+from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
@@ -57,6 +58,7 @@ def build_container(config: Config) -> Container:
     c.register('company_name_repo', Singleton(lambda: CompanyNameRepo(c)))
     c.register('screened_session_repo', Singleton(lambda: ScreenedSessionRepo(c)))
     c.register('signal_repo', Singleton(lambda: SignalRepo(c)))
+    c.register('issuer_repo', Singleton(lambda: IssuerRepo(c)))
     c.register('signal_path_repo', Singleton(lambda: SignalPathRepo(c)))
     c.register('signal_outcome_repo', Singleton(lambda: SignalOutcomeRepo(c)))
     c.register('history_repo', Singleton(lambda: HistoryRepo(c)))

@@ -81,6 +81,11 @@ class FakeSignalRepo:
         return len(signals)
 
 
+class FakeIssuerRepo:
+    def non_primary(self) -> dict[str, str]:
+        return {}
+
+
 class FakeStockCriteriaRepo:
     def __init__(self) -> None:
         self.saved: list[tuple[list[StockCriteria], date]] = []
@@ -149,6 +154,7 @@ def make_analyzer(
         benchmark_price_repo=FakeBenchmarkPriceRepo(benchmarks),
         screened_session_repo=FakeScreenedSessionRepo(),
         signal_repo=FakeSignalRepo(),
+        issuer_repo=FakeIssuerRepo(),
     )
     return Analyzer(container), criteria_repo
 

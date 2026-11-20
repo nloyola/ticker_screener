@@ -154,6 +154,7 @@ def test_analyze_reports_start_and_done(capsys):
         benchmark_price_repo=None,
         screened_session_repo=None,
         signal_repo=None,
+        issuer_repo=None,
     )
     Analyzer(container).analyze()
 

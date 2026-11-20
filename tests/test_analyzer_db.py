@@ -27,6 +27,7 @@ from app.price_apis import DailyPrice
 from app.provenance import COMMIT_ENV
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
+from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.signal_outcome_repo import SignalOutcomeRepo
@@ -37,6 +38,7 @@ from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
+from tests.test_issuer_repo import add_issuer
 
 
 def trades(day: date) -> bool:
@@ -116,6 +118,7 @@ def container(path) -> SimpleNamespace:
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
+    container.issuer_repo = IssuerRepo(container)
     container.signal_path_repo = SignalPathRepo(container)
     container.signal_paths = SignalPaths(container)
     container.signal_outcome_repo = SignalOutcomeRepo(container)
@@ -1170,6 +1173,27 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
         (US, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),
         (CANADA, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),
     }
+
+
+def test_run_archives_only_the_primary_listing_of_an_issuer_and_keeps_the_others_status(path, container):
+    breakout_rows(path, container)
+    add_issuer(path, 'Breakers', 'BRK', 'BRK', 'SHOP.TO')
+
+    container.analyzer.analyze(run_id=7)
+
+    assert set(table_rows(path, 'signal')) == {'BRK'}
+    # the other listing is scored and keeps its status, shown under the primary by the dashboard
+    assert table_rows(path, 'stock_criteria')['SHOP.TO']['status'] == 'confirmed'
+
+
+def test_run_archives_no_listing_whose_primary_is_another(path, container):
+    breakout_rows(path, container)
+    # NEAR, on the watchlist, is the primary: neither breakout of its issuer is archived
+    add_issuer(path, 'Breakers', 'NEAR', 'BRK', 'NEAR', 'SHOP.TO')
+
+    container.analyzer.analyze(run_id=7)
+
+    assert signal_count(path) == 0
 
 
 def test_second_run_on_the_same_session_archives_nothing(path, container):

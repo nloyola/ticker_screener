@@ -32,6 +32,7 @@ from app.provenance import git_commit
 if TYPE_CHECKING:
     from app.price_apis import PriceApi
     from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
+    from app.repositories.issuer_repo import IssuerRepo
     from app.repositories.price_data_repo import PriceDataRepo
     from app.repositories.screened_session_repo import ScreenedSessionRepo
     from app.repositories.signal_repo import SignalRepo
@@ -695,6 +696,7 @@ class Analyzer:
         self.benchmark_price_repo: BenchmarkPriceRepo = container.benchmark_price_repo
         self.screened_session_repo: ScreenedSessionRepo = container.screened_session_repo
         self.signal_repo: SignalRepo = container.signal_repo
+        self.issuer_repo: IssuerRepo = container.issuer_repo
         # the clock a run's start is read from, timezone aware
         self.now = now
         # each ticker the last analyze left unscored as stale or frozen, with that reason, flagged or not
@@ -767,7 +769,8 @@ class Analyzer:
         of its tickers were scored, replacing the row of an earlier run that scored the same session.
 
         Last, each scored ticker whose status is confirmed or high-conviction is archived in signal (archive_signals)
-        with the same rules, commit and run as its market's session.
+        with the same rules, commit and run as its market's session, unless it is a listing that is not its issuer's
+        primary.
 
         Prints one summary line per market that has prices.
         """
@@ -917,12 +920,19 @@ class Analyzer:
         Archives each of 'scored' that is a signal, status confirmed or high-conviction, as a signal of the session
         it was scored on from 'source' (LIVE or BACKFILL), linked to the ticker's previous signal with the trading
         days since it. A signal already archived for the same ticker, session and version is left as it was, so a
-        rerun of a session adds nothing. Logs and returns how many it archived.
+        rerun of a session adds nothing. A listing that is not its issuer's primary (IssuerRepo) is left out, keeping
+        its status in stock_criteria, so a company listed twice is archived once, under its primary listing, by
+        today's issuers. Logs and returns how many it archived.
         """
+        non_primary = self.issuer_repo.non_primary()
         signals: list[Signal] = []
+        left_out: list[str] = []
         for s in scored:
             sc = s.criteria
             if sc.status not in SIGNAL_STATUSES:
+                continue
+            if sc.ticker.upper() in non_primary:
+                left_out.append(f'{sc.ticker} (under {non_primary[sc.ticker.upper()]})')
                 continue
             market, session_date, close, dates = s.market, s.session_date, s.close, s.dates
             previous = self.signal_repo.previous(sc.ticker, session_date)
@@ -945,6 +955,8 @@ class Analyzer:
                     ),
                 )
             )
+        if left_out:
+            logger.info(f'not archived, not the primary listing of their issuer: {", ".join(left_out)}')
         if not signals:
             return 0
         stored = self.signal_repo.archive(signals)

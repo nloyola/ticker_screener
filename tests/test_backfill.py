@@ -20,6 +20,7 @@ from app.db import init_db
 from app.markets import CANADA, US
 from app.models import PriceData
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
+from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.signal_repo import SignalRepo
@@ -125,6 +126,7 @@ def container(path) -> SimpleNamespace:
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
+    container.issuer_repo = IssuerRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     container.backfill = Backfill(container, now=lambda: EVENING)
     return container

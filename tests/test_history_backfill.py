@@ -29,6 +29,7 @@ from app.replay import flat_days, run_lengths, unscored
 from app.repositories.backfill_run_repo import BackfillRunRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.history_repo import BENCHMARK, TICKER, HistoryRepo
+from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
@@ -42,6 +43,7 @@ from app.services.sector_service import SectorService
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_outcomes import COST_BPS
 from app.signal_paths import HORIZONS, PATH_SESSIONS
+from tests.test_issuer_repo import add_issuer
 
 NEW_YORK = ZoneInfo('America/New_York')
 # a Monday
@@ -173,6 +175,7 @@ def container(path, tmp_path, prices, benchmarks) -> SimpleNamespace:
     container.stock_criteria_repo = StockCriteriaRepo(container)
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
+    container.issuer_repo = IssuerRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     container.backfill = Backfill(container, now=lambda: EVENING)
     container.signal_path_repo = SignalPathRepo(container)
@@ -216,6 +219,26 @@ def as_of_frame(prices: dict[str, list[DailyPrice]]) -> pd.DataFrame:
     df.sort_index(inplace=True)
     df['volume'] = df['volume'].astype('Int64')
     return df[['subsector_id', 'close', 'high', 'low', 'volume']]
+
+
+def test_backfill_archives_only_the_primary_listing_of_an_issuer(path, container, prices, benchmarks):
+    add_issuer(path, 'Banks', 'CCC', 'CCC', 'RY.TO')
+
+    container.history_backfill.run()
+
+    frame = as_of_frame(prices)
+    closes = {ticker: {p.date: p.close for p in rows} for ticker, rows in benchmarks.items()}
+    sessions = replayable_sessions(market_dates(frame), EVENING)
+    # RY.TO is a signal on some session, by today's issuers never archived, while its primary's signals are
+    ry_signals = sum(
+        s.criteria.ticker == 'RY.TO' and s.criteria.status in SIGNAL_STATUSES
+        for session, markets in sessions.items()
+        for s in container.analyzer.score_as_of(session, frame, markets, closes)
+    )
+    assert ry_signals > 0
+    archived = {s['ticker'] for s in signals(path)}
+    assert 'RY.TO' not in archived
+    assert 'CCC' in archived
 
 
 def test_backfill_archives_the_signals_score_as_of_gives_on_every_session(path, container, prices, benchmarks, capsys):
