@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import statistics
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -25,7 +26,16 @@ from app.markets import (
     last_complete_session,
     market_of,
 )
-from app.models import ScreenedSession, Signal, StockCriteria
+from app.models import (
+    CONTINUATION_KIND,
+    KINDS,
+    NEAR_MISS_KIND,
+    SIGNAL_KIND,
+    WATCHLIST_KIND,
+    ScreenedSession,
+    Signal,
+    StockCriteria,
+)
 from app.progress import FROZEN, STALE, report_flagged, report_progress
 from app.provenance import git_commit
 
@@ -151,6 +161,9 @@ EXTENDED_SESSION = 'extended'
 SIGNAL_STATUSES = (CONFIRMED, HIGH_CONVICTION)
 LIVE = 'live'
 BACKFILL = 'backfill'
+# A near-miss (archive_kind) meets at least this many of the four core conditions: three, or all four without the
+# minimum margin. It says which sessions are archived beside the signals, not what any of them scores.
+NEAR_MISS_CONDITIONS = 3
 
 
 def _all_pass(sc: StockCriteria, *flags: str) -> bool:
@@ -662,6 +675,43 @@ def with_status(sc: StockCriteria) -> StockCriteria:
     return replace(sc, secondary_passed=passed, status=status)
 
 
+def archive_kind(sc: StockCriteria) -> str | None:
+    """
+    The kind of record the signal archive keeps for 'sc' (KINDS in app/models.py, GLOSSARY.md "Signal archive"), the
+    first that fits of: a signal, a breakout session (SIGNAL_STATUSES); a continuation, an extended session; a
+    near-miss, a session outside every breakout run meeting at least NEAR_MISS_CONDITIONS of the four core conditions,
+    which outside a run means three, or all four without the minimum margin; and a session on the pre-breakout
+    watchlist. None for any other session, and for every session below its market's liquidity floor, which has no
+    status. A continuation is archived only once its breakout is (Analyzer.archive_signals).
+    """
+    if not above_liquidity_floor(sc):
+        return None
+    if sc.status in SIGNAL_STATUSES:
+        return SIGNAL_KIND
+    if sc.status == EXTENDED:
+        return CONTINUATION_KIND
+    if not sc.in_breakout_run and (sc.core_criteria_score or 0) >= NEAR_MISS_CONDITIONS:
+        return NEAR_MISS_KIND
+    if sc.status == PRE_BREAKOUT:
+        return WATCHLIST_KIND
+    return None
+
+
+# each kind's name in a summary line, singular and plural
+_KIND_NAMES = {
+    SIGNAL_KIND: ('signal', 'signals'),
+    NEAR_MISS_KIND: ('near-miss', 'near-misses'),
+    WATCHLIST_KIND: ('watchlist record', 'watchlist records'),
+    CONTINUATION_KIND: ('continuation', 'continuations'),
+}
+
+
+def describe_records(stored: Mapping[str, int]) -> str:
+    """How many new records of each kind 'stored' counts, every kind named: '2 new signals, 9 near-misses, ...'."""
+    parts = [f'{stored.get(kind, 0)} {_KIND_NAMES[kind][stored.get(kind, 0) != 1]}' for kind in KINDS]
+    return f'{parts[0].replace(" ", " new ", 1)}, {", ".join(parts[1:-1])} and {parts[-1]}'
+
+
 def _days_above(macd: pd.Series, signal: pd.Series) -> int:
     """How many sessions in a row, ending on the last, MACD has been above its signal line: 0 when it is not."""
     days = 0
@@ -816,9 +866,9 @@ class Analyzer:
         screened_session, with SCREENER_VERSION, rule_settings(), the screener's git commit, 'run_id' and how many
         of its tickers were scored, replacing the row of an earlier run that scored the same session.
 
-        Last, each scored ticker whose status is confirmed or high-conviction is archived in signal (archive_signals)
-        with the same rules, commit and run as its market's session, unless it is a listing that is not its issuer's
-        primary.
+        Last, each scored ticker the signal archive keeps (archive_kind), a signal, a near-miss, a watchlist session or
+        a continuation, is archived in signal (archive_signals) with the same rules, commit and run as its market's
+        session, unless it is a listing that is not its issuer's primary.
 
         Prints one summary line per market that has prices.
         """
@@ -969,30 +1019,43 @@ class Analyzer:
         commit: str | None,
         source: str = LIVE,
         non_primary: Mapping[str, str] | None = None,
-    ) -> int:
+    ) -> Counter[str]:
         """
-        Archives each of 'scored' that is a signal, status confirmed or high-conviction, as a signal of the session
-        it was scored on from 'source' (LIVE or BACKFILL), linked to the ticker's previous signal with the trading
-        days since it. A signal already archived for the same ticker, session and version is left as it was, so a
-        rerun of a session adds nothing. A listing that is not its issuer's primary (IssuerRepo) is left out, keeping
-        its status in stock_criteria, so a company listed twice is archived once, under its primary listing, by
-        today's issuers: 'non_primary' (IssuerRepo.non_primary), read here when not given, so a backfill archiving
-        session after session reads it once. Logs and returns how many it archived.
+        Archives each of 'scored' the signal archive keeps (archive_kind) as a record of its kind of the session it
+        was scored on from 'source' (LIVE or BACKFILL). A signal is linked to the ticker's previous signal with the
+        trading days since it. A continuation is linked to the signal of its run's breakout session, the session
+        sessions_since_breakout before it under the same screener version, and left out when that breakout is not
+        archived, as when its run began before the archive or under other rules. A record already archived for the
+        same ticker, session and version is left as it was, so a rerun of a session adds nothing. A listing that is
+        not its issuer's primary (IssuerRepo) is left out, whatever its kind, keeping its status in stock_criteria, so
+        a company listed twice is archived once, under its primary listing, by today's issuers: 'non_primary'
+        (IssuerRepo.non_primary), read here when not given, so a backfill archiving session after session reads it
+        once. Logs and returns how many it archived of each kind.
         """
         if non_primary is None:
             non_primary = self.issuer_repo.non_primary()
-        signals: list[Signal] = []
+        records: list[Signal] = []
         left_out: list[str] = []
+        unlinked = 0
         for s in scored:
             sc = s.criteria
-            if sc.status not in SIGNAL_STATUSES:
+            kind = archive_kind(sc)
+            if kind is None:
                 continue
             if sc.ticker.upper() in non_primary:
                 left_out.append(f'{sc.ticker} (under {non_primary[sc.ticker.upper()]})')
                 continue
             market, session_date, close, dates = s.market, s.session_date, s.close, s.dates
-            previous = self.signal_repo.previous(sc.ticker, session_date)
-            signals.append(
+            previous, breakout_id = None, None
+            if kind == SIGNAL_KIND:
+                previous = self.signal_repo.previous(sc.ticker, session_date)
+            elif kind == CONTINUATION_KIND:
+                breakout_session = dates[len(dates) - 1 - sc.sessions_since_breakout]
+                breakout_id = self.signal_repo.breakout(sc.ticker, breakout_session, SCREENER_VERSION)
+                if breakout_id is None:
+                    unlinked += 1
+                    continue
+            records.append(
                 Signal(
                     criteria=sc,
                     market=market,
@@ -1009,17 +1072,20 @@ class Analyzer:
                     trading_days_since_previous=(
                         trading_days_between(dates, previous[1], session_date) if previous else None
                     ),
+                    kind=kind,
+                    breakout_id=breakout_id,
                 )
             )
         if left_out:
             logger.info(f'not archived, not the primary listing of their issuer: {", ".join(left_out)}')
-        if not signals:
-            return 0
-        stored = self.signal_repo.archive(signals)
-        logger.info(
-            f'archived {stored} new signal{"" if stored == 1 else "s"} of {len(signals)} '
-            f'confirmed or high-conviction ticker{"" if len(signals) == 1 else "s"}'
-        )
+        if unlinked:
+            logger.info(
+                f'not archived, {unlinked} extended session{"" if unlinked == 1 else "s"} of an unarchived breakout'
+            )
+        if not records:
+            return Counter()
+        stored = self.signal_repo.archive(records)
+        logger.info(f'archived {describe_records(stored)}, of {len(records)} tickers the archive keeps')
         return stored
 
     def _record_sessions(
@@ -1271,6 +1337,7 @@ class Analyzer:
             invalidation_distance_pct=position.invalidation_pct,
             sessions_since_breakout=position.sessions,
             breakout_phase=runs.phase[last],
+            in_breakout_run=bool(runs.start[last] >= 0),
         )
 
     def save_to_repository(self, scored: list[Scored]) -> None:

@@ -1107,9 +1107,15 @@ def table_rows(path: str, table: str) -> dict[str, dict]:
         return {row['ticker']: dict(row) for row in con.execute(f'SELECT * FROM {table}')}
 
 
-def signal_count(path: str) -> int:
+def signal_count(path: str, kind: str | None = None) -> int:
+    """How many records the archive holds, of 'kind' alone when given."""
     with sqlite3.connect(path) as con:
-        return con.execute('SELECT count(*) FROM signal').fetchone()[0]
+        return con.execute('SELECT count(*) FROM signal WHERE ? IS NULL OR kind = ?', (kind, kind)).fetchone()[0]
+
+
+def kinds(path: str) -> dict[str, str]:
+    """Each archived ticker's kind of record, for a session archiving one record per ticker."""
+    return {ticker: row['kind'] for ticker, row in table_rows(path, 'signal').items()}
 
 
 def near_rows() -> list[PriceData]:
@@ -1143,14 +1149,15 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
     container.analyzer.analyze(run_id=7)
 
     criteria_rows = table_rows(path, 'stock_criteria')
-    signals = table_rows(path, 'signal')
+    signals = {t: r for t, r in table_rows(path, 'signal').items() if r['kind'] == 'signal'}
     assert {t: r['status'] for t, r in criteria_rows.items()} == {
         'BRK': 'confirmed',
         'SHOP.TO': 'confirmed',
         'NEAR': 'pre_breakout',
         'FALL': None,
     }
-    assert set(signals) == {'BRK', 'SHOP.TO'}
+    # NEAR, on the watchlist, is archived beside the signals
+    assert kinds(path) == {'BRK': 'signal', 'SHOP.TO': 'signal', 'NEAR': 'watchlist'}
     archived = set(criteria_rows['BRK']) - {'id', 'subsector_id', 'date_created'}
     for ticker, signal in signals.items():
         assert {c: signal[c] for c in archived} == {c: criteria_rows[ticker][c] for c in archived}, ticker
@@ -1199,25 +1206,109 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
     }
 
 
+def every_kind_rows(path: str, container) -> None:
+    """
+    On TODAY: BRK breaks out (with_breakout), THREE rises to a new high on its usual volume, meeting three of the four
+    core conditions outside any run, NEAR is on the watchlist (near_rows), and EXT, which broke out on SESSION_BEFORE
+    on doubled volume clearing its 198 high by 2%, closes 1 higher on its usual volume, an Extended day of that run.
+    """
+    add_energy_oil(path)
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('BRK', TODAY)))
+    three = price_rows('THREE', TODAY)
+    container.price_data_repo.bulk_insert([*three[:-1], replace(three[-1], volume=1_000_000)])
+    container.price_data_repo.bulk_insert(near_rows())
+    ext = price_rows('EXT', TODAY)
+    container.price_data_repo.bulk_insert(
+        [
+            *ext[:-2],
+            replace(ext[-2], close=ext[-3].close + 4, volume=2_000_000),
+            replace(ext[-1], close=ext[-3].close + 5, volume=1_000_000),
+        ]
+    )
+
+
+def _all_records(path: str) -> list[dict]:
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        return [dict(row) for row in con.execute('SELECT * FROM signal ORDER BY id')]
+
+
+def test_a_session_archives_one_record_of_each_kind_and_a_rerun_adds_nothing(path, container):
+    every_kind_rows(path, container)
+    # the run during TODAY's session scores SESSION_BEFORE, EXT's breakout
+    container.analyzer.analyze(started_at=MARKET_HOURS, run_id=1)
+    [breakout] = [r for r in _all_records(path) if r['ticker'] == 'EXT' and r['kind'] == 'signal']
+    assert breakout['session_date'] == SESSION_BEFORE.isoformat()
+
+    container.analyzer.analyze(started_at=EVENING, run_id=2)
+
+    today = {r['ticker']: r for r in _all_records(path) if r['session_date'] == TODAY.isoformat()}
+    assert {t: (r['kind'], r['status']) for t, r in today.items()} == {
+        'BRK': ('signal', 'confirmed'),
+        'THREE': ('near_miss', None),
+        'NEAR': ('watchlist', 'pre_breakout'),
+        'EXT': ('continuation', 'extended'),
+    }
+    # THREE failed only the volume confirmation, read from its flags
+    three = today['THREE']
+    assert (three['core_criteria_score'], three['breakout_confirmed'], three['breakout_20d']) == (3, 0, 1)
+    # the continuation links to its run's breakout, one session before it; only a signal links to a previous one
+    assert (today['EXT']['breakout_id'], today['EXT']['sessions_since_breakout']) == (breakout['id'], 1)
+    assert {t: r['breakout_id'] for t, r in today.items() if t != 'EXT'} == {'BRK': None, 'THREE': None, 'NEAR': None}
+    assert {r['previous_signal_id'] for r in today.values()} == {None}
+    assert {(r['run_id'], r['source']) for r in today.values()} == {(2, 'live')}
+    archived = _all_records(path)
+
+    container.analyzer.analyze(started_at=EVENING, run_id=3)
+
+    assert _all_records(path) == archived
+
+
+def test_an_extended_day_whose_breakout_is_not_archived_is_left_out(path, container):
+    every_kind_rows(path, container)
+    # no run scored SESSION_BEFORE, so EXT's breakout was never archived
+
+    container.analyzer.analyze(started_at=EVENING, run_id=2)
+
+    assert kinds(path) == {'BRK': 'signal', 'THREE': 'near_miss', 'NEAR': 'watchlist'}
+    assert table_rows(path, 'stock_criteria')['EXT']['status'] == 'extended'
+
+
+def test_a_new_high_on_doubled_volume_short_of_the_margin_is_a_near_miss(path, container):
+    add_energy_oil(path)
+    # 199 over the 198 high on doubled volume: all four conditions, but 0.5% over the level, short of the 1% margin
+    container.price_data_repo.bulk_insert(price_rows('SHORT', TODAY))
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    [record] = _all_records(path)
+    assert (record['ticker'], record['kind'], record['status'], record['core_criteria_met']) == (
+        'SHORT',
+        'near_miss',
+        None,
+        1,
+    )
+
+
 def test_run_archives_only_the_primary_listing_of_an_issuer_and_keeps_the_others_status(path, container):
     breakout_rows(path, container)
     add_issuer(path, 'Breakers', 'BRK', 'BRK', 'SHOP.TO')
 
     container.analyzer.analyze(run_id=7)
 
-    assert set(table_rows(path, 'signal')) == {'BRK'}
+    assert kinds(path) == {'BRK': 'signal', 'NEAR': 'watchlist'}
     # the other listing is scored and keeps its status, shown under the primary by the dashboard
     assert table_rows(path, 'stock_criteria')['SHOP.TO']['status'] == 'confirmed'
 
 
 def test_run_archives_no_listing_whose_primary_is_another(path, container):
     breakout_rows(path, container)
-    # NEAR, on the watchlist, is the primary: neither breakout of its issuer is archived
+    # NEAR, on the watchlist, is the primary: neither breakout of its issuer is archived, of any kind
     add_issuer(path, 'Breakers', 'NEAR', 'BRK', 'NEAR', 'SHOP.TO')
 
     container.analyzer.analyze(run_id=7)
 
-    assert signal_count(path) == 0
+    assert kinds(path) == {'NEAR': 'watchlist'}
 
 
 def test_second_run_on_the_same_session_archives_nothing(path, container):
@@ -1227,7 +1318,7 @@ def test_second_run_on_the_same_session_archives_nothing(path, container):
 
     container.analyzer.analyze(run_id=2)
 
-    assert signal_count(path) == 2
+    assert signal_count(path) == 3
     assert table_rows(path, 'signal') == first
 
 
@@ -1238,7 +1329,8 @@ def test_same_session_under_new_rules_is_archived_again(path, container, monkeyp
 
     with sqlite3.connect(path) as con:
         rows = con.execute(
-            'SELECT ticker, screener_version, run_id, previous_signal_id FROM signal ORDER BY ticker, screener_version'
+            'SELECT ticker, screener_version, run_id, previous_signal_id FROM signal '
+            "WHERE kind = 'signal' ORDER BY ticker, screener_version"
         ).fetchall()
     # a session never links to a signal of the same session
     assert rows == [
@@ -1393,8 +1485,8 @@ def test_score_as_of_the_latest_session_matches_what_a_run_stores(path, containe
     assert {s.criteria.ticker for s in scored} == set(stored) == {*SUBSECTOR_STEPS, 'SHOP.TO'}
     for s in scored:
         row = stored[s.criteria.ticker]
-        # the breakout phase is not stored; the status it decides is
-        expected = {f: row[f] for f in vars(s.criteria) if f not in ('id', 'breakout_phase')}
+        # the breakout phase and whether the session is in a run are not stored; the status they decide is
+        expected = {f: row[f] for f in vars(s.criteria) if f not in ('id', 'breakout_phase', 'in_breakout_run')}
         assert {f: getattr(s.criteria, f) for f in expected} == expected, s.criteria.ticker
 
 

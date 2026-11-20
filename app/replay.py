@@ -41,8 +41,10 @@ from app.analyzer import (
     MACD_SIGNAL_DAYS,
     MACD_SLOW_DAYS,
     MIN_ROWS,
+    NEAR_MISS_CONDITIONS,
     PADDED_MIN_DAYS,
     PADDED_WINDOW,
+    PROXIMITY_PCT,
     RS_1M_DAYS,
     RS_3M_DAYS,
     RSI_BAND,
@@ -73,6 +75,9 @@ from app.analyzer import (
 )
 from app.models import StockCriteria
 from app.price_apis import DailyPrice
+
+# how far archivable() widens the watchlist's cut-offs, in percentage points
+ARCHIVABLE_SLACK = 1e-6
 
 
 def run_lengths(flags: np.ndarray) -> np.ndarray:
@@ -165,6 +170,32 @@ class TickerReplay:
     return_1m: np.ndarray
     return_3m: np.ndarray
     series: Mapping[str, np.ndarray]
+
+    def archivable(self) -> np.ndarray:
+        """
+        At each row, whether the signal archive could keep it (archive_kind in app/analyzer.py), judged from the
+        values that decide its kind but not from the liquidity floor or the subsector comparison, which only
+        criteria_at and the status give: a breakout or extended session, a session outside every breakout run meeting
+        NEAR_MISS_CONDITIONS of the core conditions, or one passing both trend conditions with a tight base close to
+        its resistance, the watchlist's conditions. The last two cut-offs are widened by ARCHIVABLE_SLACK, so no row
+        the status would keep is missed over a rounding difference: it is a superset, and archive_kind decides.
+        """
+        c = self.conditions
+        s = self.series
+        score = (c.breakout_20d | c.breakout_60d).astype(int) + c.confirmed + c.above_sma + c.sma_rising
+        in_run = self.runs.start >= 0
+        with np.errstate(invalid='ignore', divide='ignore'):
+            top = s['consolidation_high']
+            tight = (top > 0) & (
+                (top - s['consolidation_low']) / top * 100 < CONSOLIDATION_TIGHT_PCT + ARCHIVABLE_SLACK
+            )
+            near = np.zeros(len(self.closes), dtype=bool)
+            for days in BREAKOUT_WINDOWS:
+                high = s[f'high_{days}d']
+                distance = (high - self.closes) / high * 100
+                near |= (high > 0) & (distance >= -ARCHIVABLE_SLACK) & (distance <= PROXIMITY_PCT + ARCHIVABLE_SLACK)
+        watchlist = c.above_sma & c.sma_rising & tight & near
+        return self.runs.phase.astype(bool) | (~in_run & (score >= NEAR_MISS_CONDITIONS)) | watchlist
 
     def criteria_at(self, row: int, benchmark: Mapping[date, float]) -> StockCriteria:
         """
@@ -279,6 +310,7 @@ class TickerReplay:
             invalidation_distance_pct=position.invalidation_pct,
             sessions_since_breakout=position.sessions,
             breakout_phase=self.runs.phase[row],
+            in_breakout_run=bool(self.runs.start[row] >= 0),
         )
 
 

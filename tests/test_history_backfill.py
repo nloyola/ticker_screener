@@ -1,8 +1,9 @@
 """
 backfill-history (app/history_backfill.py) replays the screener over the price history, with each indicator computed
-once over a ticker's whole history (app/replay.py), and archives the same signals, with the same values, as
-Analyzer.score_as_of gives on the history session by session; then it writes each backfill signal's path from the
-history (app/history_paths.py) and stores its outcomes from it.
+once over a ticker's whole history (app/replay.py), and archives the same records of every kind, signals, near-misses,
+watchlist records and continuations, with the same values, as Analyzer.score_as_of gives on the history session by
+session; then it writes each backfill record's path from the history (app/history_paths.py), as long as its kind's,
+and stores its outcomes from it, a continuation's from its breakout's path.
 """
 
 import argparse
@@ -16,14 +17,22 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.analyzer import BREAKOUT_SESSION, SCREENER_VERSION, SIGNAL_STATUSES, Analyzer
+from app.analyzer import BREAKOUT_SESSION, SCREENER_VERSION, SIGNAL_STATUSES, Analyzer, archive_kind
 from app.backfill import Backfill, market_dates, replayable_sessions
 from app.commands.backfill_history_cmd import BackfillHistoryCmd
 from app.db import init_db
 from app.history_backfill import HistoryBackfill
 from app.history_paths import HISTORY_ENDED, HistoryPaths
 from app.markets import BENCHMARKS, CANADA, US
-from app.models import NEVER_SCORED, NO_HISTORY, SHORT_HISTORY, UNSUPPORTED
+from app.models import (
+    CONTINUATION_KIND,
+    KINDS,
+    NEVER_SCORED,
+    NO_HISTORY,
+    SHORT_HISTORY,
+    SIGNAL_KIND,
+    UNSUPPORTED,
+)
 from app.price_apis import DailyPrice
 from app.replay import flat_days, run_lengths, unscored
 from app.repositories.backfill_run_repo import BackfillRunRepo
@@ -42,7 +51,7 @@ from app.screener_lock import screener_lock
 from app.services.sector_service import SectorService
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_outcomes import COST_BPS
-from app.signal_paths import HORIZONS, PATH_SESSIONS
+from app.signal_paths import HORIZONS, PATH_LENGTHS, PATH_SESSIONS, continuation_horizons, kind_horizons
 from tests.test_issuer_repo import add_issuer
 
 NEW_YORK = ZoneInfo('America/New_York')
@@ -187,10 +196,16 @@ def container(path, tmp_path, prices, benchmarks) -> SimpleNamespace:
     return container
 
 
-def signals(path: str) -> list[dict]:
+def signals(path: str, kind: str | None = SIGNAL_KIND) -> list[dict]:
+    """The archived records of 'kind', a signal unless told otherwise, of every kind when it is None."""
     with sqlite3.connect(path) as con:
         con.row_factory = sqlite3.Row
-        return [dict(row) for row in con.execute('SELECT * FROM signal ORDER BY ticker, session_date, id')]
+        return [
+            dict(row)
+            for row in con.execute(
+                'SELECT * FROM signal WHERE ? IS NULL OR kind = ? ORDER BY ticker, session_date, id', (kind, kind)
+            )
+        ]
 
 
 def as_of_frame(prices: dict[str, list[DailyPrice]]) -> pd.DataFrame:
@@ -236,7 +251,7 @@ def test_backfill_archives_only_the_primary_listing_of_an_issuer(path, container
         for s in container.analyzer.score_as_of(session, frame, markets, closes)
     )
     assert ry_signals > 0
-    archived = {s['ticker'] for s in signals(path)}
+    archived = {s['ticker'] for s in signals(path, kind=None)}
     assert 'RY.TO' not in archived
     assert 'CCC' in archived
 
@@ -247,29 +262,45 @@ def test_backfill_archives_the_signals_score_as_of_gives_on_every_session(path, 
     frame = as_of_frame(prices)
     closes = {ticker: {p.date: p.close for p in rows} for ticker, rows in benchmarks.items()}
     sessions = replayable_sessions(market_dates(frame), EVENING)
+    # every record of every kind score_as_of gives, session by session, a continuation only once its breakout is
     expected = {}
+    breakouts = {}
     floored = 0
     for session, markets in sessions.items():
         for s in container.analyzer.score_as_of(session, frame, markets, closes):
             sc = s.criteria
             floored += sc.ticker == 'EEE' and sc.breakout_phase == BREAKOUT_SESSION and sc.status is None
-            if s.criteria.status in SIGNAL_STATUSES:
-                values = row_values(s.criteria, session)
-                expected[s.criteria.ticker, session.isoformat()] = (s.close, *(values[i] for i in _ARCHIVED_AT))
+            kind = archive_kind(sc)
+            breakout = None
+            if kind == CONTINUATION_KIND:
+                breakout = (sc.ticker, s.dates[len(s.dates) - 1 - sc.sessions_since_breakout].isoformat())
+                if breakout not in expected:
+                    continue
+            if kind is not None:
+                values = row_values(sc, session)
+                key = (sc.ticker, session.isoformat())
+                expected[key] = (kind, s.close, *(values[i] for i in _ARCHIVED_AT))
+                breakouts[key] = breakout
 
-    archived = signals(path)
-    actual = {(s['ticker'], s['session_date']): (s['close'], *(s[c] for c in _ARCHIVED)) for s in archived}
+    records = signals(path, kind=None)
+    by_id = {r['id']: (r['ticker'], r['session_date']) for r in records}
+    actual = {(r['ticker'], r['session_date']): (r['kind'], r['close'], *(r[c] for c in _ARCHIVED)) for r in records}
     assert actual == expected
-    assert {s['source'] for s in archived} == {'backfill'}
+    # each continuation links to the signal of its run's breakout
+    assert {(r['ticker'], r['session_date']): by_id.get(r['breakout_id']) for r in records} == breakouts
+    assert {r['kind'] for r in records} == set(KINDS)
+    assert result.records == {kind: sum(r['kind'] == kind for r in records) for kind in KINDS}
+    archived = signals(path)
+    assert {s['source'] for s in records} == {'backfill'}
     # the run covers every case: both kinds of signal, in both markets, with the subsector comparison filled in
     assert {s['status'] for s in archived} == set(SIGNAL_STATUSES)
     assert {s['market'] for s in archived} == {US, CANADA}
     assert any(s['rs_sector_1m'] is not None for s in archived)
     assert any(s['ema_21w'] is not None for s in archived)
-    assert 'ZZZ' not in {s['ticker'] for s in archived}
-    # EEE breaks out, but below the liquidity floor: never archived
+    assert 'ZZZ' not in {s['ticker'] for s in records}
+    # EEE breaks out, but below the liquidity floor: never archived, of any kind
     assert floored > 0
-    assert 'EEE' not in {s['ticker'] for s in archived}
+    assert 'EEE' not in {s['ticker'] for s in records}
 
     assert (result.sessions, result.first, result.last) == (len(sessions), min(sessions), max(sessions))
     assert result.tickers == 11
@@ -284,13 +315,13 @@ def test_backfill_archives_the_signals_score_as_of_gives_on_every_session(path, 
 
 def test_a_second_backfill_adds_nothing(path, container):
     first = container.history_backfill.run()
-    archived = signals(path)
+    archived = signals(path, kind=None)
     assert first.signals > 0
 
     again = container.history_backfill.run()
 
-    assert (again.signals, again.relinked) == (0, 0)
-    assert signals(path) == archived
+    assert (again.signals, again.relinked, sum(again.records.values())) == (0, 0, 0)
+    assert signals(path, kind=None) == archived
 
 
 def test_the_unscored_rows_are_those_a_run_skips():
@@ -325,31 +356,48 @@ def rows_of(path: str, sql: str, *params) -> list[tuple]:
         return con.execute(sql, params).fetchall()
 
 
-def test_every_backfill_signal_120_sessions_old_has_six_completed_outcomes(path, container, prices):
+def test_every_backfill_record_as_old_as_its_path_has_every_outcome_of_its_kind(path, container, prices):
     result = container.history_backfill.run()
 
-    archived = signals(path)
-    assert result.paths.written == len(archived)
-    old = 0
-    for s in archived:
-        days = [p.date.isoformat() for p in prices[s['ticker']]]
-        after = len(days) - 1 - days.index(s['session_date'])
+    records = signals(path, kind=None)
+    owned = [r for r in records if r['kind'] != CONTINUATION_KIND]
+    assert result.paths.written == len(owned)
+    old = {kind: 0 for kind in KINDS}
+    for r in records:
+        days = [p.date.isoformat() for p in prices[r['ticker']]]
+        after = len(days) - 1 - days.index(r['session_date'])
         complete = rows_of(
-            path, "SELECT horizon FROM signal_outcome WHERE signal_id = ? AND status = 'complete' ORDER BY 1", s['id']
+            path, "SELECT horizon FROM signal_outcome WHERE signal_id = ? AND status = 'complete' ORDER BY 1", r['id']
         )
-        frozen = rows_of(path, 'SELECT path_frozen_at FROM signal_track WHERE signal_id = ?', s['id'])[0][0]
-        stored = rows_of(path, 'SELECT session_date FROM signal_price WHERE signal_id = ? ORDER BY 1', s['id'])
-        assert [d for (d,) in stored] == days[days.index(s['session_date']) :][: PATH_SESSIONS + 1]
-        if after >= PATH_SESSIONS:
-            old += 1
-            assert [h for (h,) in complete] == list(HORIZONS)
+        stored = rows_of(path, 'SELECT session_date FROM signal_price WHERE signal_id = ? ORDER BY 1', r['id'])
+        if r['kind'] == CONTINUATION_KIND:
+            # no path of its own: measured on its breakout's from its own session, at the horizons it reaches
+            k = r['sessions_since_breakout']
+            assert stored == []
+            assert rows_of(path, 'SELECT COUNT(*) FROM signal_track WHERE signal_id = ?', r['id']) == [(0,)]
+            assert [h for (h,) in complete] == [h for h in continuation_horizons(k) if h <= after]
+            old[r['kind']] += after >= PATH_SESSIONS - k
+            continue
+        length = PATH_LENGTHS[r['kind']]
+        frozen = rows_of(path, 'SELECT path_frozen_at FROM signal_track WHERE signal_id = ?', r['id'])[0][0]
+        assert [d for (d,) in stored] == days[days.index(r['session_date']) :][: length + 1]
+        if after >= length:
+            old[r['kind']] += 1
+            assert [h for (h,) in complete] == list(kind_horizons(r['kind']))
             assert frozen is not None
         else:
             # a path reaching the history's last session is left for run-refresh to carry on, nothing ended
-            assert [h for (h,) in complete] == [h for h in HORIZONS if h <= after]
+            assert [h for (h,) in complete] == [h for h in kind_horizons(r['kind']) if h <= after]
             assert frozen is None
-    assert old > 0
-    assert old < len(archived)
+    # every kind has records old enough for all its horizons, and signals younger than theirs
+    assert all(old.values()), old
+    assert old[SIGNAL_KIND] < len(signals(path))
+    # only a signal has a breakout failure
+    assert rows_of(
+        path,
+        'SELECT COUNT(*) FROM signal_track t JOIN signal s ON s.id = t.signal_id '
+        "WHERE s.kind <> 'signal' AND (t.breakout_level IS NOT NULL OR t.breakout_failed IS NOT NULL)",
+    ) == [(0,)]
     assert rows_of(path, "SELECT COUNT(*) FROM signal_outcome WHERE status = 'ended'") == [(0,)]
     assert (
         result.outcomes.completed
@@ -415,6 +463,22 @@ def test_a_signal_whose_tickers_history_stops_early_is_ended(path, container, pr
             s['id'],
         )
         assert ended == [(h, HISTORY_ENDED, last.isoformat()) for h in HORIZONS if h > reached]
+    # so are its continuations' horizons that the breakout's path does not reach
+    continued = 0
+    for c in signals(path, kind=CONTINUATION_KIND):
+        breakout = next((s for s in young if s['id'] == c['breakout_id']), None)
+        if breakout is None:
+            continue
+        continued += 1
+        reached = len(days) - 1 - days.index(breakout['session_date'])
+        k = c['sessions_since_breakout']
+        ended = rows_of(
+            path,
+            "SELECT horizon FROM signal_outcome WHERE signal_id = ? AND status = 'ended' ORDER BY horizon",
+            c['id'],
+        )
+        assert [h for (h,) in ended] == [h for h in continuation_horizons(k) if k + h > reached]
+    assert continued > 0
     # every other ticker's history reaches its market's last session: nothing else is ended
     others = rows_of(
         path,

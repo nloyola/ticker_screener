@@ -14,7 +14,7 @@ from app.container import Container
 from app.markets import BENCHMARKS, MARKETS, last_complete_session, market_of
 from app.models import PathSession
 from app.repositories.history_repo import BENCHMARK, TICKER
-from app.signal_paths import HORIZONS, PATH_SESSIONS, build_path
+from app.signal_paths import PATH_LENGTHS, build_path, ended_horizons
 
 if TYPE_CHECKING:
     from app.repositories.history_repo import HistoryRepo
@@ -47,15 +47,16 @@ class HistoryPaths:
 
     def update(self, now: datetime) -> HistoryPathUpdate:
         """
-        Writes the path of every backfill signal not yet frozen whose ticker has a history, from that history and its
-        market's benchmark's, as SignalPaths.update writes a path from price_data: whole, from the signal session to
-        its market's last complete session at 'now' (timezone aware), or to PATH_SESSIONS sessions after it, when it
-        is frozen and no later run rewrites it.
+        Writes the path of every backfill record not yet frozen whose ticker has a history, of every kind with a path
+        of its own (all but a continuation), from that history and its market's benchmark's, as SignalPaths.update
+        writes a path from price_data: whole, from the record's session to its market's last complete session at
+        'now' (timezone aware), or to its kind's PATH_LENGTHS after it, when it is frozen and no later run rewrites it.
 
         A path that stops at its market's last session in the history is left for run-refresh to carry on from
         price_data. One whose ticker's history stops earlier keeps that path, and each horizon it does not reach is
         marked ended (HISTORY_ENDED) with its last session, as SignalPaths.update ends a signal whose ticker the run
-        got no prices for. A signal whose session is not in its ticker's history keeps the path it has, if any.
+        got no prices for, and so is each horizon of its continuations that the path does not reach. A signal whose
+        session is not in its ticker's history keeps the path it has, if any.
 
         A live signal, and a backfill signal whose ticker has no history, is left to run-refresh. The paths of one
         ticker are written in one transaction. Logs one summary line and returns the counts.
@@ -86,22 +87,24 @@ class HistoryPaths:
             rows = self.history_repo.prices(TICKER, ticker)
             paths: list[tuple[int, list[PathSession], bool]] = []
             ends: list[tuple[int, list[int], str, date]] = []
+            continuation_ends: list[tuple[int, int, str, date]] = []
             for s in ticker_signals:
-                path = build_path(s.session_date, rows, benchmarks[market], last_sessions[market])
+                length = PATH_LENGTHS[s.kind]
+                path = build_path(s.session_date, rows, benchmarks[market], last_sessions[market], length)
                 if path is None:
                     result.missing_session += 1
                     continue
                 last = path[-1]
-                frozen = last.session_index == PATH_SESSIONS
+                frozen = last.session_index == length
                 paths.append((s.id, path, frozen))
                 result.frozen += int(frozen)
                 if not frozen and last.session_date < history_ends[market]:
-                    ends.append(
-                        (s.id, [h for h in HORIZONS if h > last.session_index], HISTORY_ENDED, last.session_date)
-                    )
-            # the ended horizons after the paths: writing a path clears the signal's ended horizons
+                    ends.append((s.id, ended_horizons(s.kind, last.session_index), HISTORY_ENDED, last.session_date))
+                    continuation_ends.append((s.id, last.session_index, HISTORY_ENDED, last.session_date))
+            # the ended horizons after the paths: writing a path clears the ended horizons of it and its continuations
             self.signal_path_repo.write_all(paths)
             self.signal_path_repo.end_all(ends)
+            self.signal_path_repo.end_continuations(continuation_ends)
             result.written += len(paths)
             result.ended += len(ends)
 

@@ -1,18 +1,21 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 
 from app.container import Container
 from app.db import connect
+from app.models import CONTINUATION_KIND, NEAR_MISS_KIND, SIGNAL_KIND, WATCHLIST_KIND
 from app.signal_outcomes import BreakoutFailure, HorizonOutcome
-from app.signal_paths import HORIZONS
+from app.signal_paths import HORIZONS, PATH_LENGTHS, PATH_SESSIONS
 
 
 @dataclass(frozen=True)
 class OutcomeSignal:
     """
-    A signal with a path whose outcomes are not all decided, with what its archived row says about the breakout,
+    A record with a path whose outcomes are not all decided, with what its archived row says about the breakout,
     the horizons it already has complete, those of them stored without the benchmark's return that its path now
-    holds the benchmark prices for, and whether its breakout failure is decided.
+    holds the benchmark prices for, and whether its breakout failure is decided, which only a signal has. A
+    continuation's path is its breakout's ('breakout_id'), read from 'offset', its sessions since the breakout.
     """
 
     id: int
@@ -23,47 +26,79 @@ class OutcomeSignal:
     complete: frozenset[int]
     failure_decided: bool
     benchmark_due: frozenset[int] = frozenset()
+    kind: str = SIGNAL_KIND
+    session_date: date | None = None
+    breakout_id: int | None = None
+    offset: int = 0
+
+    @property
+    def path_id(self) -> int:
+        """The id of the record whose path the outcomes are measured on: the breakout's for a continuation."""
+        return self.breakout_id if self.breakout_id is not None else self.id
 
 
 class SignalOutcomeRepo:
-    """Each signal's outcome per horizon (signal_outcome) and its breakout failure (signal_track)."""
+    """Each record's outcome per horizon (signal_outcome) and a signal's breakout failure (signal_track)."""
 
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
     def undecided(self) -> list[OutcomeSignal]:
         """
-        Every signal with a path in signal_price that lacks a complete outcome at some horizon, whose breakout
-        failure is not decided yet, or with a complete outcome stored without the benchmark's return whose entry and
-        exit sessions now have the benchmark prices in the path, oldest session first.
+        Every record whose path is in signal_price, its own or, for a continuation, its breakout's, that lacks a
+        complete outcome at some horizon its kind is measured at (kind_horizons and continuation_horizons in
+        app/signal_paths.py), a signal whose breakout failure is not decided yet, or a record with a complete outcome
+        stored without the benchmark's return whose entry and exit sessions now have the benchmark prices in the path,
+        oldest session first.
         """
+        horizons = ', '.join('(?)' for _ in HORIZONS)
         with connect(self.db_path) as con:
             rows = con.execute(
                 f"""
-                WITH benchmark_due AS (
+                WITH horizon (h) AS (VALUES {horizons}),
+                benchmark_due AS (
                     SELECT o.signal_id, group_concat(o.horizon) AS horizons
                     FROM signal_outcome o
-                    JOIN signal_price pe ON pe.signal_id = o.signal_id AND pe.session_date = o.entry_date
-                    JOIN signal_price px ON px.signal_id = o.signal_id AND px.session_date = o.exit_date
+                    JOIN signal so ON so.id = o.signal_id
+                    JOIN signal_price pe
+                      ON pe.signal_id = COALESCE(so.breakout_id, so.id) AND pe.session_date = o.entry_date
+                    JOIN signal_price px
+                      ON px.signal_id = COALESCE(so.breakout_id, so.id) AND px.session_date = o.exit_date
                     WHERE o.status = 'complete' AND o.benchmark_return_pct IS NULL
                       AND COALESCE(pe.benchmark_open, pe.benchmark_close) IS NOT NULL
                       AND px.benchmark_close IS NOT NULL
                     GROUP BY o.signal_id
                 )
-                SELECT s.id, s.close, s.high_20d, s.high_60d, s.breakout_60d, t.breakout_failed,
+                SELECT s.id, s.kind, s.session_date, s.close, s.high_20d, s.high_60d, s.breakout_60d, s.breakout_id,
+                       s.sessions_since_breakout, t.breakout_failed,
                        (SELECT group_concat(o.horizon) FROM signal_outcome o
                         WHERE o.signal_id = s.id AND o.status = 'complete') AS complete,
                        d.horizons AS benchmark_due
                 FROM signal s
-                JOIN signal_track t ON t.signal_id = s.id
+                LEFT JOIN signal_track t ON t.signal_id = s.id
                 LEFT JOIN benchmark_due d ON d.signal_id = s.id
-                WHERE EXISTS (SELECT 1 FROM signal_price p WHERE p.signal_id = s.id)
-                  AND (t.breakout_failed IS NULL
+                WHERE EXISTS (SELECT 1 FROM signal_price p WHERE p.signal_id = COALESCE(s.breakout_id, s.id))
+                  AND ((s.kind = ? AND t.breakout_failed IS NULL)
                        OR d.signal_id IS NOT NULL
                        OR (SELECT COUNT(*) FROM signal_outcome o
-                           WHERE o.signal_id = s.id AND o.status = 'complete') < {len(HORIZONS)})
+                           WHERE o.signal_id = s.id AND o.status = 'complete')
+                          < (SELECT COUNT(*) FROM horizon WHERE h <= CASE s.kind
+                                WHEN ? THEN ? WHEN ? THEN ? WHEN ? THEN ? WHEN ? THEN ? - s.sessions_since_breakout
+                             END))
                 ORDER BY s.session_date, s.id
-                """
+                """,
+                [
+                    *HORIZONS,
+                    SIGNAL_KIND,
+                    SIGNAL_KIND,
+                    PATH_LENGTHS[SIGNAL_KIND],
+                    NEAR_MISS_KIND,
+                    PATH_LENGTHS[NEAR_MISS_KIND],
+                    WATCHLIST_KIND,
+                    PATH_LENGTHS[WATCHLIST_KIND],
+                    CONTINUATION_KIND,
+                    PATH_SESSIONS,
+                ],
             ).fetchall()
         return [
             OutcomeSignal(
@@ -75,6 +110,10 @@ class SignalOutcomeRepo:
                 complete=_horizons(row['complete']),
                 failure_decided=row['breakout_failed'] is not None,
                 benchmark_due=_horizons(row['benchmark_due']),
+                kind=row['kind'],
+                session_date=date.fromisoformat(row['session_date']),
+                breakout_id=row['breakout_id'],
+                offset=row['sessions_since_breakout'] if row['kind'] == CONTINUATION_KIND else 0,
             )
             for row in rows
         ]

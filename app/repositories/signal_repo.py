@@ -1,10 +1,11 @@
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
 from app.container import Container
 from app.db import connect
-from app.models import Signal
+from app.models import SIGNAL_KIND, Signal
 from app.repositories.stock_criteria_repo import COLUMNS as CRITERIA_COLUMNS
 from app.repositories.stock_criteria_repo import row_values
 
@@ -27,6 +28,8 @@ _OWN = (
     'source',
     'previous_signal_id',
     'trading_days_since_previous',
+    'kind',
+    'breakout_id',
 )
 
 # the names of the subsector with the given id and of its sector, when the signal is stored
@@ -55,6 +58,8 @@ def _values(s: Signal) -> tuple:
         s.source,
         s.previous_signal_id,
         s.trading_days_since_previous,
+        s.kind,
+        s.breakout_id,
         subsector_id,
         subsector_id,
         *(criteria[i] for i in _ARCHIVED_AT),
@@ -73,7 +78,10 @@ class SignalLink:
 
 
 class SignalRepo:
-    """The append-only archive of confirmed breakouts, one row per ticker, session and screener version."""
+    """
+    The append-only signal archive, one record per ticker, session and screener version, each of one kind (KINDS in
+    app/models.py). The links between signals, previous and links, read signals alone.
+    """
 
     def __init__(self, container: Container):
         self.db_path = container.db_path
@@ -82,21 +90,30 @@ class SignalRepo:
         """The id and session date of the ticker's latest signal on a session before 'before', of any version."""
         with connect(self.db_path) as con:
             row = con.execute(
-                'SELECT id, session_date FROM signal WHERE ticker = ? AND session_date < ? '
+                'SELECT id, session_date FROM signal WHERE ticker = ? AND session_date < ? AND kind = ? '
                 'ORDER BY session_date DESC, id DESC LIMIT 1',
-                (ticker, before.isoformat()),
+                (ticker, before.isoformat(), SIGNAL_KIND),
             ).fetchone()
         return (row['id'], date.fromisoformat(row['session_date'])) if row else None
 
-    def archive(self, signals: Iterable[Signal]) -> int:
-        """
-        Stores each signal, leaving one already archived for its ticker, session and version as it was, and returns
-        how many it stored.
-        """
-        stored = 0
+    def breakout(self, ticker: str, session_date: date, screener_version: str) -> int | None:
+        """The id of the ticker's signal on 'session_date' under 'screener_version', None when none is archived."""
         with connect(self.db_path) as con:
-            for s in signals:
-                stored += con.execute(_INSERT, _values(s)).rowcount
+            row = con.execute(
+                'SELECT id FROM signal WHERE ticker = ? AND session_date = ? AND screener_version = ? AND kind = ?',
+                (ticker, session_date.isoformat(), screener_version, SIGNAL_KIND),
+            ).fetchone()
+        return row['id'] if row else None
+
+    def archive(self, records: Iterable[Signal]) -> Counter[str]:
+        """
+        Stores each record, leaving one already archived for its ticker, session and version as it was, whatever its
+        kind, and returns how many it stored of each kind.
+        """
+        stored: Counter[str] = Counter()
+        with connect(self.db_path) as con:
+            for s in records:
+                stored[s.kind] += con.execute(_INSERT, _values(s)).rowcount
         return stored
 
     def links(self, tickers: Iterable[str]) -> list[SignalLink]:
@@ -107,8 +124,8 @@ class SignalRepo:
         with connect(self.db_path) as con:
             rows = con.execute(
                 'SELECT id, ticker, session_date, previous_signal_id, trading_days_since_previous FROM signal '
-                f'WHERE ticker IN ({",".join(["?"] * len(tickers))}) ORDER BY ticker, session_date, id',
-                tickers,
+                f'WHERE ticker IN ({",".join(["?"] * len(tickers))}) AND kind = ? ORDER BY ticker, session_date, id',
+                [*tickers, SIGNAL_KIND],
             ).fetchall()
         return [
             SignalLink(

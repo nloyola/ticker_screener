@@ -6,6 +6,7 @@ for every listed ticker that can be scored on it, with its signals archived in t
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
@@ -16,11 +17,11 @@ import pandas as pd
 
 from app.analyzer import (
     BACKFILL,
-    BREAKOUT_SESSION,
     SCREENER_VERSION,
-    SIGNAL_STATUSES,
     Analyzer,
     Scored,
+    archive_kind,
+    describe_records,
     rule_settings,
     subsector_medians,
     utc_now,
@@ -32,7 +33,7 @@ from app.container import Container
 from app.history_fetch import SHORT_HISTORY_SLACK, history_start
 from app.history_paths import HistoryPathUpdate
 from app.markets import BENCHMARKS, MARKET_CLOSES, MARKETS, US, UnsupportedTicker, market_of
-from app.models import NEVER_SCORED, NO_HISTORY, SHORT_HISTORY, UNSUPPORTED, BackfillRun
+from app.models import NEVER_SCORED, NO_HISTORY, SHORT_HISTORY, SIGNAL_KIND, UNSUPPORTED, BackfillRun
 from app.provenance import git_commit
 from app.replay import TickerReplay, ticker_replay
 from app.repositories.history_repo import BENCHMARK, TICKER
@@ -64,6 +65,8 @@ class HistoryBackfillResult:
     last: date | None = None
     tickers: int = 0
     signals: int = 0
+    # the records archived of each kind (KINDS in app/models.py), the signals among them
+    records: Counter[str] = field(default_factory=Counter)
     relinked: int = 0
     # listed tickers with no stored history, and those with an exchange suffix no market has
     no_history: list[str] = field(default_factory=list)
@@ -153,14 +156,14 @@ class HistoryBackfill:
         archived_tickers: set[str] = set()
         scored: set[str] = set()
         for done, (subsector_id, tickers) in enumerate(by_subsector.items(), start=1):
-            signals = self._subsector_signals(subsector_id, tickers, replayable, benchmarks, scored)
+            records = self._subsectordescribe_records(subsector_id, tickers, replayable, benchmarks, scored)
             result.tickers += len(tickers)
-            stored_count = self._archive(signals, settings, commit, archived_tickers)
-            result.signals += stored_count
+            stored = self._archive(records, settings, commit, archived_tickers)
+            result.records.update(stored)
+            result.signals += stored[SIGNAL_KIND]
             print(
                 f'backfill-history {done}/{len(by_subsector)}: subsector {subsector_id}, '
-                f'{len(tickers)} ticker{"" if len(tickers) == 1 else "s"}, '
-                f'archived {stored_count} new signal{"" if stored_count == 1 else "s"}',
+                f'{len(tickers)} ticker{"" if len(tickers) == 1 else "s"}, archived {describe_records(stored)}',
                 flush=True,
             )
 
@@ -233,7 +236,7 @@ class HistoryBackfill:
     def _dates(self, ticker: str) -> pd.Index:
         return pd.Index([p.date for p in self.history_repo.prices(TICKER, ticker)])
 
-    def _subsector_signals(
+    def _subsectordescribe_records(
         self,
         subsector_id: int,
         tickers: list[str],
@@ -242,13 +245,13 @@ class HistoryBackfill:
         scored: set[str],
     ) -> list[Scored]:
         """
-        The signals of the subsector's tickers on every replayable session, oldest first; adds the tickers scored on
-        at least one session to 'scored'. Each ticker is scored on each session of its market it can be scored on,
-        compared with the median returns of the subsector's tickers scored on that session, and kept when its status
-        makes it a signal.
+        The sessions of the subsector's tickers the signal archive keeps (archive_kind), on every replayable session,
+        oldest first; adds the tickers scored on at least one session to 'scored'. Each ticker is scored on each
+        session of its market it can be scored on, compared with the median returns of the subsector's tickers scored
+        on that session, and kept when its status and values make it a record of some kind.
         """
         replays: list[tuple[str, TickerReplay, np.ndarray]] = []
-        # the breakout sessions, the only ones that can be signals: (replay index, row)
+        # the sessions that can be archived (TickerReplay.archivable): (replay index, row)
         candidates: list[tuple[int, int]] = []
         for ticker in tickers:
             market = market_of(ticker)
@@ -258,8 +261,8 @@ class HistoryBackfill:
             if included.any():
                 scored.add(ticker)
             replays.append((market, replay, ordinals))
-            breakouts = np.flatnonzero(included & (replay.runs.phase == BREAKOUT_SESSION))
-            candidates.extend((len(replays) - 1, int(row)) for row in breakouts)
+            rows = np.flatnonzero(included & replay.archivable())
+            candidates.extend((len(replays) - 1, int(row)) for row in rows)
         if not candidates:
             return []
 
@@ -275,35 +278,36 @@ class HistoryBackfill:
                 )
         medians = {day: subsector_medians(values) for day, values in returns.items()}
 
-        signals: list[Scored] = []
+        records: list[Scored] = []
         for i, row in candidates:
             market, replay, ordinals = replays[i]
             criteria = replay.criteria_at(row, benchmarks[BENCHMARKS[market]])
             criteria = with_status(with_subsector_medians(criteria, medians[int(ordinals[row])]))
-            if criteria.status in SIGNAL_STATUSES:
+            if archive_kind(criteria) is not None:
                 session = replay.dates[row]
-                signals.append(Scored(criteria, market, session, float(replay.closes[row]), replay.dates[: row + 1]))
-        signals.sort(key=lambda s: (s.session_date, s.criteria.ticker))
-        return signals
+                records.append(Scored(criteria, market, session, float(replay.closes[row]), replay.dates[: row + 1]))
+        records.sort(key=lambda s: (s.session_date, s.criteria.ticker))
+        return records
 
-    def _archive(self, signals: list[Scored], settings: str, commit: str | None, tickers: set[str]) -> int:
+    def _archive(self, records: list[Scored], settings: str, commit: str | None, tickers: set[str]) -> Counter[str]:
         """
-        Archives 'signals', oldest first, one session at a time, so each links to the ticker's previous one; adds
-        the tickers of those archived to 'tickers'. Returns how many it archived.
+        Archives 'records', oldest first, one session at a time, so each signal links to the ticker's previous one
+        and each continuation to its breakout, archived on an earlier session; adds the tickers of the signals
+        archived to 'tickers'. Returns how many it archived of each kind.
         """
-        archived = 0
+        archived: Counter[str] = Counter()
         non_primary = self.analyzer.issuer_repo.non_primary()
         by_session: dict[date, list[Scored]] = {}
-        for s in signals:
+        for s in records:
             by_session.setdefault(s.session_date, []).append(s)
-        for session_signals in by_session.values():
+        for session_records in by_session.values():
             with quiet('app.analyzer'):
                 stored = self.analyzer.archive_signals(
-                    session_signals, None, settings, commit, source=BACKFILL, non_primary=non_primary
+                    session_records, None, settings, commit, source=BACKFILL, non_primary=non_primary
                 )
-            if stored:
-                archived += stored
-                tickers.update(s.criteria.ticker for s in session_signals)
+            archived.update(stored)
+            if stored[SIGNAL_KIND]:
+                tickers.update(s.criteria.ticker for s in session_records if archive_kind(s.criteria) == SIGNAL_KIND)
         return archived
 
 
@@ -317,7 +321,7 @@ def summarize(result: HistoryBackfillResult) -> None:
         sessions += f' ({result.first} to {result.last})'
     print(
         f'backfill-history: replayed {sessions} of {result.tickers} ticker{"" if result.tickers == 1 else "s"}, '
-        f'archived {result.signals} new signal{"" if result.signals == 1 else "s"}, '
+        f'archived {describe_records(result.records)}, '
         f'relinked {result.relinked} later signal{"" if result.relinked == 1 else "s"}, '
         f'in {result.seconds:.0f}s'
     )

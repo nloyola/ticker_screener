@@ -18,6 +18,7 @@ highs and indicators have closed forms. Each day's high equals its close unless 
   reference_macd below, written out from the definitions rather than with the library the analyzer uses.
 """
 
+from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
@@ -76,9 +77,12 @@ class FakeSignalRepo:
     def previous(self, ticker: str, before: date) -> None:
         return None
 
-    def archive(self, signals) -> int:
-        self.archived.extend(signals)
-        return len(signals)
+    def breakout(self, ticker: str, session_date: date, screener_version: str) -> None:
+        return None
+
+    def archive(self, records) -> Counter[str]:
+        self.archived.extend(records)
+        return Counter(r.kind for r in records)
 
 
 class FakeIssuerRepo:

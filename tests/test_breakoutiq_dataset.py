@@ -330,6 +330,30 @@ def test_the_dataset_reads_one_screener_version(db):
     assert list(later['signal_id']) == [2] and list(later['volume_ratio']) == [9.0]
 
 
+def test_the_dataset_reads_the_signals_alone_of_the_archives_kinds(db):
+    day = date(2020, 1, 2)
+    _add_signal(db.db_path, 1, day)
+    _add_signal(db.db_path, 2, day, status=None, kind='near_miss')
+    _add_signal(db.db_path, 3, day, status='pre_breakout', kind='watchlist')
+    _add_signal(
+        db.db_path,
+        4,
+        date(2020, 1, 3),
+        ticker='T1',
+        status='extended',
+        kind='continuation',
+        breakout_id=1,
+        sessions_since_breakout=1,
+    )
+    for signal_id in (1, 2, 3, 4):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+
+    rows = load_dataset(db, with_history=False)
+
+    assert list(rows['signal_id']) == [1]
+    assert not {'kind', 'breakout_id'} & set(rows.columns)
+
+
 def test_a_missing_history_stops_the_dataset_and_creates_no_file(db, tmp_path):
     db.history_db_path = str(tmp_path / 'nowhere.db')
     _add_signal(db.db_path, 1, date(2020, 1, 2))

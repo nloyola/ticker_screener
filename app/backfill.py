@@ -1,13 +1,14 @@
 """
 Seeding the signal archive from the stored prices: every session the price window can fully score is replayed with
-Analyzer.score_as_of, and its signals are archived as backfill.
+Analyzer.score_as_of, and the records of every kind it keeps are archived as backfill.
 """
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
@@ -17,15 +18,17 @@ from app.analyzer import (
     BACKFILL,
     EMA_MIN_PERIODS,
     LONG_SMA_DAYS,
-    SIGNAL_STATUSES,
     SMA_RISING_DAYS,
     Analyzer,
+    archive_kind,
+    describe_records,
     rule_settings,
     trading_days_between,
     utc_now,
 )
 from app.container import Container
 from app.markets import MARKETS, UnsupportedTicker, last_complete_session, market_of
+from app.models import SIGNAL_KIND
 from app.provenance import git_commit
 from app.repositories.signal_repo import SignalLink
 
@@ -44,11 +47,15 @@ REPLAY_MIN_WEEKS = EMA_MIN_PERIODS + 1
 
 @dataclass(frozen=True)
 class BackfillResult:
-    """How many sessions the backfill replayed, signals it archived and later signals it relinked."""
+    """
+    How many sessions the backfill replayed, signals it archived and later signals it relinked, and the records it
+    archived of each kind (KINDS in app/models.py), the signals among them.
+    """
 
     sessions: int
     signals: int
     relinked: int
+    records: Mapping[str, int] = field(default_factory=dict)
 
 
 def replayable_sessions(dates: Mapping[str, pd.Index], started_at: datetime) -> dict[date, tuple[str, ...]]:
@@ -105,9 +112,10 @@ class Backfill:
     def run(self) -> BackfillResult:
         """
         Replays every replayable session (replayable_sessions) oldest first, as a run on it would have scored it,
-        and archives its signals as backfill, with the current rules and commit and no run. Oldest first, each new
-        signal links to the ticker's previous one. A signal already archived for the ticker, session and version,
-        live or backfill, is left as it was, so a second backfill adds nothing.
+        and archives the records of every kind it keeps (archive_kind) as backfill, with the current rules and commit
+        and no run. Oldest first, each new signal links to the ticker's previous one, and each continuation to its
+        breakout. A record already archived for the ticker, session and version, live or backfill, is left as it was,
+        so a second backfill adds nothing.
 
         A signal archived before the backfill, on a session after one it archived, is relinked to the ticker's
         nearest earlier signal (relink). Prints one line per session and a summary.
@@ -120,7 +128,7 @@ class Backfill:
         settings = json.dumps(rule_settings(), sort_keys=True)
         commit = git_commit()
         non_primary = self.analyzer.issuer_repo.non_primary()
-        archived = 0
+        archived: Counter[str] = Counter()
         tickers: set[str] = set()
         for session, markets in sessions.items():
             with quiet('app.analyzer'):
@@ -128,20 +136,20 @@ class Backfill:
                 stored = self.analyzer.archive_signals(
                     scored, None, settings, commit, source=BACKFILL, non_primary=non_primary
                 )
-            archived += stored
-            if stored:
-                tickers.update(s.criteria.ticker for s in scored if s.criteria.status in SIGNAL_STATUSES)
+            archived.update(stored)
+            if stored[SIGNAL_KIND]:
+                tickers.update(s.criteria.ticker for s in scored if archive_kind(s.criteria) == SIGNAL_KIND)
             print(
                 f'{session} ({", ".join(markets)}): scored {len(scored)} ticker{"" if len(scored) == 1 else "s"}, '
-                f'archived {stored} new signal{"" if stored == 1 else "s"}'
+                f'archived {describe_records(stored)}'
             )
         relinked = self.relink(tickers, lambda ticker: prices.xs(ticker, level='ticker').index)
         print(
             f'backfill: replayed {len(sessions)} session{"" if len(sessions) == 1 else "s"}, '
-            f'archived {archived} new signal{"" if archived == 1 else "s"}, '
+            f'archived {describe_records(archived)}, '
             f'relinked {relinked} later signal{"" if relinked == 1 else "s"}'
         )
-        return BackfillResult(len(sessions), archived, relinked)
+        return BackfillResult(len(sessions), archived[SIGNAL_KIND], relinked, dict(archived))
 
     def relink(self, tickers: set[str], dates_of: Callable[[str], pd.Index]) -> int:
         """

@@ -17,7 +17,8 @@ ANALYZER_SOURCE = Path(analyzer.__file__).read_text()
 
 # The analyzer's module-level constants that are not rule settings: the version the snapshot travels with, the
 # names of the statuses and of a session's place in a breakout run, which label a result rather than decide it, and
-# the statuses archived as signals with the sources a signal is archived from, which say where a result is kept.
+# the statuses archived as signals with the sources a signal is archived from, and which sessions are archived beside
+# the signals and how a summary names each kind, which say where a result is kept.
 NOT_RULE_SETTINGS = {
     'SCREENER_VERSION',
     'HIGH_CONVICTION',
@@ -29,6 +30,8 @@ NOT_RULE_SETTINGS = {
     'SIGNAL_STATUSES',
     'LIVE',
     'BACKFILL',
+    'NEAR_MISS_CONDITIONS',
+    '_KIND_NAMES',
 }
 
 

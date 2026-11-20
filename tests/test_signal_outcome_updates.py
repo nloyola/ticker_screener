@@ -1,12 +1,14 @@
 """
-Storing each signal's outcomes after its path is updated (app/signal_outcome_updates.py): every newly complete
-horizon and the breakout failure once decided, never touching a complete row, the same rows whether run-refresh or
-compute-outcomes stores them.
+Storing each record's outcomes after its path is updated (app/signal_outcome_updates.py): every newly complete
+horizon and a signal's breakout failure once decided, never touching a complete row, the same rows whether
+run-refresh or compute-outcomes stores them; a near-miss's and a watchlist record's paths as long as their kinds', and
+a continuation measured on its breakout's path, ended with it.
 """
 
 import argparse
 import logging
 import sqlite3
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -23,7 +25,7 @@ from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_outcomes import compute_outcomes
-from app.signal_paths import HORIZONS, SignalPaths
+from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 
 NEW_YORK = ZoneInfo('America/New_York')
 FIRST = date(2026, 1, 5)  # a Monday
@@ -315,3 +317,121 @@ def test_a_signal_with_no_path_is_left_alone(path, container):
 
     assert result.signals == 0
     assert outcome_rows(path) == []
+
+
+def add_record(
+    path: str, record_id: int, kind: str, status: str | None, session: date, breakout_id=None, k=None
+) -> None:
+    """A record of 'kind' of AAA on 'session', closing at the session's rising close, with no breakout level."""
+    with sqlite3.connect(path) as con:
+        con.execute(
+            'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
+            'rule_settings, source, kind, breakout_id, sessions_since_breakout) '
+            "VALUES (?, 'AAA', 'US', 'America/New_York', ?, ?, ?, '1.0.0', '{}', 'live', ?, ?, ?)",
+            (record_id, session.isoformat(), rising(DAYS.index(session)), status, kind, breakout_id, k),
+        )
+
+
+def path_rows(path: str, record_id: int) -> int:
+    with sqlite3.connect(path) as con:
+        return con.execute('SELECT COUNT(*) FROM signal_price WHERE signal_id = ?', (record_id,)).fetchone()[0]
+
+
+def frozen(path: str, record_id: int) -> bool:
+    with sqlite3.connect(path) as con:
+        row = con.execute('SELECT path_frozen_at FROM signal_track WHERE signal_id = ?', (record_id,)).fetchone()
+    return row is not None and row[0] is not None
+
+
+@pytest.mark.parametrize(
+    ('kind', 'status', 'length', 'horizons'),
+    [('near_miss', None, 60, (5, 10, 20, 40, 60)), ('watchlist', 'pre_breakout', 20, (5, 10, 20))],
+)
+def test_a_records_path_is_as_long_as_its_kind_measures_and_it_has_no_failure(
+    path, container, kind, status, length, horizons
+):
+    store_prices(container, 'AAA', 200)
+    add_record(path, 1, kind, status, SIGNAL_DAY)
+
+    result = run(container, 200)
+
+    assert path_rows(path, 1) == length + 1
+    assert frozen(path, 1)
+    assert [(r[1], r[2]) for r in outcome_rows(path)] == [(h, 'complete') for h in horizons]
+    assert track(path, 1) == (None, None, None, 0)
+    assert (result.completed, result.decided, result.no_level) == (len(horizons), 0, 0)
+    # every outcome it is measured at is stored: the next run computes nothing for it
+    assert run(container, 200).signals == 0
+
+
+def test_a_continuation_is_measured_on_its_breakouts_path_from_its_own_session(path, container):
+    store_prices(container, 'AAA', 200)
+    add_signal(path, 1, 'AAA', close=110.0)
+    add_record(path, 2, 'continuation', 'extended', DAYS[13], breakout_id=1, k=3)
+
+    run(container, 200)
+
+    # no path or track of its own, and only the horizons the breakout's 120 sessions reach from 3 sessions in
+    assert path_rows(path, 2) == 0
+    assert track(path, 2) is None
+    rows = [r for r in outcome_rows(path, with_times=False) if r[0] == 2]
+    assert [(r[1], r[2]) for r in rows] == [(h, 'complete') for h in (5, 10, 20, 40, 60)]
+    breakout_path = container.signal_path_repo.path(1)
+    expected = compute_outcomes(
+        [replace(p, session_index=p.session_index - 3) for p in breakout_path[3:]], rising(13), None
+    )
+    for row, o in zip(rows, expected.horizons, strict=False):
+        assert row[3:14] == (
+            o.entry_date.isoformat(),
+            o.entry_price,
+            o.exit_date.isoformat(),
+            o.exit_price,
+            o.cost_bps,
+            o.gross_return_pct,
+            o.net_return_pct,
+            o.benchmark_return_pct,
+            o.excess_return_pct,
+            o.mfe_pct,
+            o.mae_pct,
+        )
+    # entry is the open of session 14, 4 after the breakout (113.5), the 5-session exit the close of session 18
+    assert (rows[0][3], rows[0][4], rows[0][5], rows[0][6]) == (
+        DAYS[14].isoformat(),
+        113.5,
+        DAYS[18].isoformat(),
+        118.0,
+    )
+
+
+def test_a_continuation_waits_for_its_breakouts_path_to_reach_it(path, container):
+    # the breakout's path runs to session 19: the continuation 3 sessions in reaches only its 5-session horizon
+    store_prices(container, 'AAA', 30)
+    add_signal(path, 1, 'AAA', close=110.0)
+    add_record(path, 2, 'continuation', 'extended', DAYS[13], breakout_id=1, k=3)
+
+    run(container, 30)
+
+    assert [(r[1], r[2]) for r in outcome_rows(path) if r[0] == 2] == [(5, 'complete'), (10, 'complete')]
+
+
+def test_a_continuation_ends_with_its_breakout_and_resumes_when_the_ticker_has_prices_again(path, container):
+    store_prices(container, 'AAA', 30)
+    add_signal(path, 1, 'AAA', close=110.0)
+    add_record(path, 2, 'continuation', 'extended', DAYS[13], breakout_id=1, k=3)
+    run(container, 30)
+    container.price_data_repo.replace_for_ticker('AAA', [])
+
+    run(container, 30)
+
+    # the breakout's path stops at session 19: the continuation's horizons beyond it, 3 + h > 19, end with it
+    ended = {(r[0], r[1]): (r[2], r[14]) for r in outcome_rows(path, with_times=False) if r[2] == 'ended'}
+    assert ended == {
+        **{(1, h): ('ended', REMOVED) for h in HORIZONS if h > 19},
+        **{(2, h): ('ended', REMOVED) for h in (20, 40, 60)},
+    }
+
+    store_prices(container, 'AAA', 40)
+    run(container, 40)
+
+    assert [r for r in outcome_rows(path) if r[2] == 'ended'] == []
+    assert [(r[1], r[2]) for r in outcome_rows(path) if r[0] == 2] == [(h, 'complete') for h in (5, 10, 20)]

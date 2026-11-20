@@ -1,7 +1,7 @@
 """
-The signal table, the breakout archive: every database gains it, a market data reset keeps its rows, it refuses rows
-that break its rules, and it keeps every value and flag column stock_criteria has, so a new indicator cannot miss
-the archive.
+The signal table, the signal archive: every database gains it, a market data reset keeps its rows, it refuses rows
+that break its rules, each kind of record with its own statuses and only a continuation linked to a breakout, and it
+keeps every value and flag column stock_criteria has, so a new indicator cannot miss the archive.
 """
 
 import os
@@ -56,8 +56,11 @@ def _query(db_path: str, sql: str) -> list[tuple]:
 
 
 def _schema_sql(db_path: str, name: str) -> str:
+    # a rebuilt table's stored CREATE statement quotes its new name, and the upgrade's columns and parentheses are laid
+    # out differently
     sql = _query(db_path, f"SELECT sql FROM sqlite_master WHERE name = '{name}'")[0][0]
-    return ' '.join(sql.replace('IF NOT EXISTS ', '').split())
+    sql = sql.replace('IF NOT EXISTS ', '').replace('"', '').replace('(', ' ( ').replace(')', ' ) ')
+    return ' '.join(sql.split())
 
 
 def _columns(db_path: str, table: str) -> dict[str, str]:
@@ -90,18 +93,20 @@ def version_10_db(tmp_path) -> str:
     return path
 
 
-def test_new_database_has_the_table_and_its_session_date_index(db_path):
+def test_new_database_has_the_table_and_its_indexes(db_path):
     assert _columns(db_path, 'signal')
     assert _query(db_path, "PRAGMA index_list('signal')")  # the unique index, which also serves lookups by ticker
     assert _query(db_path, "PRAGMA index_info('idx_signal_session_date')") == [(0, 5, 'session_date')]
+    breakout_id = list(_columns(db_path, 'signal')).index('breakout_id')
+    assert _query(db_path, "PRAGMA index_info('idx_signal_breakout_id')") == [(0, breakout_id, 'breakout_id')]
 
 
-def test_upgrade_adds_the_table_and_index(version_10_db, db_path):
+def test_upgrade_adds_the_table_and_indexes(version_10_db, db_path):
     upgrade_db(version_10_db)
 
     assert _query(version_10_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
-    assert _schema_sql(version_10_db, 'signal') == _schema_sql(db_path, 'signal')
-    assert _schema_sql(version_10_db, 'idx_signal_session_date') == _schema_sql(db_path, 'idx_signal_session_date')
+    for name in ('signal', 'idx_signal_session_date', 'idx_signal_breakout_id'):
+        assert _schema_sql(version_10_db, name) == _schema_sql(db_path, name)
 
 
 def test_signal_keeps_every_value_and_flag_column_of_stock_criteria(db_path):
@@ -183,3 +188,98 @@ def test_a_repeated_signal_must_point_at_a_signal_that_exists(db_path):
     # through connect(), as the repositories write: SQLite checks foreign keys only on connections that turn them on
     with pytest.raises(sqlite3.IntegrityError), connect(db_path) as con:
         con.execute(INSERT, (*ROW[:-2], 99, 5))
+
+
+KIND_INSERT = (
+    'INSERT INTO signal (ticker, market, time_zone, session_date, close, status, screener_version, rule_settings, '
+    'source, kind, breakout_id, sessions_since_breakout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+)
+
+
+def _record(session: str, status: str | None, kind: str, breakout_id: int | None = None, k: int | None = None):
+    return (
+        KIND_INSERT,
+        'XOM',
+        'US',
+        'America/New_York',
+        session,
+        110.5,
+        status,
+        '1.0.0',
+        '{}',
+        'live',
+        kind,
+        breakout_id,
+        k,
+    )
+
+
+def test_a_record_is_a_signal_unless_its_kind_says_otherwise(db_path):
+    _execute(db_path, (INSERT, *ROW))
+    assert _query(db_path, 'SELECT kind, breakout_id FROM signal') == [('signal', None)]
+
+
+@pytest.mark.parametrize(
+    ('status', 'kind'),
+    [
+        (None, 'near_miss'),
+        ('pre_breakout', 'near_miss'),
+        ('pre_breakout', 'watchlist'),
+        ('high_conviction', 'signal'),
+    ],
+)
+def test_each_kind_takes_its_statuses(db_path, status, kind):
+    _execute(db_path, _record('2026-11-13', status, kind))
+    assert _query(db_path, 'SELECT status, kind FROM signal') == [(status, kind)]
+
+
+def test_a_continuation_links_to_its_breakout(db_path):
+    _execute(db_path, (INSERT, *ROW), _record('2026-11-16', 'extended', 'continuation', 1, 1))
+    assert _query(db_path, "SELECT breakout_id, sessions_since_breakout FROM signal WHERE kind = 'continuation'") == [
+        (1, 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    'record',
+    [
+        ('2026-11-16', None, 'signal'),  # a signal has its status
+        ('2026-11-16', 'extended', 'signal'),
+        ('2026-11-16', 'confirmed', 'near_miss'),
+        ('2026-11-16', None, 'watchlist'),
+        ('2026-11-16', 'extended', 'watchlist'),
+        ('2026-11-16', None, 'continuation', 1, 1),
+        ('2026-11-16', 'extended', 'continuation'),  # a continuation without its breakout
+        ('2026-11-16', 'extended', 'continuation', 1, None),  # nor its sessions since it
+        ('2026-11-16', 'extended', 'continuation', 1, 0),
+        ('2026-11-16', 'pre_breakout', 'watchlist', 1, None),  # only a continuation has a breakout
+        ('2026-11-16', 'confirmed', 'breakout'),
+    ],
+)
+def test_signal_refuses_a_record_that_breaks_its_kinds_rules(db_path, record):
+    _execute(db_path, (INSERT, *ROW))
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(db_path, _record(*record))
+
+
+def test_only_a_signal_links_to_a_previous_signal(db_path):
+    _execute(db_path, (INSERT, *ROW))
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(
+            db_path,
+            (
+                'INSERT INTO signal (ticker, market, time_zone, session_date, close, status, screener_version, '
+                'rule_settings, source, previous_signal_id, trading_days_since_previous, kind) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                *ROW[:3],
+                '2026-11-20',
+                110.5,
+                'pre_breakout',
+                '1.0.0',
+                '{}',
+                'live',
+                1,
+                5,
+                'watchlist',
+            ),
+        )

@@ -6,6 +6,7 @@ signals archived as backfill, once, with values that match the prices on the ses
 import argparse
 import os
 import sqlite3
+from collections import Counter
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -132,10 +133,16 @@ def container(path) -> SimpleNamespace:
     return container
 
 
-def signals(path: str) -> list[dict]:
+def signals(path: str, kind: str | None = 'signal') -> list[dict]:
+    """The archived records of 'kind', a signal unless told otherwise, of every kind when it is None."""
     with sqlite3.connect(path) as con:
         con.row_factory = sqlite3.Row
-        return [dict(row) for row in con.execute('SELECT * FROM signal ORDER BY ticker, session_date, id')]
+        return [
+            dict(row)
+            for row in con.execute(
+                'SELECT * FROM signal WHERE ? IS NULL OR kind = ? ORDER BY ticker, session_date, id', (kind, kind)
+            )
+        ]
 
 
 def test_backfill_archives_each_replayable_sessions_signals_once(path, container, capsys):
@@ -151,8 +158,10 @@ def test_backfill_archives_each_replayable_sessions_signals_once(path, container
     assert {(s['source'], s['run_id']) for s in archived} == {('backfill', None)}
     assert {s['status'] for s in archived} <= {'confirmed', 'high_conviction'}
     assert (result.sessions, result.signals, result.relinked) == (SESSIONS - FIRST_REPLAYABLE, len(archived), 0)
+    records = signals(path, kind=None)
+    assert result.records == dict(Counter(s['kind'] for s in records))
     out = capsys.readouterr().out
-    assert f'backfill: replayed {SESSIONS - FIRST_REPLAYABLE} sessions, archived {len(archived)} new signals' in out
+    assert f'backfill: replayed {SESSIONS - FIRST_REPLAYABLE} sessions, archived {len(archived)} new signals, ' in out
     # no line per ticker scored
     assert 'generating criteria' not in out
 
@@ -166,7 +175,8 @@ def test_backfill_archives_each_replayable_sessions_signals_once(path, container
     again = container.backfill.run()
 
     assert (again.sessions, again.signals, again.relinked) == (SESSIONS - FIRST_REPLAYABLE, 0, 0)
-    assert signals(path) == archived
+    assert sum(again.records.values()) == 0
+    assert signals(path, kind=None) == records
 
 
 def test_replayed_signal_matches_the_prices_on_its_session(path, container):

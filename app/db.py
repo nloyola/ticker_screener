@@ -721,6 +721,152 @@ def _add_tier(con: sqlite3.Connection) -> None:
                 con.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
 
+def _add_signal_kind(con: sqlite3.Connection) -> None:
+    """
+    Version 20: signal becomes the archive of every kind of record (KINDS in app/models.py), gaining kind and
+    breakout_id, its status allowing the other kinds' statuses, and CHECKs tying each kind to its statuses, a
+    continuation to its breakout and the links between signals to signals. The rows archived before it are signals.
+    SQLite cannot change a column's CHECK, so the table is rebuilt as _allow_extended_status rebuilds stock_criteria:
+    every row copied with its id, the AUTOINCREMENT sequence kept, so the ids signal_price, signal_outcome and
+    signal_track point at stay valid. A table that already has kind is left as it is.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('signal')")}
+    if not columns or 'kind' in columns:
+        return  # schema.sql creates it this way
+    seq = con.execute("SELECT seq FROM sqlite_sequence WHERE name = 'signal'").fetchone()
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    con.execute("""
+        CREATE TABLE signal_new (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               ticker TEXT NOT NULL,
+               market TEXT NOT NULL CHECK (market IN ('US', 'Canada')),
+               exchange TEXT,
+               time_zone TEXT NOT NULL,
+               session_date TEXT NOT NULL CHECK (date(session_date) IS session_date),
+               close REAL NOT NULL,
+               sector TEXT,
+               subsector TEXT,
+               price REAL,
+               core_criteria_met BOOLEAN,
+               core_criteria_score INTEGER,
+               high_20d REAL,
+               high_60d REAL,
+               volume INTEGER,
+               avg_vol_20d INTEGER,
+               dma_50 REAL,
+               dma_50_prev_15d REAL,
+               rsi REAL,
+               macd REAL,
+               signal REAL,
+               breakout_20d INTEGER,
+               breakout_60d INTEGER,
+               breakout_confirmed INTEGER,
+               price_gt_50dma INTEGER,
+               dma_50_rising INTEGER,
+               rsi_50_70 INTEGER,
+               macd_above_signal INTEGER,
+               volume_ratio REAL,
+               macd_hist REAL,
+               macd_hist_prev REAL,
+               macd_days_above INTEGER,
+               macd_crossover INTEGER,
+               macd_hist_rising INTEGER,
+               dma_20 REAL,
+               dma_20_prev_15d REAL,
+               dma_200 REAL,
+               dma_200_prev_15d REAL,
+               price_gt_20dma INTEGER,
+               dma_20_rising INTEGER,
+               price_gt_200dma INTEGER,
+               dma_200_rising INTEGER,
+               ema_21 REAL,
+               ema_21_prev_5d REAL,
+               price_gt_21ema INTEGER,
+               ema_21_rising INTEGER,
+               ema_21w REAL,
+               ema_21w_prev_1w REAL,
+               price_gt_21wema INTEGER,
+               ema_21w_rising INTEGER,
+               close_position REAL,
+               close_upper_quarter INTEGER,
+               consolidation_range_pct REAL,
+               consolidation_tight INTEGER,
+               consolidation_vol_ratio REAL,
+               consolidation_vol_declining INTEGER,
+               dist_high_20d_pct REAL,
+               dist_high_60d_pct REAL,
+               near_resistance INTEGER,
+               return_1m_pct REAL,
+               return_3m_pct REAL,
+               rs_market_1m REAL,
+               rs_market_3m REAL,
+               rs_sector_1m REAL,
+               rs_sector_3m REAL,
+               outperforms_market_1m INTEGER,
+               outperforms_market_3m INTEGER,
+               outperforms_sector_1m INTEGER,
+               outperforms_sector_3m INTEGER,
+               secondary_passed INTEGER,
+               status TEXT CHECK (status IN ('high_conviction', 'confirmed', 'extended', 'pre_breakout')),
+               screener_version TEXT NOT NULL,
+               rule_settings TEXT NOT NULL CHECK (json_valid(rule_settings)),
+               git_commit TEXT,
+               run_id INTEGER,
+               source TEXT NOT NULL CHECK (source IN ('live', 'backfill')),
+               previous_signal_id INTEGER REFERENCES signal (id),
+               trading_days_since_previous INTEGER CHECK (trading_days_since_previous > 0),
+               archived_at TIMESTAMP NOT NULL DEFAULT (datetime('now')),
+               breakout_margin_pct REAL,
+               invalidation_distance_pct REAL,
+               sessions_since_breakout INTEGER,
+               avg_dollar_volume REAL,
+               high_120d REAL,
+               dist_high_120d_pct REAL,
+               breakout_120d INTEGER,
+               kind TEXT NOT NULL DEFAULT 'signal' CHECK (kind IN ('signal', 'near_miss', 'watchlist', 'continuation')),
+               breakout_id INTEGER REFERENCES signal (id),
+               CHECK ((previous_signal_id IS NULL) = (trading_days_since_previous IS NULL)),
+               CHECK ((kind = 'signal' AND (status IS 'high_conviction' OR status IS 'confirmed'))
+                      OR (kind = 'continuation' AND status IS 'extended')
+                      OR (kind = 'watchlist' AND status IS 'pre_breakout')
+                      OR (kind = 'near_miss' AND (status IS NULL OR status IS 'pre_breakout'))),
+               CHECK ((kind = 'continuation') = (breakout_id IS NOT NULL)),
+               CHECK (kind <> 'continuation' OR COALESCE(sessions_since_breakout, 0) > 0),
+               CHECK (kind = 'signal' OR previous_signal_id IS NULL),
+               UNIQUE (ticker, session_date, screener_version)
+        )""")
+    columns = """
+        id, ticker, market, exchange, time_zone, session_date, close, sector, subsector, price,
+        core_criteria_met, core_criteria_score, high_20d, high_60d, volume, avg_vol_20d, dma_50,
+        dma_50_prev_15d, rsi, macd, signal, breakout_20d, breakout_60d, breakout_confirmed, price_gt_50dma,
+        dma_50_rising, rsi_50_70, macd_above_signal, volume_ratio, macd_hist, macd_hist_prev, macd_days_above,
+        macd_crossover, macd_hist_rising, dma_20, dma_20_prev_15d, dma_200, dma_200_prev_15d, price_gt_20dma,
+        dma_20_rising, price_gt_200dma, dma_200_rising, ema_21, ema_21_prev_5d, price_gt_21ema, ema_21_rising,
+        ema_21w, ema_21w_prev_1w, price_gt_21wema, ema_21w_rising, close_position, close_upper_quarter,
+        consolidation_range_pct, consolidation_tight, consolidation_vol_ratio, consolidation_vol_declining,
+        dist_high_20d_pct, dist_high_60d_pct, near_resistance, return_1m_pct, return_3m_pct, rs_market_1m,
+        rs_market_3m, rs_sector_1m, rs_sector_3m, outperforms_market_1m, outperforms_market_3m,
+        outperforms_sector_1m, outperforms_sector_3m, secondary_passed, status, screener_version, rule_settings,
+        git_commit, run_id, source, previous_signal_id, trading_days_since_previous, archived_at,
+        breakout_margin_pct, invalidation_distance_pct, sessions_since_breakout, avg_dollar_volume, high_120d,
+        dist_high_120d_pct, breakout_120d
+    """
+    rows = con.execute(f'INSERT INTO signal_new ({columns}) SELECT {columns} FROM signal').rowcount
+    con.execute('DROP TABLE signal')
+    con.execute('ALTER TABLE signal_new RENAME TO signal')
+    con.execute('CREATE INDEX IF NOT EXISTS idx_signal_session_date ON signal(session_date)')
+    con.execute('CREATE INDEX IF NOT EXISTS idx_signal_breakout_id ON signal(breakout_id)')
+    if seq is not None:
+        # the copy set the sequence to the highest id copied, which is below the old one if the top rows were deleted
+        con.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'signal'", (seq[0],))
+        con.execute(
+            "INSERT INTO sqlite_sequence (name, seq) SELECT 'signal', ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'signal')",
+            (seq[0],),
+        )
+    logger.info('Rebuilt signal to archive every kind of record, keeping its %d signals', rows)
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -741,6 +887,7 @@ UPGRADES = (
     _add_breakout_position,
     _add_avg_dollar_volume,
     _add_tier,
+    _add_signal_kind,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

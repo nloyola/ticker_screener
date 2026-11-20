@@ -142,6 +142,9 @@ class StockCriteria:
     # the session's place in a breakout run, which decides its status (breakout_runs in app/analyzer.py): 'breakout',
     # 'extended' or None; not stored
     breakout_phase: str | None = None
+    # whether the session is in a breakout run, a breakout or a later session of its run, even one closing below the
+    # run's level, which decides whether it can be a near-miss (archive_kind in app/analyzer.py); not stored
+    in_breakout_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,11 +163,22 @@ class ScreenedSession:
     tickers_scored: int
 
 
+# The kinds of record the signal archive holds (GLOSSARY.md, "Signal archive"): a signal, a breakout session; a
+# near-miss, a session outside every breakout run meeting three of the four mandatory conditions, or all four without
+# the minimum margin; a session on the pre-breakout watchlist; and a continuation, an Extended session of a run whose
+# breakout is archived, linked to it.
+SIGNAL_KIND = 'signal'
+NEAR_MISS_KIND = 'near_miss'
+WATCHLIST_KIND = 'watchlist'
+CONTINUATION_KIND = 'continuation'
+KINDS = (SIGNAL_KIND, NEAR_MISS_KIND, WATCHLIST_KIND, CONTINUATION_KIND)
+
+
 @dataclass(frozen=True)
 class Signal:
     """
-    One archived breakout (table signal): a ticker scoring all four mandatory conditions on a session, with every
-    value it was scored with. Its sector and subsector names are read from 'criteria.subsector_id' when it is stored.
+    One record of the signal archive (table signal), of one of KINDS: a ticker scored on a session, with every value
+    it was scored with. Its sector and subsector names are read from 'criteria.subsector_id' when it is stored.
     """
 
     criteria: StockCriteria
@@ -183,9 +197,13 @@ class Signal:
     run_id: int | None
     # 'live' for a signal archived by the run that scored its session, 'backfill' for a replayed one
     source: str
-    # the ticker's previous signal and the trading days since its session, both None for its first
+    # the ticker's previous signal and the trading days since its session, both None for its first and for every
+    # record that is not a signal
     previous_signal_id: int | None = None
     trading_days_since_previous: int | None = None
+    kind: str = SIGNAL_KIND
+    # a continuation's breakout: the id of the signal of its run's breakout session; None for every other kind
+    breakout_id: int | None = None
 
 
 @dataclass(frozen=True)

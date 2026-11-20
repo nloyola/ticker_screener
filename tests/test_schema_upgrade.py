@@ -664,10 +664,37 @@ DOLLAR_VOLUME_COLUMNS = ('avg_dollar_volume REAL,',)
 TIER_COLUMNS = ('high_120d REAL,', 'dist_high_120d_pct REAL,', 'breakout_120d INTEGER,')
 
 
+# what the twentieth upgrade added to signal (_add_signal_kind): the kind, the link to a continuation's breakout and
+# the CHECKs on them, with the status widened from the signals' statuses
+KIND_PARTS = (
+    "kind TEXT NOT NULL DEFAULT 'signal' CHECK (kind IN ('signal', 'near_miss', 'watchlist', 'continuation')),",
+    'breakout_id INTEGER REFERENCES signal (id),',
+    """CHECK ((kind = 'signal' AND (status IS 'high_conviction' OR status IS 'confirmed'))
+              OR (kind = 'continuation' AND status IS 'extended')
+              OR (kind = 'watchlist' AND status IS 'pre_breakout')
+              OR (kind = 'near_miss' AND (status IS NULL OR status IS 'pre_breakout'))),""",
+    "CHECK ((kind = 'continuation') = (breakout_id IS NOT NULL)),",
+    "CHECK (kind <> 'continuation' OR COALESCE(sessions_since_breakout, 0) > 0),",
+    "CHECK (kind = 'signal' OR previous_signal_id IS NULL),",
+)
+WIDE_STATUS = "status TEXT CHECK (status IN ('high_conviction', 'confirmed', 'extended', 'pre_breakout')),"
+SIGNAL_STATUS = "status TEXT NOT NULL CHECK (status IN ('high_conviction', 'confirmed')),"
+
+
+def _old_signal(sql: str) -> str:
+    """Today's CREATE statement of signal as it stood before the twentieth upgrade."""
+    for part in KIND_PARTS:
+        assert part in sql
+        sql = sql.replace(part, '')
+    assert WIDE_STATUS in sql
+    return sql.replace(WIDE_STATUS, SIGNAL_STATUS)
+
+
 def _without_columns(path: str, columns: tuple[str, ...], version: int) -> str:
     """
     The database at 'path', built from today's schema, with neither stock_criteria nor signal holding 'columns',
-    stamped 'version', with two stock_criteria rows and one signal.
+    and signal as it stood before the twentieth upgrade when 'version' is older, stamped 'version', with two
+    stock_criteria rows and one signal.
     """
     init_db(path)
     statements = []
@@ -676,10 +703,13 @@ def _without_columns(path: str, columns: tuple[str, ...], version: int) -> str:
         for column in columns:
             assert column in old
             old = old.replace(column, '')
+        if table == 'signal' and version < 20:
+            old = _old_signal(old)
         statements += [f'DROP TABLE {table}', old]
     _execute(
         path,
         'DROP INDEX idx_signal_session_date',
+        'DROP INDEX idx_signal_breakout_id',
         *statements,
         'INSERT INTO stock_criteria (id, subsector_id, ticker, price, date_created, status) '
         "VALUES (1, 10, 'XOM', 110.5, '2026-11-13', 'extended')",
@@ -723,7 +753,9 @@ def test_upgrade_adds_the_breakout_position_keeping_every_row(version_16_db, cur
     assert _query(version_16_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
         (*row, *[None] * 7) for row in criteria_before
     ]
-    assert _query(version_16_db, 'SELECT * FROM signal') == [(*row, *[None] * 7) for row in signals_before]
+    assert _query(version_16_db, 'SELECT * FROM signal') == [
+        (*row, *[None] * 7, 'signal', None) for row in signals_before
+    ]
 
 
 def test_upgrade_adds_the_average_dollar_volume_keeping_every_row(version_17_db, current_db):
@@ -739,7 +771,9 @@ def test_upgrade_adds_the_average_dollar_volume_keeping_every_row(version_17_db,
     assert _query(version_17_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
         (*row, None, None, None, None) for row in criteria_before
     ]
-    assert _query(version_17_db, 'SELECT * FROM signal') == [(*row, None, None, None, None) for row in signals_before]
+    assert _query(version_17_db, 'SELECT * FROM signal') == [
+        (*row, None, None, None, None, 'signal', None) for row in signals_before
+    ]
 
 
 def test_upgrade_adds_the_120_day_tier_keeping_every_row(version_18_db, current_db):
@@ -755,4 +789,75 @@ def test_upgrade_adds_the_120_day_tier_keeping_every_row(version_18_db, current_
     assert _query(version_18_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
         (*row, None, None, None) for row in criteria_before
     ]
-    assert _query(version_18_db, 'SELECT * FROM signal') == [(*row, None, None, None) for row in signals_before]
+    assert _query(version_18_db, 'SELECT * FROM signal') == [
+        (*row, None, None, None, 'signal', None) for row in signals_before
+    ]
+
+
+@pytest.fixture
+def version_19_db(tmp_path) -> str:
+    """
+    A database at version 19: signal before it archived every kind, holding two signals, the second repeating the
+    first, with a path, after its highest id (3) was deleted, so the AUTOINCREMENT sequence is above every id left.
+    """
+    path = _without_columns(str(tmp_path / 'v19.db'), (), 19)
+    _execute(
+        path,
+        'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
+        "rule_settings, source, previous_signal_id, trading_days_since_previous) VALUES (2, 'XOM', 'US', "
+        "'America/New_York', '2026-11-13', 110.0, 'high_conviction', '1.0.0', '{}', 'backfill', 1, 1)",
+        'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
+        "rule_settings, source) VALUES (3, 'CVX', 'US', 'America/New_York', '2026-11-13', 150.0, 'confirmed', "
+        "'1.0.0', '{}', 'live')",
+        'DELETE FROM signal WHERE id = 3',
+        "INSERT INTO signal_price (signal_id, session_index, session_date, close) VALUES (2, 0, '2026-11-13', 110.0)",
+    )
+    return path
+
+
+def test_upgrade_archives_every_kind_keeping_every_signal_as_a_signal(version_19_db, current_db):
+    signals_before = _query(version_19_db, 'SELECT * FROM signal ORDER BY id')
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(version_19_db, "UPDATE signal SET status = 'extended' WHERE id = 1")
+
+    upgrade_db(version_19_db)
+
+    assert _query(version_19_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(version_19_db, 'signal') == _table_sql(current_db, 'signal')
+    for index in ('idx_signal_session_date', 'idx_signal_breakout_id'):
+        assert _table_sql(version_19_db, index) == _table_sql(current_db, index)
+    assert _query(version_19_db, 'SELECT * FROM signal ORDER BY id') == [
+        (*row, 'signal', None) for row in signals_before
+    ]
+    assert _query(version_19_db, "SELECT seq FROM sqlite_sequence WHERE name = 'signal'") == [(3,)]
+    # the path still points at its signal, and every foreign key holds
+    assert _query(version_19_db, 'SELECT signal_id FROM signal_price') == [(2,)]
+    assert _query(version_19_db, 'PRAGMA foreign_key_check') == []
+    # a continuation of the repeated signal is now accepted, and a record linking signals that is not one refused
+    _execute(
+        version_19_db,
+        'INSERT INTO signal (ticker, market, time_zone, session_date, close, status, screener_version, '
+        "rule_settings, source, kind, breakout_id, sessions_since_breakout) VALUES ('XOM', 'US', "
+        "'America/New_York', '2026-11-16', 111.0, 'extended', '1.0.0', '{}', 'live', 'continuation', 2, 1)",
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        _execute(version_19_db, "UPDATE signal SET kind = 'watchlist', status = 'pre_breakout' WHERE id = 2")
+
+
+def test_upgrade_leaves_a_signal_already_archiving_every_kind_as_it_is(current_db):
+    # a current table stamped behind its schema: the rebuild would drop what later upgrades add
+    _execute(
+        current_db,
+        'INSERT INTO signal (ticker, market, time_zone, session_date, close, screener_version, rule_settings, '
+        "source, kind) VALUES ('XOM', 'US', 'America/New_York', '2026-11-13', 110.0, '1.0.0', '{}', 'live', "
+        "'near_miss')",
+        'PRAGMA user_version = 19',
+    )
+    before = _query(current_db, 'SELECT * FROM signal')
+    table_sql = _table_sql(current_db, 'signal')
+
+    upgrade_db(current_db)
+
+    assert _query(current_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    assert _table_sql(current_db, 'signal') == table_sql
+    assert _query(current_db, 'SELECT * FROM signal') == before
