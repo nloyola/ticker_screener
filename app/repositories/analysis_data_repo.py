@@ -14,7 +14,8 @@ _PROVENANCE = ('time_zone', 'rule_settings', 'git_commit', 'run_id', 'archived_a
 @dataclass(frozen=True)
 class Archive:
     """
-    What the analysis reads of one screener version's signals, the archive's records of kind signal alone:
+    What the analysis reads of one screener version's signals, the archive's records of kind signal alone, one per
+    event (app/breakoutiq/dataset.py): no continuation, near-miss or watchlist record:
     - signals: every archived signal, oldest session first, each column of signal but those in _PROVENANCE, with its
       id as signal_id, the MACD signal line (signal.signal) as macd_signal, and breakout_failed from signal_track (1,
       0, or None while undecided or without a track)

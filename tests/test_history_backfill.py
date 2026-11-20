@@ -17,8 +17,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.analyzer import BREAKOUT_SESSION, SCREENER_VERSION, SIGNAL_STATUSES, Analyzer, archive_kind
+from app.analyzer import BREAKOUT_SESSION, EXTENDED, SCREENER_VERSION, SIGNAL_STATUSES, Analyzer, archive_kind
 from app.backfill import Backfill, market_dates, replayable_sessions
+from app.breakoutiq.baseline import ALL, baseline
+from app.breakoutiq.dataset import load_dataset
 from app.commands.backfill_history_cmd import BackfillHistoryCmd
 from app.db import init_db
 from app.history_backfill import HistoryBackfill
@@ -35,6 +37,7 @@ from app.models import (
 )
 from app.price_apis import DailyPrice
 from app.replay import flat_days, run_lengths, unscored
+from app.repositories.analysis_data_repo import AnalysisDataRepo
 from app.repositories.backfill_run_repo import BackfillRunRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.history_repo import BENCHMARK, TICKER, HistoryRepo
@@ -254,6 +257,55 @@ def test_backfill_archives_only_the_primary_listing_of_an_issuer(path, container
     archived = {s['ticker'] for s in signals(path, kind=None)}
     assert 'RY.TO' not in archived
     assert 'CCC' in archived
+
+
+def test_a_breakout_flagged_on_several_sessions_under_two_listings_is_one_event(path, container, prices, benchmarks):
+    # TD.TO trades as RY.TO does, the two listings of one issuer whose primary is RY.TO: each breakout of the issuer
+    # is flagged under both, on its breakout session and on each Extended session of its run
+    container.history_repo.store(TICKER, 'TD.TO', prices['RY.TO'], FETCHED, 'eodhd')
+    prices = {**prices, 'TD.TO': prices['RY.TO']}
+    add_issuer(path, 'Royal', 'RY.TO', 'RY.TO', 'TD.TO')
+
+    container.history_backfill.run()
+    container.analysis_data_repo = AnalysisDataRepo(container)
+    rows = load_dataset(container, with_history=True)
+
+    frame = as_of_frame(prices)
+    closes = {ticker: {p.date: p.close for p in series} for ticker, series in benchmarks.items()}
+    # each breakout of the issuer, by its session, with the listings and sessions it is flagged on
+    flagged: dict[date, set[tuple[str, date]]] = {}
+    for session, markets in replayable_sessions(market_dates(frame), EVENING).items():
+        for s in container.analyzer.score_as_of(session, frame, markets, closes):
+            sc = s.criteria
+            if sc.ticker in ('RY.TO', 'TD.TO') and sc.status in (*SIGNAL_STATUSES, EXTENDED):
+                breakout = s.dates[len(s.dates) - 1 - sc.sessions_since_breakout]
+                flagged.setdefault(breakout, set()).add((sc.ticker, session))
+    days = [p.date for p in prices['RY.TO']]
+    # the breakouts old enough for their first horizon, the only ones with a resolved outcome
+    resolved = {b for b in flagged if days.index(b) + HORIZONS[0] < len(days)}
+    long_runs = [b for b in resolved if len({d for _, d in flagged[b]}) >= 3]
+    assert long_runs and all({t for t, _ in flagged[b]} == {'RY.TO', 'TD.TO'} for b in long_runs)
+
+    issuer = rows[rows['ticker'].isin(['RY.TO', 'TD.TO'])]
+    events = issuer.drop_duplicates('signal_id')
+    # one event per breakout, under the primary listing, on its breakout session: never its Extended sessions
+    assert set(events['ticker']) == {'RY.TO'}
+    assert sorted(events['session_date'].dt.date) == sorted(resolved)
+    # the counts every section reads, each section counting the dataset's distinct signals: one per event, however
+    # many sessions and listings flagged it, every resolved breakout at the first horizon
+    counts = {r.horizon: r.payload['signals'] for r in baseline(issuer) if r.finding == ALL}
+    assert counts[HORIZONS[0]] == len(resolved)
+    assert all(count <= len(resolved) for count in counts.values())
+    # the whole dataset likewise: the archived signals with a resolved horizon, no other kind, no other listing
+    assert set(rows['signal_id']) == {
+        signal_id
+        for (signal_id,) in rows_of(
+            path,
+            "SELECT DISTINCT s.id FROM signal s JOIN signal_outcome o ON o.signal_id = s.id WHERE s.kind = 'signal' "
+            "AND o.status IN ('complete', 'ended')",
+        )
+    }
+    assert 'TD.TO' not in set(rows['ticker'])
 
 
 def test_backfill_archives_the_signals_score_as_of_gives_on_every_session(path, container, prices, benchmarks, capsys):

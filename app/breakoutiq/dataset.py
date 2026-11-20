@@ -1,7 +1,12 @@
 """
-The analysis dataset: one row per archived signal and resolved horizon, holding the outcome, every raw value and flag
-the signal was archived with, the derived strengths of the mandatory conditions, the market regime on the signal's
+The analysis dataset: one row per event and resolved horizon, holding the outcome, every raw value and flag the
+signal was archived with, the derived strengths of the mandatory conditions, the market regime on the signal's
 session and the period the signal falls in.
+
+An event is one breakout of one issuer, and its signal (an archived record of kind signal) is the only record of it
+the dataset reads, so every section, counting distinct signals, counts each event once (the parent's GLOSSARY.md,
+"Event"). The archive keeps each event once by construction: a breakout run has one breakout session, its Extended
+sessions are continuations, which are left out, and a listing that is not its issuer's primary is never archived.
 
 build_dataset and its helpers are pure functions of data frames; load_dataset reads them from the database.
 
