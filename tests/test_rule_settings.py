@@ -34,6 +34,10 @@ NOT_RULE_SETTINGS = {
     '_KIND_NAMES',
 }
 
+# The rule settings the analyzer imports rather than defines: each market's benchmark, which relative strength is
+# judged against (app/markets.py).
+IMPORTED_RULE_SETTINGS = {'BENCHMARKS'}
+
 
 def module_constants(source: str) -> set[str]:
     """The upper-case names assigned at the top level of 'source'."""
@@ -56,7 +60,11 @@ def test_snapshot_lists_every_threshold_constant():
 
 
 def test_snapshot_lists_only_analyzer_constants():
-    assert set(rule_settings()) == module_constants(ANALYZER_SOURCE) - NOT_RULE_SETTINGS
+    assert set(rule_settings()) == module_constants(ANALYZER_SOURCE) - NOT_RULE_SETTINGS | IMPORTED_RULE_SETTINGS
+
+
+def test_snapshot_holds_each_markets_benchmark():
+    assert rule_settings()['BENCHMARKS'] == {'US': 'SPY', 'Canada': 'XIU.TO'}
 
 
 def test_a_new_constant_left_out_of_the_snapshot_is_caught():

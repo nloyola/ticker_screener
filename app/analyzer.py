@@ -213,9 +213,10 @@ PADDED_MIN_DAYS = 2
 def rule_settings() -> dict[str, object]:
     """
     The snapshot of the rules SCREENER_VERSION names: every threshold and window the analyzer scores with, keyed by
-    its constant's name, and the secondary indicators a high-conviction breakout counts, in a form json.dumps takes
-    (a tuple as a list, a market's floors as a dict). tests/test_rule_settings.py fails when a constant is added here
-    without being listed.
+    its constant's name, the secondary indicators a high-conviction breakout counts, and each market's benchmark
+    (BENCHMARKS in app/markets.py), which relative strength is judged against, in a form json.dumps takes (a tuple
+    as a list, a market's floors as a dict). tests/test_rule_settings.py fails when a constant is added here without
+    being listed.
     """
     return {
         'BREAKOUT_WINDOWS': list(BREAKOUT_WINDOWS),
@@ -242,6 +243,7 @@ def rule_settings() -> dict[str, object]:
         'RS_1M_DAYS': RS_1M_DAYS,
         'RS_3M_DAYS': RS_3M_DAYS,
         'SECTOR_MIN_TICKERS': SECTOR_MIN_TICKERS,
+        'BENCHMARKS': dict(BENCHMARKS),
         'HIGH_CONVICTION_MIN': HIGH_CONVICTION_MIN,
         'DOLLAR_VOLUME_DAYS': DOLLAR_VOLUME_DAYS,
         'MIN_DOLLAR_VOLUME': dict(MIN_DOLLAR_VOLUME),
