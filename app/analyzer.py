@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # The version of the screener's rules, bumped (semver) whenever a threshold, a window, an indicator's definition or a
 # status rule changes, so a stored score can always be traced to the rules that produced it (AGENTS.md, "Screener
 # version"). rule_settings() is the snapshot of the settings that travels with it.
-SCREENER_VERSION = '1.0.0'
+SCREENER_VERSION = '2.0.0'
 
 # The four mandatory conditions of the breakout strategy (GLOSSARY.md, "Core criteria"), scored on the last row.
 # The breakout compares the close with the highest high of the BREAKOUT_WINDOWS trading days before it.

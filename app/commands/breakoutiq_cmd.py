@@ -3,7 +3,7 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from app.breakoutiq.dataset import MissingHistory
+from app.breakoutiq.dataset import MissingHistory, UnknownVersion
 from app.breakoutiq.run import summarize
 from app.breakoutiq.thresholds import DEFAULTS, DESCRIPTIONS, Thresholds, names
 from app.config import DB_NAME, HISTORY_DATABASE_FILE
@@ -34,6 +34,11 @@ class BreakoutIQCmd(BaseCommand):
         super().__init__(self._NAME, self._DESCRIPTION)
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            '--screener-version',
+            metavar='VERSION',
+            help='the screener version whose archived records to analyse (default the newest in the archive)',
+        )
         for name in names():
             option = '--' + name.replace('_', '-')
             default = getattr(DEFAULTS, name)
@@ -68,7 +73,10 @@ class BreakoutIQCmd(BaseCommand):
         if changed:
             print(f'breakoutiq-analysis: thresholds changed from the defaults: {", ".join(changed)}')
         try:
-            summary = analysis.run(thresholds)
+            summary = analysis.run(thresholds, args.screener_version)
+        except UnknownVersion as err:
+            print(f'breakoutiq-analysis: {err}', file=sys.stderr)
+            sys.exit(2)
         except MissingHistory as err:
             logger.error(f'breakoutiq-analysis: {err}; set HISTORY_DATABASE_FILE to the file history-fetch wrote')
             sys.exit(1)

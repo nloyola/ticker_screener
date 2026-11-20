@@ -6,8 +6,9 @@ section's results in analysis_result, in one transaction, so a reader never sees
 The run records the settings it ran with (settings()): its thresholds (thresholds.py, the named defaults unless the
 command was told otherwise), every other named constant a section reads, the indicators, outcomes, splits and
 controls each section covers, and each section's payload version, so a stored result can always be read against the
-methods that produced it. The run reads the signals of the screener's own version
-(SCREENER_VERSION, stored with the run), with the regime of a backfilled signal from the price history.
+methods that produced it. The run reads the records of one screener version, the newest that archived a record
+unless told another (dataset.analysed_version), and stores that version with it, so records scored by different rules
+never mix in a result; the regime of a backfilled signal comes from the price history.
 """
 
 import logging
@@ -18,7 +19,6 @@ from datetime import UTC, date, datetime
 
 import pandas as pd
 
-from app.analyzer import SCREENER_VERSION
 from app.breakoutiq import baseline, candidates, confounders, indicators, mandatory, predictive, stats, walkforward
 from app.breakoutiq import dataset as data
 from app.breakoutiq.thresholds import DEFAULTS, Thresholds
@@ -60,11 +60,13 @@ SECTIONS = (
 @dataclass
 class AnalysisSummary:
     """
-    What a run read and stored: the run's id, its data's extent (the signals with a resolved horizon), how many of
-    them have no regime, the near-miss events with a resolved horizon, and each section's result count and seconds.
+    What a run read and stored: the run's id, the screener version it read, its data's extent (the signals with a
+    resolved horizon), how many of them have no regime, the near-miss events with a resolved horizon, and each
+    section's result count and seconds.
     """
 
     run_id: int
+    screener_version: str
     signals: int
     near_misses: int
     rows: int
@@ -159,14 +161,16 @@ class Analysis:
     def __init__(self, container: Container):
         self.container = container
 
-    def run(self, thresholds: Thresholds = DEFAULTS) -> AnalysisSummary:
+    def run(self, thresholds: Thresholds = DEFAULTS, screener_version: str | None = None) -> AnalysisSummary:
         """
-        Builds the dataset and the near-miss dataset from the archive, the regime of a backfilled signal and the
-        sessions of a backfilled near-miss read from the price history (MissingHistory without it), runs every section
-        by 'thresholds' and stores the run with its results.
+        Builds the dataset and the near-miss dataset from the records 'screener_version' archived (the newest version
+        when None; UnknownVersion when it archived no record), the regime of a backfilled signal and the sessions of a
+        backfilled near-miss read from the price history (MissingHistory without it), runs every section by
+        'thresholds' and stores the run, with the version it read, and its results.
         """
         started_at = datetime.now(UTC)
-        rows, near_misses = data.load_datasets(self.container, with_history=True)
+        version = data.analysed_version(self.container, screener_version)
+        rows, near_misses = data.load_datasets(self.container, with_history=True, screener_version=version)
         seconds: dict[str, float] = {}
         results = analyse(rows, thresholds, seconds, near_misses)
         signals = rows.drop_duplicates('signal_id')
@@ -179,13 +183,14 @@ class Analysis:
             last_session=last,
             signals=len(signals),
             settings=settings(thresholds),
-            screener_version=SCREENER_VERSION,
+            screener_version=version,
             git_commit=git_commit(),
         )
         run_id = self.container.analysis_repo.add(run, results)
         counts = {s.name: sum(1 for r in results if r.section == s.name) for s in SECTIONS}
         return AnalysisSummary(
             run_id=run_id,
+            screener_version=version,
             signals=len(signals),
             near_misses=near_misses['signal_id'].nunique(),
             rows=len(rows),
@@ -202,9 +207,10 @@ def summarize(summary: AnalysisSummary) -> None:
     """Prints what a run read and stored."""
     extent = f' ({summary.first_session} to {summary.last_session})' if summary.first_session else ''
     print(
-        f'breakoutiq-analysis: read {summary.signals} signal{"" if summary.signals == 1 else "s"} with a resolved '
-        f'horizon{extent}, {summary.rows} resolved horizon{"" if summary.rows == 1 else "s"}, {summary.censored} of '
-        f'them censored, {summary.no_regime} signal{"" if summary.no_regime == 1 else "s"} with no regime, '
+        f'breakoutiq-analysis: read {summary.signals} signal{"" if summary.signals == 1 else "s"} of screener version '
+        f'{summary.screener_version} with a resolved horizon{extent}, {summary.rows} resolved '
+        f'horizon{"" if summary.rows == 1 else "s"}, {summary.censored} of them censored, {summary.no_regime} '
+        f'signal{"" if summary.no_regime == 1 else "s"} with no regime, '
         f'{summary.near_misses} near-miss event{"" if summary.near_misses == 1 else "s"} with a resolved horizon'
     )
     for name, count in summary.results.items():

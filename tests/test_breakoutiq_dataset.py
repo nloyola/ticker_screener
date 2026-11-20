@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.analyzer import SCREENER_VERSION
 from app.breakoutiq.dataset import (
     ABOVE,
     ABOVE_SMA50,
@@ -31,6 +32,8 @@ from app.breakoutiq.dataset import (
     VALIDATION,
     VOLUME,
     MissingHistory,
+    UnknownVersion,
+    analysed_version,
     assign_periods,
     build_dataset,
     join_closes,
@@ -335,11 +338,26 @@ def test_the_dataset_reads_one_screener_version(db):
     _add_outcome(db.db_path, 1, 5, 'complete')
     _add_outcome(db.db_path, 2, 5, 'complete')
 
-    current = load_dataset(db, with_history=False)
-    later = load_dataset(db, with_history=False, screener_version='1.1.0')
+    newest = load_dataset(db, with_history=False)
+    earlier = load_dataset(db, with_history=False, screener_version='1.0.0')
 
-    assert list(current['signal_id']) == [1] and list(current['volume_ratio']) == [2.5]
-    assert list(later['signal_id']) == [2] and list(later['volume_ratio']) == [9.0]
+    assert list(newest['signal_id']) == [2] and list(newest['volume_ratio']) == [9.0]
+    assert list(earlier['signal_id']) == [1] and list(earlier['volume_ratio']) == [2.5]
+
+
+def test_the_newest_screener_version_is_the_highest_by_number_of_any_kind(db):
+    day = date(2020, 1, 2)
+    _add_signal(db.db_path, 1, day, screener_version='1.9.0')
+    _add_near_miss(db.db_path, 2, day, VOLUME, screener_version='1.10.0')
+
+    assert analysed_version(db) == '1.10.0'
+    assert analysed_version(db, '1.9.0') == '1.9.0'
+    with pytest.raises(UnknownVersion, match='archive holds 1.9.0, 1.10.0'):
+        analysed_version(db, '2.0.0')
+
+
+def test_an_empty_archive_analyses_the_screeners_own_version(db):
+    assert analysed_version(db) == SCREENER_VERSION
 
 
 def test_the_dataset_reads_the_signals_alone_of_the_archives_kinds(db):
@@ -466,8 +484,8 @@ def test_the_near_miss_dataset_reads_one_screener_version_and_no_other_kind(db):
         _add_outcome(db.db_path, signal_id, 5, 'complete')
     _add_outcome(db.db_path, 5, 5, 'pending')
 
-    assert list(load_near_misses(db, with_history=False)['signal_id']) == [1]
-    assert list(load_near_misses(db, with_history=False, screener_version='1.1.0')['signal_id']) == [2]
+    assert list(load_near_misses(db, with_history=False)['signal_id']) == [2]
+    assert list(load_near_misses(db, with_history=False, screener_version='1.0.0')['signal_id']) == [1]
 
 
 def test_a_near_miss_event_whose_first_session_is_unresolved_is_its_first_resolved_one(db):

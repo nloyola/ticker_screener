@@ -48,14 +48,15 @@ def db(tmp_path) -> SimpleNamespace:
     return c
 
 
-def _archive(path: str, seed: int = 7) -> int:
+def _archive(path: str, seed: int = 7, version: str = '1.0.0', first_id: int = 1) -> int:
     """
-    Stores a random archive: SIGNALS_PER_DATE signals on each of SESSIONS, every one with complete outcomes at
-    HORIZONS but for every tenth, whose 20-session horizon ended. Returns the number of signals.
+    Stores a random archive of screener version 'version', ids from 'first_id': SIGNALS_PER_DATE signals on each of
+    SESSIONS, every one with complete outcomes at HORIZONS but for every tenth, whose 20-session horizon ended.
+    Returns the number of signals.
     """
     rng = np.random.default_rng(seed)
     signals, outcomes = [], []
-    signal_id = 0
+    signal_id = first_id - 1
     for day in SESSIONS:
         for ticker in rng.choice(40, size=SIGNALS_PER_DATE, replace=False):
             signal_id += 1
@@ -68,7 +69,7 @@ def _archive(path: str, seed: int = 7) -> int:
                 'session_date': day.date().isoformat(),
                 'close': close,
                 'status': 'confirmed',
-                'screener_version': '1.0.0',
+                'screener_version': version,
                 'rule_settings': '{}',
                 'source': 'backfill',
                 'sector': f'S{rng.integers(0, 3)}',
@@ -161,9 +162,9 @@ def test_the_command_stores_one_complete_run_that_reloads_with_its_payloads(db):
 
     summary = [line for line in done.stdout.splitlines() if line.startswith('breakoutiq-analysis:')]
     assert summary[0] == (
-        f'breakoutiq-analysis: read {count} signals with a resolved horizon ({SESSIONS[0].date()} to '
-        f'{SESSIONS[-1].date()}), {count * len(HORIZONS)} resolved horizons, {count // 10} of them censored, '
-        f'{count} signals with no regime, 0 near-miss events with a resolved horizon'
+        f'breakoutiq-analysis: read {count} signals of screener version 1.0.0 with a resolved horizon '
+        f'({SESSIONS[0].date()} to {SESSIONS[-1].date()}), {count * len(HORIZONS)} resolved horizons, '
+        f'{count // 10} of them censored, {count} signals with no regime, 0 near-miss events with a resolved horizon'
     )
     assert summary[-1] == f'breakoutiq-analysis: stored run {run.id}'
     for section in SECTIONS:
@@ -225,4 +226,35 @@ def test_an_out_of_range_threshold_stops_the_command_storing_nothing(db, options
 
     assert done.returncode == 2
     assert message in done.stderr
+    assert db.analysis_repo.runs() == []
+
+
+def test_the_command_analyses_the_newest_screener_version_alone_unless_told_another(db):
+    older = _archive(db.db_path, seed=7, version='1.0.0')
+    newer = _archive(db.db_path, seed=8, version='2.0.0', first_id=older + 1)
+
+    done = _run(db)
+
+    assert done.returncode == 0, done.stderr
+    run = db.analysis_repo.runs()[0]
+    assert (run.screener_version, run.signals) == ('2.0.0', newer)
+    baseline = next(r.payload for r in db.analysis_repo.results(run.id) if r.section == 'baseline' and r.horizon == 5)
+    assert baseline['signals'] == newer  # the older version's signals left out, not added
+    assert f'read {newer} signals of screener version 2.0.0 ' in done.stdout
+
+    summary = Analysis(db).run(screener_version='1.0.0')
+
+    run = next(r for r in db.analysis_repo.runs() if r.id == summary.run_id)
+    assert (run.screener_version, run.signals, summary.screener_version) == ('1.0.0', older, '1.0.0')
+    ids = set(load_dataset(db, with_history=True, screener_version='1.0.0')['signal_id'])
+    assert ids == set(range(1, older + 1))
+
+
+def test_a_screener_version_that_archived_no_record_stops_the_command_storing_nothing(db):
+    _archive(db.db_path)
+
+    done = _run(db, '--screener-version', '2.0.0')
+
+    assert done.returncode == 2
+    assert 'screener version 2.0.0 archived no record; the archive holds 1.0.0' in done.stderr
     assert db.analysis_repo.runs() == []

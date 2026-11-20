@@ -66,6 +66,12 @@ class AnalysisDataRepo:
     def __init__(self, container: Container):
         self.db_path = container.db_path
 
+    def versions(self) -> list[str]:
+        """Every screener version that archived a record, of any kind, in no particular order."""
+        with connect(self.db_path) as con:
+            rows = con.execute('SELECT DISTINCT screener_version FROM signal').fetchall()
+        return [row[0] for row in rows]
+
     def archive(self, screener_version: str) -> Archive:
         """
         The signals archived by 'screener_version', with their outcomes and path sessions, read in one transaction,

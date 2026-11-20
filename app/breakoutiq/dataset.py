@@ -73,32 +73,57 @@ class MissingHistory(Exception):
     """The price history database the regime of a backfilled signal needs is not there."""
 
 
-def load_dataset(container: Container, with_history: bool, screener_version: str = SCREENER_VERSION) -> pd.DataFrame:
-    """
-    The dataset from the database, of the signals 'screener_version' archived, less those of a listing grouped
-    under an issuer after it was archived (drop_grouped_listings). Each market's benchmark closes come from
-    benchmark_price and, when 'with_history' is True, from the price history database (HISTORY_DATABASE_FILE) too,
-    which holds the years the regime of a backfilled signal needs; MissingHistory when that file is not there, rather
-    than an empty history that would leave those regimes unknown.
-    """
-    benchmarks = load_benchmarks(container, with_history)
-    return _dataset(container, benchmarks, container.issuer_repo.non_primary(), screener_version)
+class UnknownVersion(Exception):
+    """The screener version the analysis was asked to read archived no record."""
 
 
-def load_near_misses(
-    container: Container, with_history: bool, screener_version: str = SCREENER_VERSION
-) -> pd.DataFrame:
+def version_key(version: str) -> tuple[int, ...]:
+    """A semver screener version as numbers, so '1.10.0' sorts after '1.9.0'."""
+    return tuple(int(part) for part in version.split('.'))
+
+
+def analysed_version(container: Container, wanted: str | None = None) -> str:
     """
-    The near-miss dataset (near_miss_dataset) from the database, of the near-misses 'screener_version' archived, each
-    market's calendar its benchmark's closes, read as load_dataset reads them (MissingHistory and the grouped listings
-    likewise).
+    The screener version whose records the analysis reads: 'wanted' when given, UnknownVersion when it archived no
+    record; otherwise the newest version that archived one, of any kind, or SCREENER_VERSION while the archive is
+    empty.
+    Records scored by different rules never mix in one analysis (the parent's GLOSSARY.md, "Analysis run").
+    """
+    archived = container.analysis_data_repo.versions()
+    if wanted is not None:
+        if wanted not in archived:
+            known = ', '.join(sorted(archived, key=version_key)) or 'none'
+            raise UnknownVersion(f'screener version {wanted} archived no record; the archive holds {known}')
+        return wanted
+    return max(archived, key=version_key, default=SCREENER_VERSION)
+
+
+def load_dataset(container: Container, with_history: bool, screener_version: str | None = None) -> pd.DataFrame:
+    """
+    The dataset from the database, of the signals 'screener_version' archived (the newest, analysed_version, when
+    None), less those of a listing grouped under an issuer after it was archived (drop_grouped_listings). Each
+    market's benchmark closes come from benchmark_price and, when 'with_history' is True, from the price history
+    database (HISTORY_DATABASE_FILE) too, which holds the years the regime of a backfilled signal needs;
+    MissingHistory when that file is not there, rather than an empty history that would leave those regimes unknown.
     """
     benchmarks = load_benchmarks(container, with_history)
-    return _near_miss_dataset(container, benchmarks, container.issuer_repo.non_primary(), screener_version)
+    version = screener_version or analysed_version(container)
+    return _dataset(container, benchmarks, container.issuer_repo.non_primary(), version)
+
+
+def load_near_misses(container: Container, with_history: bool, screener_version: str | None = None) -> pd.DataFrame:
+    """
+    The near-miss dataset (near_miss_dataset) from the database, of the near-misses 'screener_version' archived (the
+    newest, analysed_version, when None), each market's calendar its benchmark's closes, read
+    as load_dataset reads them (MissingHistory and the grouped listings likewise).
+    """
+    benchmarks = load_benchmarks(container, with_history)
+    version = screener_version or analysed_version(container)
+    return _near_miss_dataset(container, benchmarks, container.issuer_repo.non_primary(), version)
 
 
 def load_datasets(
-    container: Container, with_history: bool, screener_version: str = SCREENER_VERSION
+    container: Container, with_history: bool, screener_version: str | None = None
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     The dataset and the near-miss dataset together, as load_dataset and load_near_misses give them, reading the
@@ -106,9 +131,10 @@ def load_datasets(
     """
     benchmarks = load_benchmarks(container, with_history)
     non_primary = container.issuer_repo.non_primary()
+    version = screener_version or analysed_version(container)
     return (
-        _dataset(container, benchmarks, non_primary, screener_version),
-        _near_miss_dataset(container, benchmarks, non_primary, screener_version),
+        _dataset(container, benchmarks, non_primary, version),
+        _near_miss_dataset(container, benchmarks, non_primary, version),
     )
 
 
