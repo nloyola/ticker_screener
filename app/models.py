@@ -45,6 +45,11 @@ class PriceData:
 
 @dataclass(frozen=True)
 class StockCriteria:
+    """
+    One ticker scored on one session (table stock_criteria, and signal beside its own columns). Every value is as the
+    analyzer computed it, unrounded: the dashboard rounds what it shows.
+    """
+
     id: int
     subsector_id: int
     ticker: str
@@ -54,7 +59,8 @@ class StockCriteria:
     high_20d: float | None = None
     high_60d: float | None = None
     volume: int | None = None
-    avg_vol_20d: int | None = None
+    # the mean volume of the 20 sessions before the scored one, unrounded
+    avg_vol_20d: float | None = None
     # volume / avg_vol_20d, None when the average is 0
     volume_ratio: float | None = None
     dma_50: float | None = None
@@ -136,6 +142,17 @@ class StockCriteria:
     breakout_margin_pct: float | None = None
     invalidation_distance_pct: float | None = None
     sessions_since_breakout: int | None = None
+    # on a breakout or extended session, the level its run broke, exactly as the run computed it (the invalidation
+    # level), and the run's breakout session; None on any other session (ExportValues in app/analyzer.py)
+    breakout_level: float | None = None
+    breakout_date: date | None = None
+    # the minimum margin a breakout on the session must clear, in percent of the level, and the average daily range it
+    # is drawn from, (high - low) / close in percent over the RANGE_DAYS sessions before it, None when no range is known
+    required_margin_pct: float | None = None
+    average_daily_range_pct: float | None = None
+    # the latest swing low before the session (swing_low in app/analyzer.py) and its date, None when there is none
+    swing_low: float | None = None
+    swing_low_date: date | None = None
     # the liquidity floor's measure (average_dollar_volume in app/analyzer.py): the mean close times volume of the
     # DOLLAR_VOLUME_DAYS sessions before the scored one, in the market's own currency; None when one lacks a volume
     avg_dollar_volume: float | None = None
@@ -183,7 +200,8 @@ class Signal:
 
     criteria: StockCriteria
     market: str
-    # the exchange named by the ticker's suffix, None for a bare US ticker (exchange_of in app/markets.py)
+    # the exchange named by the ticker's suffix (exchange_of in app/markets.py), or for a bare US ticker the one the
+    # dashboard's security master records; None when neither knows it
     exchange: str | None
     # the market's time zone, an IANA key
     time_zone: str
@@ -223,6 +241,9 @@ class PathSession:
     volume: int | None
     benchmark_open: float | None
     benchmark_close: float | None
+    # the mean volume of the VOLUME_AVG_DAYS sessions before this one, as analyze averages them (avg_vol_20d), from the
+    # rows the path was written from; None in paths written before it was kept, and where too few rows precede it
+    avg_volume_20d: float | None = None
 
 
 # why backfill-history left a listed ticker out (BackfillRun.left_out)

@@ -40,7 +40,7 @@ from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 from tests.test_issuer_repo import add_issuer
-from tests.test_security_state_repo import set_state
+from tests.test_security_state_repo import set_exchange, set_state
 
 
 def trades(day: date) -> bool:
@@ -570,7 +570,7 @@ def test_analyze_stores_every_secondary_indicator(path, container):
     }
     assert all(row[column] is not None for column in SECONDARY_COLUMNS)
     # the n-day averages of a close rising by 1 lag it by (n - 1) / 2, the 21-day EMA by 10
-    assert (row['dma_20'], row['dma_200'], row['ema_21']) == (457.5, 367.5, 457.0)
+    assert (row['dma_20'], row['dma_200'], row['ema_21']) == pytest.approx((457.5, 367.5, 457.0))
     assert row['core_criteria_score'] == 4
 
 
@@ -1184,7 +1184,7 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
         'exchange': None,
         'time_zone': 'America/New_York',
         'close': 202.456,
-        'price': 202.46,
+        'price': 202.456,
     }
     assert {c: signals['SHOP.TO'][c] for c in own} == {
         **common,
@@ -1202,11 +1202,100 @@ def test_run_archives_each_confirmed_breakout_with_its_stored_values(path, conta
         pytest.approx(4.456 / 202.456 * 100),
         0,
     )
+    # the exact level it broke, its breakout session itself
+    assert (signals['BRK']['breakout_level'], signals['BRK']['breakout_date']) == (198.0, TODAY.isoformat())
     # the session's signals carry the rules its screened session records
     assert {(m, d, v, s, c, r) for m, d, v, s, c, r, _ in sessions(path)} == {
         (US, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),
         (CANADA, TODAY.isoformat(), SCREENER_VERSION, settings, 'abc1234', 7),
     }
+
+
+def test_a_bare_us_ticker_is_archived_with_the_exchange_the_security_master_records(path, container):
+    breakout_rows(path, container)
+    set_exchange(path, 'BRK', 'NYSE')
+    # the security master's exchange never replaces the one a Canadian ticker's suffix names
+    set_exchange(path, 'SHOP.TO', 'TO')
+
+    container.analyzer.analyze(run_id=7)
+
+    exchanges = {t: r['exchange'] for t, r in table_rows(path, 'signal').items() if r['kind'] == 'signal'}
+    assert exchanges == {'BRK': 'NYSE', 'SHOP.TO': 'TSX'}
+
+
+def test_a_breakout_a_watchlist_ticker_and_the_next_days_failure_store_every_export_value(path, container):
+    # on TODAY, BRK breaks out at 202.456 over its 198 high and NEAR is on the watchlist (breakout_rows); BRK lists on
+    # the NYSE, which only the security master names
+    breakout_rows(path, container)
+    set_exchange(path, 'BRK', 'NYSE')
+    container.analyzer.analyze(run_id=7)
+
+    rows = table_rows(path, 'stock_criteria')
+    export = (
+        'price',
+        'high_20d',
+        'avg_vol_20d',
+        'breakout_margin_pct',
+        'breakout_level',
+        'breakout_date',
+        'required_margin_pct',
+        'average_daily_range_pct',
+        'swing_low',
+        'swing_low_date',
+    )
+    # BRK: unrounded, its exact level and its breakout session; its rows store no high or low, so no daily range is
+    # known and the margin is the 1% floor; a steady rise has no swing low
+    assert {c: rows['BRK'][c] for c in export} == {
+        'price': 202.456,
+        'high_20d': 198.0,
+        'avg_vol_20d': 1_000_000,
+        'breakout_margin_pct': pytest.approx(4.456 / 198 * 100),
+        'breakout_level': 198.0,
+        'breakout_date': TODAY.isoformat(),
+        'required_margin_pct': 1.0,
+        'average_daily_range_pct': None,
+        'swing_low': None,
+        'swing_low_date': None,
+    }
+    # NEAR, outside every run: no level or breakout date, its highs and lows at its closes a range of 0
+    assert {c: rows['NEAR'][c] for c in export} == {
+        'price': 197.0,
+        'high_20d': 199.0,
+        'avg_vol_20d': 1_000_000,
+        'breakout_margin_pct': None,
+        'breakout_level': None,
+        'breakout_date': None,
+        'required_margin_pct': 1.0,
+        'average_daily_range_pct': 0.0,
+        'swing_low': None,
+        'swing_low_date': None,
+    }
+    assert rows['NEAR']['status'] == 'pre_breakout'
+    signals = {t: r for t, r in table_rows(path, 'signal').items() if r['kind'] == 'signal'}
+    assert {c: signals['BRK'][c] for c in export} == {c: rows['BRK'][c] for c in export}
+    assert signals['BRK']['exchange'] == 'NYSE'
+
+    # the next session BRK closes at 197.9, below the exact 198 level: the breakout failed, and a session that fails
+    # it is no retest, which stays undecided until its 10 sessions are in the path
+    next_day = shift(TODAY, 1)
+    container.price_data_repo.bulk_insert([replace(price_rows('BRK', next_day, n=1)[0], close=197.9)])
+    started = datetime.combine(next_day, time(20), tzinfo=NEW_YORK)
+    container.signal_paths.update(markets=(US, CANADA), flagged={}, started_at=started)
+    container.signal_outcome_updates.update()
+
+    with sqlite3.connect(path) as con:
+        track = con.execute(
+            'SELECT breakout_level, breakout_failed, failure_date, retested, retest_date FROM signal_track '
+            'WHERE signal_id = ?',
+            (signals['BRK']['id'],),
+        ).fetchone()
+        averages = con.execute(
+            'SELECT avg_volume_20d FROM signal_price WHERE signal_id = ? ORDER BY session_index',
+            (signals['BRK']['id'],),
+        ).fetchall()
+    assert track == (198.0, 1, next_day.isoformat(), None, None)
+    # the breakout's 20 sessions before it on 1,000,000 shares, then 19 of those and its own 2,000,000
+    assert averages == [(1_000_000.0,), (1_050_000.0,)]
 
 
 def every_kind_rows(path: str, container) -> None:
@@ -1412,6 +1501,8 @@ def test_trading_days_between(previous, expected):
 # Scoring a past session: score_as_of reads only the rows dated on or before it.
 AS_OF = shift(TODAY, -40)
 LATER_DAYS = 40
+# how many sessions before its last day history_rows puts its swing low
+SWING_DAYS_BACK = 10
 
 
 def history_rows(ticker: str, step: float, last_day: date) -> list[PriceData]:
@@ -1419,13 +1510,16 @@ def history_rows(ticker: str, step: float, last_day: date) -> list[PriceData]:
     A year of closes rising by 'step' a day from 100 to last_day, each day's range 2 below its close to half a step
     above it, so every close breaks out above the day before's high, with a volume spike on last_day, whose close
     jumps 2% to clear that high by more than the 1% margin: a breakout, and long enough for every indicator, the
-    200-day average and 21-week EMA included.
+    200-day average and 21-week EMA included. The day SWING_DAYS_BACK sessions before last_day dips to a low 2 + 4
+    steps below its close, below the lows of its 3 neighbours on each side, the lowest of them 2 + 3 steps below that
+    close: a swing low.
     """
     rows = []
     days = price_rows(ticker, last_day, n=368)
     for i, row in enumerate(days):
         close = (100.0 + step * i) * (1.02 if i == len(days) - 1 else 1.0)
-        rows.append(replace(row, close=close, high=close + step / 2, low=close - 2))
+        dip = 2 + 4 * step if i == len(days) - 1 - SWING_DAYS_BACK else 2
+        rows.append(replace(row, close=close, high=close + step / 2, low=close - dip))
     return rows
 
 
@@ -1479,6 +1573,9 @@ def test_score_as_of_ignores_every_row_after_the_session(container):
     aaa = next(s.criteria for s in before if s.criteria.ticker == 'AAA')
     assert [f for f, v in vars(aaa).items() if v is None] == []
     assert aaa.status == 'high_conviction'
+    # its swing low is the dip history_rows puts SWING_DAYS_BACK sessions back, 6 below that day's close
+    assert aaa.swing_low_date == shift(AS_OF, -SWING_DAYS_BACK)
+    assert aaa.swing_low == 100.0 + 367 - SWING_DAYS_BACK - 6
     assert {s.criteria.ticker for s in before} == {*SUBSECTOR_STEPS, 'SHOP.TO'}
 
     # wild rows after the session for every ticker and benchmark, and a ticker of the same subsector with no row on
@@ -1514,7 +1611,11 @@ def test_score_as_of_the_latest_session_matches_what_a_run_stores(path, containe
         row = stored[s.criteria.ticker]
         # the breakout phase and whether the session is in a run are not stored; the status they decide is
         expected = {f: row[f] for f in vars(s.criteria) if f not in ('id', 'breakout_phase', 'in_breakout_run')}
-        assert {f: getattr(s.criteria, f) for f in expected} == expected, s.criteria.ticker
+        # a date is stored as its ISO text
+        scored = {f: getattr(s.criteria, f) for f in expected}
+        assert {f: v.isoformat() if isinstance(v, date) else v for f, v in scored.items()} == expected, (
+            s.criteria.ticker
+        )
 
 
 def test_score_as_of_leaves_out_a_market_closed_that_session(container):

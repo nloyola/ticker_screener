@@ -78,6 +78,12 @@ COLUMNS = (
     'high_120d',
     'dist_high_120d_pct',
     'breakout_120d',
+    'breakout_level',
+    'breakout_date',
+    'required_margin_pct',
+    'average_daily_range_pct',
+    'swing_low',
+    'swing_low_date',
 )
 PLACEHOLDERS = ','.join(['?'] * len(COLUMNS))
 
@@ -97,6 +103,10 @@ def _as_float(v) -> float | None:
     return float(v)
 
 
+def _as_date(v: date | None) -> str | None:
+    return None if v is None else v.isoformat()
+
+
 def row_values(sc: StockCriteria, date_created: date) -> tuple:
     """The values of COLUMNS for 'sc', in order, as the plain ints and floats SQLite stores."""
     # Convert to plain Python ints/floats; booleans -> 0/1
@@ -109,7 +119,7 @@ def row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_float(sc.high_20d),
         _as_float(sc.high_60d),
         _as_int(sc.volume),  # INTEGER
-        _as_int(sc.avg_vol_20d),  # INTEGER
+        _as_float(sc.avg_vol_20d),  # unrounded, kept as a REAL in its INTEGER column
         _as_float(sc.volume_ratio),
         _as_float(sc.dma_50),
         _as_float(sc.dma_50_prev_15d),
@@ -173,6 +183,12 @@ def row_values(sc: StockCriteria, date_created: date) -> tuple:
         _as_float(sc.high_120d),
         _as_float(sc.dist_high_120d_pct),
         _as_int(sc.breakout_120d),  # INTEGER
+        _as_float(sc.breakout_level),
+        _as_date(sc.breakout_date),
+        _as_float(sc.required_margin_pct),
+        _as_float(sc.average_daily_range_pct),
+        _as_float(sc.swing_low),
+        _as_date(sc.swing_low_date),
     )
 
 
@@ -194,12 +210,13 @@ class StockCriteriaRepo:
     def clear_status(self, tickers: Iterable[str]) -> None:
         """
         Clears the status of each of 'tickers' rows, with its breakout position (breakout_margin_pct,
-        invalidation_distance_pct and sessions_since_breakout), which only a breakout or extended session has, leaving
-        its date_created and every other value as it was.
+        invalidation_distance_pct, sessions_since_breakout, breakout_level and breakout_date), which only a breakout or
+        extended session has, leaving its date_created and every other value as it was.
         """
         sql = """
         UPDATE stock_criteria
-        SET status = NULL, breakout_margin_pct = NULL, invalidation_distance_pct = NULL, sessions_since_breakout = NULL
+        SET status = NULL, breakout_margin_pct = NULL, invalidation_distance_pct = NULL, sessions_since_breakout = NULL,
+            breakout_level = NULL, breakout_date = NULL
         WHERE ticker = ?
         """
         with connect(self.db_path) as con:

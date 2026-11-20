@@ -72,17 +72,43 @@ def container(path) -> SimpleNamespace:
     return make_container(path)
 
 
-def add_signal(path: str, signal_id: int, ticker: str, close: float, high_20d=105.0, high_60d=None) -> None:
+def add_signal(
+    path: str,
+    signal_id: int,
+    ticker: str,
+    close: float,
+    high_20d=105.0,
+    high_60d=None,
+    breakout_level=None,
+    session_date=SIGNAL_DAY,
+) -> None:
     with sqlite3.connect(path) as con:
         con.execute(
             'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
-            'rule_settings, source, high_20d, high_60d, breakout_60d) '
-            "VALUES (?, ?, 'US', 'America/New_York', ?, ?, 'confirmed', '1.0.0', '{}', 'live', ?, ?, ?)",
-            (signal_id, ticker, SIGNAL_DAY.isoformat(), close, high_20d, high_60d, int(high_60d is not None)),
+            'rule_settings, source, high_20d, high_60d, breakout_60d, breakout_level) '
+            "VALUES (?, ?, 'US', 'America/New_York', ?, ?, 'confirmed', '1.0.0', '{}', 'live', ?, ?, ?, ?)",
+            (
+                signal_id,
+                ticker,
+                session_date.isoformat(),
+                close,
+                high_20d,
+                high_60d,
+                int(high_60d is not None),
+                breakout_level,
+            ),
         )
 
 
-def store_prices(c: SimpleNamespace, ticker: str, n: int, close=rising, benchmark_sessions: int | None = None) -> None:
+def store_prices(
+    c: SimpleNamespace,
+    ticker: str,
+    n: int,
+    close=rising,
+    benchmark_sessions: int | None = None,
+    low=lambda i, close: close - 1,
+    volume=lambda i: 1000,
+) -> None:
     c.price_data_repo.replace_for_ticker(
         ticker,
         [
@@ -92,9 +118,9 @@ def store_prices(c: SimpleNamespace, ticker: str, n: int, close=rising, benchmar
                 ticker=ticker,
                 date=d,
                 close=close(i),
-                volume=1000,
+                volume=volume(i),
                 high=close(i) + 1,
-                low=close(i) - 1,
+                low=low(i, close(i)),
                 open=close(i) - 0.5,
             )
             for i, d in enumerate(DAYS[:n])
@@ -125,6 +151,14 @@ def outcome_rows(path: str, with_times: bool = True) -> list[tuple]:
             'gross_return_pct, net_return_pct, benchmark_return_pct, excess_return_pct, mfe_pct, mae_pct, '
             f'ended_reason, last_session_date{times} FROM signal_outcome ORDER BY signal_id, horizon'
         ).fetchall()
+
+
+def retest(path: str, signal_id: int) -> tuple:
+    with sqlite3.connect(path) as con:
+        return con.execute(
+            'SELECT retested, retest_date, retest_decided_at IS NOT NULL FROM signal_track WHERE signal_id = ?',
+            (signal_id,),
+        ).fetchone()
 
 
 def track(path: str, signal_id: int) -> tuple:
@@ -435,3 +469,77 @@ def test_a_continuation_ends_with_its_breakout_and_resumes_when_the_ticker_has_p
 
     assert [r for r in outcome_rows(path) if r[2] == 'ended'] == []
     assert [(r[1], r[2]) for r in outcome_rows(path) if r[0] == 2] == [(h, 'complete') for h in (5, 10, 20)]
+
+
+# a signal 30 sessions into its prices, with the 20 sessions before each of its path's that a retest's average needs
+LATE = 30
+
+
+def test_the_failure_is_judged_against_the_exact_level_not_the_rounded_highs(path, container):
+    # the run broke 109.996, which the signal's high_60d held rounded to 110.0; session 1 after it closes at 109.998:
+    # above the exact level, below the rounded one, so it does not fail
+    store_prices(container, 'AAA', 22, close=lambda i: 109.998 if i > 10 else 100.0 + i)
+    add_signal(path, 1, 'AAA', close=110.0, high_20d=105.0, high_60d=110.0, breakout_level=109.996)
+
+    result = run(container, 22)
+
+    assert track(path, 1) == (109.996, 0, None, 1)
+    assert (result.decided, result.failed) == (1, 0)
+
+
+def test_a_breakout_that_fails_the_next_day_is_decided_on_it_and_never_retested(path, container):
+    # the signal closes at 130 over a 125 level; session 1 after it closes at 124, below the level, on quiet volume,
+    # and the rest close at 131 and up, trading 130 and up, far from the level
+    store_prices(
+        container,
+        'AAA',
+        LATE + 12,
+        close=lambda i: 124.0 if i == LATE + 1 else 100.0 + i,
+        volume=lambda i: 500 if i == LATE + 1 else 1000,
+    )
+    add_signal(path, 1, 'AAA', close=130.0, breakout_level=125.0, session_date=DAYS[LATE])
+
+    result = run(container, LATE + 12)
+
+    assert track(path, 1) == (125.0, 1, DAYS[LATE + 1].isoformat(), 1)
+    assert retest(path, 1) == (0, None, 1)
+    assert (result.retests_decided, result.retested) == (1, 0)
+
+
+def test_a_quiet_touch_of_the_level_is_stored_as_the_retest_once(path, container):
+    # session 3 after the signal trades down to 125.5, within 1% of the 125 level, and closes at 126 on 500 shares
+    # against the 1,000 of the 20 sessions before it
+    touch = LATE + 3
+    store_prices(
+        container,
+        'AAA',
+        LATE + 20,
+        close=lambda i: 126.0 if i == touch else 100.0 + i,
+        low=lambda i, close: 125.5 if i == touch else close - 1,
+        volume=lambda i: 500 if i == touch else 1000,
+    )
+    add_signal(path, 1, 'AAA', close=130.0, breakout_level=125.0, session_date=DAYS[LATE])
+
+    result = run(container, touch + 1)
+
+    assert retest(path, 1) == (1, DAYS[touch].isoformat(), 1)
+    assert (result.retests_decided, result.retested) == (1, 1)
+    # a later run that restates the session decides nothing again
+    store_prices(container, 'AAA', LATE + 20)
+    assert run(container, LATE + 20).retests_decided == 0
+    assert retest(path, 1) == (1, DAYS[touch].isoformat(), 1)
+
+
+def test_an_undecided_retest_is_judged_again_only_while_its_path_is_not_frozen(path, container):
+    # two signals whose paths reach their 120th session, every horizon and failure decided
+    for signal_id, ticker in ((1, 'AAA'), (2, 'BBB')):
+        store_prices(container, ticker, LATE + 121)
+        add_signal(path, signal_id, ticker, close=130.0, breakout_level=125.0, session_date=DAYS[LATE])
+    run(container, LATE + 121)
+    assert container.signal_outcome_repo.undecided() == []
+    # both retests undecided, as for paths written before the average volume was kept, signal 1's path not frozen
+    with sqlite3.connect(path) as con:
+        con.execute('UPDATE signal_track SET retested = NULL, retest_date = NULL, retest_decided_at = NULL')
+        con.execute('UPDATE signal_track SET path_frozen_at = NULL WHERE signal_id = 1')
+
+    assert [s.id for s in container.signal_outcome_repo.undecided()] == [1]

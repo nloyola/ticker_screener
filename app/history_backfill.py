@@ -297,13 +297,20 @@ class HistoryBackfill:
         """
         archived: Counter[str] = Counter()
         non_primary = self.analyzer.issuer_repo.non_primary()
+        exchanges = self.analyzer.security_state_repo.exchanges()
         by_session: dict[date, list[Scored]] = {}
         for s in records:
             by_session.setdefault(s.session_date, []).append(s)
         for session_records in by_session.values():
             with quiet('app.analyzer'):
                 stored = self.analyzer.archive_signals(
-                    session_records, None, settings, commit, source=BACKFILL, non_primary=non_primary
+                    session_records,
+                    None,
+                    settings,
+                    commit,
+                    source=BACKFILL,
+                    non_primary=non_primary,
+                    exchanges=exchanges,
                 )
             archived.update(stored)
             if stored[SIGNAL_KIND]:

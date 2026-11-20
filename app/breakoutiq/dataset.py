@@ -210,10 +210,11 @@ def build_dataset(
     together.
 
     Adds to the signal's columns and the outcome's:
-    - breakout_level and breakout_margin_pct: the level the signal cleared (the 60-day high when it broke it, else
-      the 20-day high, as app/signal_outcomes.py's breakout_level) and the close's margin over it, the signal's own
-      unrounded breakout_margin_pct where it has one, worked out from its rounded highs only for a signal archived
-      before the screener stored it
+    - breakout_level and breakout_margin_pct: the level the signal cleared, the exact level its run broke where it was
+      archived with one, else rebuilt from its rounded highs (the 60-day high when it broke it, else the 20-day high,
+      as app/signal_outcomes.py's breakout_level), and the close's margin over it, the signal's own unrounded
+      breakout_margin_pct where it has one, worked out from that level only for a signal archived before the screener
+      stored it
     - sma50_distance_pct: the close's distance above the 50-day SMA
     - sma50_slope_pct: the 50-day SMA's change over the SMA_RISING_DAYS sessions the rising rule looks back
     - volume_ratio, already a column of the signal: the day's volume over its average
@@ -232,7 +233,12 @@ def build_dataset(
     # only the signals with a resolved horizon are in the dataset, and the periods split those
     signals = signals[signals['signal_id'].isin(outcomes['signal_id'])].reset_index(drop=True)
 
-    level = np.where(signals['breakout_60d'] == 1, signals['high_60d'], signals['high_20d']).astype(float)
+    rebuilt = pd.Series(
+        np.where(signals['breakout_60d'] == 1, signals['high_60d'], signals['high_20d']).astype(float),
+        index=signals.index,
+    )
+    stored = signals['breakout_level'] if 'breakout_level' in signals else pd.Series(np.nan, index=signals.index)
+    level = stored.astype(float).fillna(rebuilt)
     signals['breakout_level'] = level
     signals['breakout_margin_pct'] = (
         signals['breakout_margin_pct'].astype(float).fillna(pct_change(signals['close'], level))

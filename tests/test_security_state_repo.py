@@ -1,6 +1,7 @@
 """
 SecurityStateRepo, which reads the dashboard's security master: each ticker flagged for review or inactive, upper case,
-mapped to its state, and none at all when the dashboard has not yet created the table.
+mapped to its state, and each ticker's known exchange, and none at all when the dashboard has not yet created the
+table.
 """
 
 import sqlite3
@@ -15,7 +16,8 @@ from app.repositories.security_state_repo import SecurityStateRepo
 SECURITY_TABLE = """
 CREATE TABLE IF NOT EXISTS security_master (
     ticker TEXT PRIMARY KEY COLLATE NOCASE,
-    state  TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'flagged', 'inactive'))
+    state  TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'flagged', 'inactive')),
+    exchange TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -27,6 +29,17 @@ def set_state(path: str, ticker: str, state: str) -> None:
         con.execute(
             'INSERT INTO security_master (ticker, state) VALUES (?, ?) ON CONFLICT (ticker) DO UPDATE SET state = ?',
             (ticker, state, state),
+        )
+
+
+def set_exchange(path: str, ticker: str, exchange: str) -> None:
+    """Gives 'ticker' a security master row listing it on 'exchange', as recording its security does."""
+    with sqlite3.connect(path) as con:
+        con.executescript(SECURITY_TABLE)
+        con.execute(
+            'INSERT INTO security_master (ticker, exchange) VALUES (?, ?) '
+            'ON CONFLICT (ticker) DO UPDATE SET exchange = ?',
+            (ticker, exchange, exchange),
         )
 
 
@@ -47,3 +60,16 @@ def test_only_flagged_and_inactive_tickers_are_held_upper_case(path):
     set_state(path, 'PARA', 'inactive')
 
     assert SecurityStateRepo(SimpleNamespace(db_path=path)).held() == {'KEY': 'flagged', 'PARA': 'inactive'}
+
+
+def test_a_database_without_the_security_master_knows_no_exchange(path):
+    assert SecurityStateRepo(SimpleNamespace(db_path=path)).exchanges() == {}
+
+
+def test_each_known_exchange_is_keyed_by_the_ticker_upper_case(path):
+    set_exchange(path, 'xom', 'NYSE')
+    set_exchange(path, 'AAPL', 'NASDAQ')
+    # recorded without an exchange, as EODHD's fundamentals can leave it
+    set_state(path, 'KEY', 'active')
+
+    assert SecurityStateRepo(SimpleNamespace(db_path=path)).exchanges() == {'XOM': 'NYSE', 'AAPL': 'NASDAQ'}

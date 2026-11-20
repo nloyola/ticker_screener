@@ -1,17 +1,20 @@
 """
 The outcome computation (app/signal_outcomes.py) on hand-built paths, each checked against values worked out by hand
-in the comments beside them.
+in the comments beside them: the horizons, the breakout failure and the retest.
 """
 
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
 
+from app.export_settings import RETEST_SESSIONS
 from app.models import PathSession
 from app.signal_outcomes import (
     COST_BPS,
     FAILURE_SESSIONS,
     BreakoutFailure,
+    Retest,
     breakout_level,
     compute_outcomes,
 )
@@ -25,7 +28,9 @@ def day(index: int) -> date:
     return FIRST + timedelta(days=index)
 
 
-def session(index, close, open=None, high=None, low=None, bench_open=None, bench_close=None) -> PathSession:
+def session(
+    index, close, open=None, high=None, low=None, bench_open=None, bench_close=None, volume=1000, avg_volume=1200.0
+) -> PathSession:
     return PathSession(
         session_index=index,
         session_date=day(index),
@@ -33,9 +38,10 @@ def session(index, close, open=None, high=None, low=None, bench_open=None, bench
         high=high,
         low=low,
         close=close,
-        volume=1000,
+        volume=volume,
         benchmark_open=bench_open,
         benchmark_close=bench_close,
+        avg_volume_20d=avg_volume,
     )
 
 
@@ -54,9 +60,14 @@ def by_horizon(outcomes):
     return {o.horizon: o for o in outcomes.horizons}
 
 
-def test_breakout_level_is_the_60_day_high_when_that_breakout_passed():
-    assert breakout_level(high_20d=95.0, high_60d=98.0, breakout_60d=True) == 98.0
-    assert breakout_level(high_20d=95.0, high_60d=98.0, breakout_60d=False) == 95.0
+def test_breakout_level_is_the_exact_level_the_signal_was_archived_with():
+    assert breakout_level(level=97.996, high_20d=95.0, high_60d=98.0, breakout_60d=True) == 97.996
+
+
+def test_breakout_level_of_a_signal_archived_without_one_is_the_60_day_high_when_that_breakout_passed():
+    assert breakout_level(level=None, high_20d=95.0, high_60d=98.0, breakout_60d=True) == 98.0
+    assert breakout_level(level=None, high_20d=95.0, high_60d=98.0, breakout_60d=False) == 95.0
+    assert breakout_level(level=None, high_20d=None, high_60d=98.0, breakout_60d=False) is None
 
 
 def test_rising_path_matches_the_hand_computation():
@@ -196,3 +207,97 @@ def test_a_path_with_a_gap_in_its_indexes_is_refused():
     del path[3]
     with pytest.raises(ValueError):
         compute_outcomes(path, 100.0, 98.0)
+
+
+# --- The retest ---------------------------------------------------------------------------------------------------
+
+
+def held(n: int, level: float = 100.0) -> list[PathSession]:
+    """
+    Session 0 closes at 104 over a level of 100; sessions 1 to n - 1 close at 105, trading from 103 to 106, on a
+    volume of 1,000 against a prior average of 1,200: far above the level, never touching it.
+    """
+    return [session(0, 104.0, 103.0, 104.5, 102.0)] + [session(i, 105.0, 104.0, 106.0, 103.0) for i in range(1, n)]
+
+
+def test_a_quiet_touch_of_the_level_that_closes_above_it_is_a_retest():
+    path = held(RETEST_SESSIONS + 1)
+    # session 4 dips to 100.9, within 1% of the level (101), and closes at 102 on 1,000 against 1,200
+    path[4] = session(4, 102.0, 104.0, 104.5, 100.9)
+
+    retest = compute_outcomes(path, signal_close=104.0, level=100.0).retest
+
+    assert retest == Retest(retested=True, retest_date=day(4))
+
+
+def test_a_retest_is_decided_on_the_session_it_happens_before_the_window_is_complete():
+    path = held(5)
+    path[2] = session(2, 100.5, 102.0, 102.5, 99.5)  # a low below the level, a close above it
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(True, day(2))
+
+
+def test_a_touch_on_volume_at_its_average_is_not_a_retest():
+    path = held(RETEST_SESSIONS + 1)
+    path[4] = session(4, 102.0, 104.0, 104.5, 100.9, volume=1200)
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(False, None)
+
+
+def test_a_low_more_than_1_percent_above_the_level_is_not_a_retest():
+    path = held(RETEST_SESSIONS + 1)
+    path[4] = session(4, 102.0, 104.0, 104.5, 101.01)  # above 101
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(False, None)
+
+
+def test_a_session_closing_below_the_level_fails_the_breakout_and_is_never_a_retest():
+    path = held(RETEST_SESSIONS + 1)
+    # session 1, the day after the breakout, touches 99 and closes at 99.5: it fails, on quiet volume
+    path[1] = session(1, 99.5, 103.0, 103.5, 99.0)
+
+    outcomes = compute_outcomes(path, signal_close=104.0, level=100.0)
+
+    assert outcomes.failure == BreakoutFailure(level=100.0, failed=True, failure_date=day(1))
+    assert outcomes.retest == Retest(False, None)
+
+
+def test_a_session_after_the_window_is_not_a_retest():
+    path = held(RETEST_SESSIONS + 2)
+    path[RETEST_SESSIONS + 1] = session(RETEST_SESSIONS + 1, 102.0, 104.0, 104.5, 100.9)
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(False, None)
+
+
+def test_a_retest_is_undecided_until_its_sessions_are_in_the_path():
+    assert compute_outcomes(held(RETEST_SESSIONS), signal_close=104.0, level=100.0).retest == Retest(None, None)
+
+
+def test_a_session_without_its_prior_average_volume_leaves_the_retest_undecided():
+    # a path written before the average was kept
+    path = [replace(s, avg_volume_20d=None) for s in held(RETEST_SESSIONS + 1)]
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(None, None)
+
+
+def test_a_retest_before_a_session_missing_its_volume_is_still_found():
+    path = held(RETEST_SESSIONS + 1)
+    path[2] = session(2, 102.0, 104.0, 104.5, 100.9)
+    path[3] = replace(path[3], volume=None)
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(True, day(2))
+
+
+def test_the_retest_compares_the_level_rescaled_to_the_paths_basis():
+    # a 2-for-1 split restated after the signal: the path holds half the prices, so the level of 100 is 50 in it
+    path = [
+        replace(s, open=s.open / 2, high=s.high / 2, low=s.low / 2, close=s.close / 2)
+        for s in held(RETEST_SESSIONS + 1)
+    ]
+    path[4] = session(4, 51.0, 52.0, 52.25, 50.45)  # within 1% of 50
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(True, day(4))
+
+
+def test_no_level_has_no_retest():
+    assert compute_outcomes(held(RETEST_SESSIONS + 1), signal_close=104.0, level=None).retest is None

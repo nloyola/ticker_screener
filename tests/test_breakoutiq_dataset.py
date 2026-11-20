@@ -271,6 +271,20 @@ def test_a_signal_with_a_stored_margin_keeps_it_and_one_without_has_it_worked_ou
     assert list(rows['breakout_margin_pct']) == [pytest.approx((110 / 99.996 - 1) * 100), pytest.approx(10.0)]
 
 
+def test_a_signal_archived_with_its_exact_level_keeps_it_over_its_rounded_highs(db):
+    # signal 1 stored the 99.996 level its run broke, which high_20d rounds to 100; signal 2 has only its highs
+    day = date(2020, 1, 2)
+    _add_signal(db.db_path, 1, day, breakout_level=99.996)
+    _add_signal(db.db_path, 2, day)
+    for signal_id in (1, 2):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+
+    rows = load_dataset(db, with_history=False)
+
+    assert list(rows['breakout_level']) == [99.996, 100.0]
+    assert list(rows['breakout_margin_pct']) == [pytest.approx((110 / 99.996 - 1) * 100), pytest.approx(10.0)]
+
+
 def test_a_pending_horizon_is_left_out(db):
     _add_signal(db.db_path, 1, date(2020, 1, 2))
     _add_outcome(db.db_path, 1, 5, 'complete')

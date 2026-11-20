@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from app.export_settings import RETEST_SESSIONS, RETEST_TOUCH_PCT
 from app.models import PathSession
 from app.signal_paths import HORIZONS
 
@@ -60,16 +61,44 @@ class BreakoutFailure:
 
 
 @dataclass(frozen=True)
+class Retest:
+    """
+    Whether the breakout was retested (RETEST_SESSIONS, RETEST_TOUCH_PCT in app/export_settings.py): retested is True,
+    with the first such session, as soon as one of the RETEST_SESSIONS sessions after the signal session has a low at
+    most RETEST_TOUCH_PCT percent above the level (or below it) while its close holds at or above the level, on volume
+    below its prior average volume (PathSession.avg_volume_20d); False once all of them are in the path and none was;
+    None while undecided, and for good when a session before the first retest lacks its volume or its prior average,
+    as in a path written before the average was kept. A session closing below the level fails the breakout
+    (BreakoutFailure) and is never a retest.
+    """
+
+    retested: bool | None
+    retest_date: date | None
+
+
+@dataclass(frozen=True)
 class SignalOutcomes:
-    """One outcome per horizon in HORIZONS, in that order, and the breakout failure, None when the level is unknown."""
+    """
+    One outcome per horizon in HORIZONS, in that order, the breakout failure and the retest, both None when the level
+    is unknown.
+    """
 
     horizons: list[HorizonOutcome]
     failure: BreakoutFailure | None
+    retest: Retest | None = None
 
 
-def breakout_level(high_20d: float | None, high_60d: float | None, breakout_60d: bool) -> float | None:
-    """The level a breakout cleared: the prior 60-day high when the 60-day breakout passed, the prior 20-day high
-    otherwise; None when the signal lacks that high."""
+def breakout_level(
+    level: float | None, high_20d: float | None, high_60d: float | None, breakout_60d: bool
+) -> float | None:
+    """
+    The level a breakout cleared: 'level', the exact level its run broke, as the signal was archived with it; for a
+    signal archived before the screener kept it, rebuilt from its highs, the prior 60-day high when the 60-day breakout
+    passed and the prior 20-day high otherwise, which such a signal stored rounded to the cent. None when the signal
+    has neither.
+    """
+    if level is not None:
+        return level
     return high_60d if breakout_60d else high_20d
 
 
@@ -81,7 +110,8 @@ def compute_outcomes(
     the signal session and its breakout level, both as the signal was archived with them, and the round-trip cost.
 
     The level is rescaled by the ratio of the path's signal session close to 'signal_close', so a split or dividend
-    restated after the signal compares the closes with the level on one basis. With no level, the failure is None.
+    restated after the signal compares the closes with the level on one basis. With no level, the failure and the
+    retest are None.
 
     When the entry session has no open, its close is the entry, and that session's high and low, which may have come
     before it, are left out of MFE and MAE; the benchmark's entry follows the same rule. A session missing its high
@@ -92,6 +122,7 @@ def compute_outcomes(
     return SignalOutcomes(
         horizons=[_horizon(path, h, cost_bps) for h in HORIZONS],
         failure=None if level is None else _failure(path, level * scale),
+        retest=None if level is None else _retest(path, level * scale),
     )
 
 
@@ -151,3 +182,17 @@ def _failure(path: Sequence[PathSession], level: float) -> BreakoutFailure:
     if len(window) == FAILURE_SESSIONS:
         return BreakoutFailure(level=level, failed=False, failure_date=None)
     return BreakoutFailure(level=level, failed=None, failure_date=None)
+
+
+def _retest(path: Sequence[PathSession], level: float) -> Retest:
+    window = path[1 : RETEST_SESSIONS + 1]
+    touch = level * (1 + RETEST_TOUCH_PCT / 100)
+    for s in window:
+        if s.volume is None or s.avg_volume_20d is None:
+            return Retest(retested=None, retest_date=None)
+        low = s.low if s.low is not None else s.close
+        if low <= touch and s.close >= level and s.volume < s.avg_volume_20d:
+            return Retest(retested=True, retest_date=s.session_date)
+    if len(window) == RETEST_SESSIONS:
+        return Retest(retested=False, retest_date=None)
+    return Retest(retested=None, retest_date=None)

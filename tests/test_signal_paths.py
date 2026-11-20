@@ -6,6 +6,7 @@ prices.
 
 import logging
 import sqlite3
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -354,3 +355,37 @@ def test_build_path_skips_rows_without_a_close():
     assert [(p.session_index, p.session_date) for p in built] == [(0, DAYS[1]), (1, DAYS[3]), (2, DAYS[4])]
     assert built[0].benchmark_close is None
     assert build_path(DAYS[2], prices, {}, DAYS[4]) is None
+
+
+def test_each_path_session_carries_the_average_volume_of_the_20_sessions_before_it():
+    # the volumes are 1000 + i: the 20 before session 25 are 1005..1024, averaging 1014.5, and so on
+    built = build_path(DAYS[25], rows('AAA', DAYS[:30]), {}, DAYS[29])
+
+    assert [p.avg_volume_20d for p in built] == [1014.5, 1015.5, 1016.5, 1017.5, 1018.5]
+
+
+def test_a_path_session_with_fewer_than_20_sessions_before_it_has_no_average_volume():
+    # session 10 has 10 sessions before it, session 20 the 20 of 1000..1019, averaging 1009.5
+    built = build_path(DAYS[10], rows('AAA', DAYS[:21]), {}, DAYS[20])
+
+    assert [p.avg_volume_20d for p in built] == [*[None] * 10, 1009.5]
+
+
+def test_a_missing_volume_is_left_out_of_the_average_volume():
+    prices = rows('AAA', DAYS[:26])
+    prices[24] = replace(prices[24], volume=None)
+
+    built = build_path(DAYS[25], prices, {}, DAYS[25])
+
+    # the 19 volumes left, 1005..1023, average 1014
+    assert [p.avg_volume_20d for p in built] == [1014.0]
+
+
+def test_a_run_stores_each_path_sessions_average_volume(path, container):
+    store_prices(container, 'AAA', DAYS[:30])
+    store_benchmark(container, 'SPY', DAYS[:30])
+    add_signal(path, 1, 'AAA', DAYS[25])
+
+    update(container, DAYS[29])
+
+    assert [p.avg_volume_20d for p in container.signal_path_repo.path(1)] == [1014.5, 1015.5, 1016.5, 1017.5, 1018.5]

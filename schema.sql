@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- seventh the relative strength columns after those, and the eighth secondary_passed and status after those, where
 -- ALTER TABLE places them, the sixteenth rebuilds the table to let status be extended, the seventeenth adds
 -- breakout_margin_pct, invalidation_distance_pct and sessions_since_breakout after status, the eighteenth
--- avg_dollar_volume after those, and the nineteenth the 120-day tier's columns after it; change both together.
+-- avg_dollar_volume after those, the nineteenth the 120-day tier's columns after it, and the twenty-first the
+-- export's values after those; change both together. Every value is stored unrounded, as computed, the dashboard
+-- rounding what it shows; rows written before the twenty-first upgrade hold price, the highs, the moving averages,
+-- RSI and MACD rounded to two decimals, and avg_vol_20d truncated, until the next analyze replaces them (and for good
+-- in signal). avg_vol_20d keeps its INTEGER type, which stores a fractional average as a REAL exactly.
 -- status is the strategy's status (with_status in
 -- app/analyzer.py), NULL for a ticker with none, and always NULL below the liquidity floor (above_liquidity_floor).
 -- avg_dollar_volume, the floor's measure, is the mean close times volume of the DOLLAR_VOLUME_DAYS sessions before
@@ -89,6 +93,12 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- before the scored one, dist_high_120d_pct the close's distance below it in percent of it, negative above it, and
 -- breakout_120d whether the close is above it (tier in app/analyzer.py); all three are NULL for a ticker with
 -- fewer than TIER_WINDOW rows before the scored one. A breakout with breakout_120d set is in the 120-day tier.
+-- The export's values (ExportValues in app/analyzer.py), which decide no status: on a breakout or extended session
+-- above the floor, breakout_level is the exact level its run broke, the invalidation level, and breakout_date the
+-- run's breakout session, both NULL on any other session; required_margin_pct is the minimum margin a breakout on
+-- the session must clear, in percent of the level, and average_daily_range_pct the average daily range it is drawn
+-- from, NULL when none is known; swing_low is the latest swing low before the session (swing_low, with the settings
+-- in app/export_settings.py) and swing_low_date its session, both NULL when there is none.
 CREATE TABLE IF NOT EXISTS stock_criteria (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        subsector_id INTEGER,
@@ -163,6 +173,12 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        high_120d REAL,
        dist_high_120d_pct REAL,
        breakout_120d INTEGER,
+       breakout_level REAL,
+       breakout_date TEXT CHECK (date(breakout_date) IS breakout_date),
+       required_margin_pct REAL,
+       average_daily_range_pct REAL,
+       swing_low REAL,
+       swing_low_date TEXT CHECK (date(swing_low_date) IS swing_low_date),
        UNIQUE (ticker)
 );
 
@@ -205,7 +221,8 @@ CREATE TABLE IF NOT EXISTS screened_session (
 -- session, sessions_since_breakout sessions before it. A ticker-session fitting several kinds is the first of
 -- signal, continuation, near_miss and watchlist. A ticker's market, exchange (NULL when unknown) and market time zone
 -- (MARKET_CLOSES in app/markets.py); the session it was scored on and that session's close as price_data holds it,
--- unrounded, where price is rounded; the sector and subsector names at signal time, not ids, since the dashboard
+-- unrounded, as price is since the twenty-first upgrade; the sector and subsector names at signal time, not ids,
+-- since the dashboard
 -- renames and deletes them; every value and flag column of stock_criteria under the same name and type
 -- (tests/test_signal_schema.py fails on one it lacks), with secondary_passed and the status; the rules it was scored
 -- by, the commit and the run, as in screened_session; and its source, live from a run or backfill from a replayed
@@ -214,8 +231,10 @@ CREATE TABLE IF NOT EXISTS screened_session (
 -- unique index also serves the lookups by ticker. Not market data: db-init and the dashboard's ticker removals never
 -- touch it. The eleventh upgrade in app/db.py creates it in databases from before it, the seventeenth adds the
 -- breakout position's columns after archived_at, the eighteenth avg_dollar_volume after those, the nineteenth the
--- 120-day tier's columns after it, and the twentieth rebuilds it with kind and breakout_id after those, the rows
--- archived before it kind signal; change both together.
+-- 120-day tier's columns after it, the twentieth rebuilds it with kind and breakout_id after those, the rows
+-- archived before it kind signal, and the twenty-first adds the export's values after those; change both together.
+-- The exchange is the one the ticker's suffix names, or for a bare US ticker the one the dashboard's security master
+-- records, from the twenty-first upgrade on.
 CREATE TABLE IF NOT EXISTS signal (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        ticker TEXT NOT NULL,
@@ -305,6 +324,12 @@ CREATE TABLE IF NOT EXISTS signal (
        breakout_120d INTEGER,
        kind TEXT NOT NULL DEFAULT 'signal' CHECK (kind IN ('signal', 'near_miss', 'watchlist', 'continuation')),
        breakout_id INTEGER REFERENCES signal (id),
+       breakout_level REAL,
+       breakout_date TEXT CHECK (date(breakout_date) IS breakout_date),
+       required_margin_pct REAL,
+       average_daily_range_pct REAL,
+       swing_low REAL,
+       swing_low_date TEXT CHECK (date(swing_low_date) IS swing_low_date),
        CHECK ((previous_signal_id IS NULL) = (trading_days_since_previous IS NULL)),
        CHECK ((kind = 'signal' AND (status IS 'high_conviction' OR status IS 'confirmed'))
               OR (kind = 'continuation' AND status IS 'extended')
@@ -328,7 +353,8 @@ CREATE INDEX IF NOT EXISTS idx_signal_breakout_id ON signal(breakout_id);
 -- session's price_data and benchmark_price held them in the run that last wrote the path. A run rewrites a path that
 -- is not frozen whole, so every value in it shares one adjustment basis. Not market data: db-init and the
 -- dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from before
--- it; change both together.
+-- it, and the twenty-first adds avg_volume_20d, the mean volume of the 20 sessions before each one, from the rows
+-- the path was written from (NULL in paths written before it, and where fewer rows precede it); change both together.
 CREATE TABLE IF NOT EXISTS signal_price (
        signal_id INTEGER NOT NULL REFERENCES signal (id),
        session_index INTEGER NOT NULL CHECK (session_index BETWEEN 0 AND 120),
@@ -340,6 +366,7 @@ CREATE TABLE IF NOT EXISTS signal_price (
        volume INTEGER,
        benchmark_open REAL,
        benchmark_close REAL,
+       avg_volume_20d REAL,
        PRIMARY KEY (signal_id, session_index),
        UNIQUE (signal_id, session_date)
 );
@@ -389,12 +416,16 @@ CREATE TABLE IF NOT EXISTS signal_outcome (
 -- One row per record with a path of its own, what is decided once for it rather than per horizon. path_frozen_at is
 -- when its path in signal_price reached its kind's length, after which no run rewrites it; a path lacking a
 -- benchmark price its outcomes need waits for the run whose benchmark covers it, unless the gap is inside the
--- benchmark's stored range. breakout_level is the level the breakout cleared: the prior 60-day high when the 60-day
--- breakout passed, the prior 20-day high otherwise. breakout_failed is NULL until decided, 1 once a close in the 10
--- sessions after the signal session is below that level, with the first such session's date, and 0 once all 10 have
--- closed at or above it; only a signal has them, NULL for every other kind. Not market data: db-init and the
--- dashboard's ticker removals never touch it. The twelfth upgrade in app/db.py creates it in databases from before
--- it; change both together.
+-- benchmark's stored range. breakout_level is the level the breakout cleared, in the path's basis: the exact level
+-- its run broke (signal.breakout_level), or for a signal archived before it was kept, the prior 60-day high when the
+-- 60-day breakout passed and the prior 20-day high otherwise. breakout_failed is NULL until decided, 1 once a close in
+-- the 10 sessions after the signal session is below that level, with the first such session's date, and 0 once all
+-- 10 have closed at or above it. retested is NULL until decided, 1 once one of those 10 sessions is a Retest (Retest
+-- in app/signal_outcomes.py), with the first one's date, and 0 once all 10 are in the path and none was; it stays
+-- NULL for good when a session lacks the volumes to judge it, as in a path written before avg_volume_20d was kept.
+-- Only a signal has them, NULL for every other kind. Not market data: db-init and the dashboard's ticker removals
+-- never touch it. The twelfth upgrade in app/db.py creates it in databases from before it, and the twenty-first adds
+-- the retest's columns; change both together.
 CREATE TABLE IF NOT EXISTS signal_track (
        signal_id INTEGER NOT NULL PRIMARY KEY REFERENCES signal (id),
        path_frozen_at TIMESTAMP,
@@ -402,6 +433,10 @@ CREATE TABLE IF NOT EXISTS signal_track (
        breakout_failed INTEGER CHECK (breakout_failed IN (0, 1)),
        failure_date TEXT CHECK (date(failure_date) IS failure_date),
        failure_decided_at TIMESTAMP,
+       retested INTEGER CHECK (retested IN (0, 1)),
+       retest_date TEXT CHECK (date(retest_date) IS retest_date),
+       retest_decided_at TIMESTAMP CHECK ((retested IS NULL) = (retest_decided_at IS NULL)
+                                          AND (retested IS 1) = (retest_date IS NOT NULL)),
        CHECK ((breakout_failed IS 1) = (failure_date IS NOT NULL)),
        CHECK ((breakout_failed IS NULL) = (failure_decided_at IS NULL))
 );

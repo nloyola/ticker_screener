@@ -17,6 +17,7 @@ _COLUMNS = (
     'volume',
     'benchmark_open',
     'benchmark_close',
+    'avg_volume_20d',
 )
 
 
@@ -117,6 +118,7 @@ class SignalPathRepo:
                             p.volume,
                             p.benchmark_open,
                             p.benchmark_close,
+                            p.avg_volume_20d,
                         )
                         for p in path
                     ],

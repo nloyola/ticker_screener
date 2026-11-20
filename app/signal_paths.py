@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
+from app.analyzer import VOLUME_AVG_DAYS
 from app.container import Container
 from app.markets import BENCHMARKS, last_complete_session
 from app.models import NEAR_MISS_KIND, SIGNAL_KIND, WATCHLIST_KIND, PathSession, PriceData
@@ -66,7 +67,8 @@ def build_path(
     The path of a record on 'session_date' from its ticker's price rows (price_data's or the history's, oldest first)
     and its benchmark's open and close by date: the rows from the record's session up to 'length' sessions after it,
     its kind's PATH_LENGTHS, leaving out rows dated after 'last_session', the market's last complete session, and rows
-    with no close. None when the rows do not hold the record's session, so the whole path cannot be written from them.
+    with no close. Each session carries its prior average volume (prior_average_volume). None when the rows do not
+    hold the record's session, so the whole path cannot be written from them.
     """
     usable = [r for r in rows if r.close is not None and r.date <= last_session]
     start = next((i for i, r in enumerate(usable) if r.date == session_date), None)
@@ -75,6 +77,7 @@ def build_path(
     path: list[PathSession] = []
     for index, r in enumerate(usable[start : start + length + 1]):
         bench_open, bench_close = benchmark.get(r.date, (None, None))
+        before = usable[start + index - VOLUME_AVG_DAYS : start + index] if start + index >= VOLUME_AVG_DAYS else []
         path.append(
             PathSession(
                 session_index=index,
@@ -86,9 +89,22 @@ def build_path(
                 volume=r.volume,
                 benchmark_open=bench_open,
                 benchmark_close=bench_close,
+                avg_volume_20d=prior_average_volume([b.volume for b in before]),
             )
         )
     return path
+
+
+def prior_average_volume(volumes: Sequence[int | None]) -> float | None:
+    """
+    The mean of 'volumes', the VOLUME_AVG_DAYS sessions before a path session, a missing one skipped as analyze
+    skips it: None when there are fewer sessions than that, as at the start of the ticker's rows, or none traded a
+    known volume.
+    """
+    known = [v for v in volumes if v is not None]
+    if len(volumes) < VOLUME_AVG_DAYS or not known:
+        return None
+    return sum(known) / len(known)
 
 
 def benchmark_may_fill(path: Sequence[PathSession], newest_benchmark: date | None) -> bool:

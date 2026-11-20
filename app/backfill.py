@@ -129,13 +129,14 @@ class Backfill:
         settings = json.dumps(rule_settings(), sort_keys=True)
         commit = git_commit()
         non_primary = self.analyzer.issuer_repo.non_primary()
+        exchanges = self.analyzer.security_state_repo.exchanges()
         archived: Counter[str] = Counter()
         tickers: set[str] = set()
         for session, markets in sessions.items():
             with quiet('app.analyzer'):
                 scored = self.analyzer.score_as_of(session, prices, markets)
                 stored = self.analyzer.archive_signals(
-                    scored, None, settings, commit, source=BACKFILL, non_primary=non_primary
+                    scored, None, settings, commit, source=BACKFILL, non_primary=non_primary, exchanges=exchanges
                 )
             archived.update(stored)
             if stored[SIGNAL_KIND]:

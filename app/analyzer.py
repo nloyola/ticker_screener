@@ -14,6 +14,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 from app.container import Container
+from app.export_settings import SWING_LOOKBACK, SWING_PIVOT_SESSIONS
 from app.markets import (
     BENCHMARKS,
     CANADA,
@@ -326,10 +327,6 @@ def _at(series: pd.Series, back: int = 0) -> float | None:
     return None if pd.isna(value) else float(value)
 
 
-def _round(value: float | None) -> float | None:
-    return None if value is None else round(value, 2)
-
-
 def _above(value: float | None, level: float | None) -> int | None:
     """1 when 'value' is above 'level', 0 when not, None when either is missing."""
     if value is None or level is None:
@@ -379,7 +376,7 @@ def _distance_pct(price: float, resistance: float) -> float | None:
 @dataclass(frozen=True)
 class Tier:
     """
-    The 120-day tier's values for one session (TIER_WINDOW): the prior TIER_WINDOW-day high, rounded as the other
+    The 120-day tier's values for one session (TIER_WINDOW): the prior TIER_WINDOW-day high, unrounded as the other
     highs are, the close's distance below it in percent (negative above it), and whether the close is above it.
     All three are None when the ticker has too few rows for that high.
     """
@@ -393,7 +390,7 @@ def tier(price: float, high: float | None) -> Tier:
     """The 120-day tier's values for a close of 'price' against the prior TIER_WINDOW-day 'high', None if unknown."""
     if high is None:
         return Tier(None, None, None)
-    return Tier(round(high, 2), _distance_pct(price, high), int(price > high))
+    return Tier(high, _distance_pct(price, high), int(price > high))
 
 
 def _near(distances: list[float | None]) -> int | None:
@@ -524,12 +521,17 @@ class BreakoutRuns:
     """
     One ticker's breakout runs, at each of its rows (oldest first). 'phase' is BREAKOUT_SESSION on a breakout,
     EXTENDED_SESSION on a later session of its run that closes above the run's level, and None otherwise. 'level' is
-    the broken level of the run the row is in, and 'start' the row of that run's breakout: NaN and -1 outside a run.
+    the broken level of the run the row is in, exactly as the run computed it, and 'start' the row of that run's
+    breakout: NaN and -1 outside a run. 'average_range' is each row's average daily range, in percent, over the
+    RANGE_DAYS sessions before it, NaN when none is known, and 'required_margin' the minimum margin a breakout on that
+    row must clear, in percent of the level.
     """
 
     phase: np.ndarray
     level: np.ndarray
     start: np.ndarray
+    average_range: np.ndarray
+    required_margin: np.ndarray
 
 
 def _resistance_age(highs: np.ndarray, row: int, days: int) -> int:
@@ -562,7 +564,8 @@ def breakout_runs(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, core:
         margin = (closes / level - 1) * 100
         ranges = (highs - lows) / closes * 100
     average_range = pd.Series(ranges).shift(1).rolling(RANGE_DAYS, min_periods=1).mean().to_numpy()
-    qualifying = core & (margin >= np.fmax(MARGIN_FLOOR_PCT, MARGIN_RANGE_FRACTION * average_range))
+    required = np.fmax(MARGIN_FLOOR_PCT, MARGIN_RANGE_FRACTION * average_range)
+    qualifying = core & (margin >= required)
 
     phase = np.full(count, None, dtype=object)
     run_level = np.full(count, np.nan)
@@ -581,7 +584,7 @@ def breakout_runs(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, core:
             phase[row] = EXTENDED_SESSION
         if began >= 0:
             run_level[row], run_start[row] = current, began
-    return BreakoutRuns(phase, run_level, run_start)
+    return BreakoutRuns(phase, run_level, run_start, average_range, required)
 
 
 @dataclass(frozen=True)
@@ -589,14 +592,16 @@ class BreakoutPosition:
     """
     Where a breakout or extended session stands in its run (GLOSSARY.md, "Status"): 'margin_pct' is the close's
     margin over the level the run broke, in percent of that level; 'invalidation_pct' the distance from the close
-    down to that level, the invalidation level, in percent of the close, the size of a stop placed there; and
-    'sessions' the sessions since the run's breakout, 0 on the breakout itself. On an extended session all three are
-    measured against the run's level, not a new one.
+    down to that level, the invalidation level, in percent of the close, the size of a stop placed there;
+    'sessions' the sessions since the run's breakout, 0 on the breakout itself; and 'level' that level itself, exactly
+    as the run computed it, the invalidation level. On an extended session all four are measured against the run's
+    level, not a new one.
     """
 
     margin_pct: float | None = None
     invalidation_pct: float | None = None
     sessions: int | None = None
+    level: float | None = None
 
 
 def breakout_position(runs: BreakoutRuns, closes: np.ndarray, row: int) -> BreakoutPosition:
@@ -608,6 +613,60 @@ def breakout_position(runs: BreakoutRuns, closes: np.ndarray, row: int) -> Break
         margin_pct=(close / level - 1) * 100,
         invalidation_pct=(close - level) / close * 100,
         sessions=row - int(runs.start[row]),
+        level=level,
+    )
+
+
+def swing_low(lows: np.ndarray, row: int) -> int | None:
+    """
+    The row of the swing low before 'row' (lows oldest first, NaN where missing): the latest row within the
+    SWING_LOOKBACK rows before 'row' whose low is below the lows of the SWING_PIVOT_SESSIONS rows on each side of it,
+    every one of them before 'row', as every lookback excludes the scored session. A row whose low, or a neighbour's,
+    is missing is not a swing low. None when no row qualifies.
+    """
+    first = max(row - SWING_LOOKBACK, SWING_PIVOT_SESSIONS)
+    for i in range(row - 1 - SWING_PIVOT_SESSIONS, first - 1, -1):
+        sides = np.concatenate((lows[i - SWING_PIVOT_SESSIONS : i], lows[i + 1 : i + 1 + SWING_PIVOT_SESSIONS]))
+        if not np.isnan(lows[i]) and not np.isnan(sides).any() and bool((lows[i] < sides).all()):
+            return i
+    return None
+
+
+def _value_at(values: np.ndarray, row: int) -> float | None:
+    """The value of 'values' at 'row', None where it is NaN."""
+    value = float(values[row])
+    return None if math.isnan(value) else value
+
+
+@dataclass(frozen=True)
+class ExportValues:
+    """
+    The values of one scored session that only the screen export reports, none of which decides a status: the
+    level its breakout run broke (on a breakout or extended session, else None) and that run's breakout date, the
+    margin a breakout on the session must clear and the average daily range it is drawn from, and its swing low
+    (swing_low) with that session's date.
+    """
+
+    breakout_level: float | None
+    breakout_date: date | None
+    required_margin_pct: float | None
+    average_daily_range_pct: float | None
+    swing_low: float | None
+    swing_low_date: date | None
+
+
+def export_values(
+    runs: BreakoutRuns, position: BreakoutPosition, lows: np.ndarray, dates: pd.Index, row: int
+) -> ExportValues:
+    """The ExportValues of 'row', from its breakout runs, its position in them, the lows and the dates."""
+    swing = swing_low(lows, row)
+    return ExportValues(
+        breakout_level=position.level,
+        breakout_date=None if position.sessions is None else dates[row - position.sessions],
+        required_margin_pct=_value_at(runs.required_margin, row),
+        average_daily_range_pct=_value_at(runs.average_range, row),
+        swing_low=None if swing is None else float(lows[swing]),
+        swing_low_date=None if swing is None else dates[swing],
     )
 
 
@@ -667,6 +726,8 @@ def with_status(sc: StockCriteria) -> StockCriteria:
             breakout_margin_pct=None,
             invalidation_distance_pct=None,
             sessions_since_breakout=None,
+            breakout_level=None,
+            breakout_date=None,
         )
     status = None
     if sc.breakout_phase == BREAKOUT_SESSION:
@@ -1028,6 +1089,7 @@ class Analyzer:
         commit: str | None,
         source: str = LIVE,
         non_primary: Mapping[str, str] | None = None,
+        exchanges: Mapping[str, str] | None = None,
     ) -> Counter[str]:
         """
         Archives each of 'scored' the signal archive keeps (archive_kind) as a record of its kind of the session it
@@ -1039,10 +1101,14 @@ class Analyzer:
         nothing. A listing that is not its issuer's primary (IssuerRepo) is left out, whatever its kind, keeping its
         status in stock_criteria, so a company listed twice is archived once, under its primary listing, by today's
         issuers: 'non_primary' (IssuerRepo.non_primary), read here when not given, so a backfill archiving session
-        after session reads it once. Logs and returns how many it archived of each kind.
+        after session reads it once. A record's exchange is the one its ticker's suffix names (exchange_of), or for a
+        bare US ticker the one the dashboard's security master records ('exchanges', SecurityStateRepo.exchanges, read
+        here when not given), None when neither knows it. Logs and returns how many it archived of each kind.
         """
         if non_primary is None:
             non_primary = self.issuer_repo.non_primary()
+        if exchanges is None:
+            exchanges = self.security_state_repo.exchanges()
         records: list[Signal] = []
         left_out: list[str] = []
         kept: list[tuple[Scored, str, date | None]] = []
@@ -1077,7 +1143,7 @@ class Analyzer:
                 Signal(
                     criteria=sc,
                     market=market,
-                    exchange=exchange_of(sc.ticker),
+                    exchange=exchange_of(sc.ticker) or exchanges.get(sc.ticker.upper()),
                     time_zone=MARKET_CLOSES[market][0].key,
                     session_date=session_date,
                     close=close,
@@ -1293,27 +1359,29 @@ class Analyzer:
         core = conditions.at(last)
         runs = breakout_runs(closes, df['high'].to_numpy(dtype=float), lows, conditions.met())
         position = breakout_position(runs, closes, last)
+        export = export_values(runs, position, lows, dates, last)
 
+        # every value is stored unrounded, as computed: the dashboard rounds what it shows
         return StockCriteria(
             id=0,
             subsector_id=df['subsector_id'].iloc[-1].item(),
             ticker=ticker,
-            price=round(price, 2),
+            price=price,
             core_criteria_met=all(core),
             core_criteria_score=sum(core),
-            high_20d=round(high_20d, 2),
-            high_60d=round(high_60d, 2),
+            high_20d=high_20d,
+            high_60d=high_60d,
             volume=int(volume),
-            avg_vol_20d=int(avg_vol),
+            avg_vol_20d=None if math.isnan(avg_vol) else avg_vol,
             # unrounded, so a ratio just under the threshold never reads as on it
             volume_ratio=volume_ratio,
             # unrounded, like volume_ratio, so a value just under the floor never reads as on it
             avg_dollar_volume=average_dollar_volume(closes, volumes, liquidity_row(runs, last)),
-            dma_50=round(dma_50, 2),
-            dma_50_prev_15d=round(dma_50_prior, 2),
-            rsi=round(rsi_val, 2),
-            macd=round(macd_val, 2),
-            signal=round(signal_val, 2),
+            dma_50=dma_50,
+            dma_50_prev_15d=dma_50_prior,
+            rsi=rsi_val,
+            macd=macd_val,
+            signal=signal_val,
             breakout_20d=int(conditions.breakout_20d[last]),
             breakout_60d=int(conditions.breakout_60d[last]),
             breakout_confirmed=int(conditions.confirmed[last]),
@@ -1321,25 +1389,25 @@ class Analyzer:
             dma_50_rising=int(conditions.sma_rising[last]),
             rsi_50_70=int(RSI_BAND[0] <= rsi_val <= RSI_BAND[1]),
             macd_above_signal=int(macd_val > signal_val),
-            macd_hist=_round(hist_val),
-            macd_hist_prev=_round(hist_prior),
+            macd_hist=hist_val,
+            macd_hist_prev=hist_prior,
             macd_days_above=days_above,
             macd_crossover=int(1 <= days_above <= MACD_CROSSOVER_DAYS),
             macd_hist_rising=hist_rising,
-            dma_20=_round(dma_20),
-            dma_20_prev_15d=_round(dma_20_prior),
-            dma_200=_round(dma_200),
-            dma_200_prev_15d=_round(dma_200_prior),
+            dma_20=dma_20,
+            dma_20_prev_15d=dma_20_prior,
+            dma_200=dma_200,
+            dma_200_prev_15d=dma_200_prior,
             price_gt_20dma=_above(price, dma_20),
             dma_20_rising=_above(dma_20, dma_20_prior),
             price_gt_200dma=_above(price, dma_200),
             dma_200_rising=_above(dma_200, dma_200_prior),
-            ema_21=_round(ema_21),
-            ema_21_prev_5d=_round(ema_21_prior),
+            ema_21=ema_21,
+            ema_21_prev_5d=ema_21_prior,
             price_gt_21ema=_above(price, ema_21),
             ema_21_rising=_above(ema_21, ema_21_prior),
-            ema_21w=_round(ema_21w),
-            ema_21w_prev_1w=_round(ema_21w_prior),
+            ema_21w=ema_21w,
+            ema_21w_prev_1w=ema_21w_prior,
             price_gt_21wema=_above(price, ema_21w),
             ema_21w_rising=_above(ema_21w, ema_21w_prior),
             # unrounded, like volume_ratio, so a value just past its threshold never reads as on it
@@ -1367,6 +1435,12 @@ class Analyzer:
             breakout_margin_pct=position.margin_pct,
             invalidation_distance_pct=position.invalidation_pct,
             sessions_since_breakout=position.sessions,
+            breakout_level=export.breakout_level,
+            breakout_date=export.breakout_date,
+            required_margin_pct=export.required_margin_pct,
+            average_daily_range_pct=export.average_daily_range_pct,
+            swing_low=export.swing_low,
+            swing_low_date=export.swing_low_date,
             breakout_phase=runs.phase[last],
             in_breakout_run=bool(runs.start[last] >= 0),
         )

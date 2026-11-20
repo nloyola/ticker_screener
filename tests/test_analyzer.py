@@ -22,6 +22,7 @@ from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from app.analyzer import (
@@ -35,6 +36,7 @@ from app.analyzer import (
     PRE_BREAKOUT,
     SECONDARY_INDICATORS,
     Analyzer,
+    swing_low,
     with_status,
 )
 from app.markets import US, is_session, market_of
@@ -159,7 +161,7 @@ def make_analyzer(
         screened_session_repo=FakeScreenedSessionRepo(),
         signal_repo=FakeSignalRepo(),
         issuer_repo=FakeIssuerRepo(),
-        security_state_repo=SimpleNamespace(held=dict),
+        security_state_repo=SimpleNamespace(held=dict, exchanges=dict),
     )
     return Analyzer(container), criteria_repo
 
@@ -240,12 +242,17 @@ def test_macd_and_signal_of_a_steady_rise():
     assert sc.signal == pytest.approx(7.0, abs=0.01)
 
 
-def test_values_are_rounded_to_two_places():
-    sc = analyze(rising(100, start=100.123, step=1.0), volumes_with_last(100, 2_000_000))
+def test_values_are_kept_unrounded():
+    # closes 100.123..199.123, and volumes of 1,000,000 but 1,000,010 the day before the last and 2,000,000 on it
+    volumes = [1_000_000] * 98 + [1_000_010, 2_000_000]
+    sc = analyze(rising(100, start=100.123, step=1.0), volumes)
 
-    assert sc.price == 199.12
-    assert sc.high_20d == 198.12
-    assert sc.dma_50 == 174.62
+    assert sc.price == pytest.approx(199.123, abs=1e-9)
+    assert sc.high_20d == pytest.approx(198.123, abs=1e-9)
+    # the mean of closes 150.123..199.123
+    assert sc.dma_50 == pytest.approx(174.623, abs=1e-9)
+    # 19 days of 1,000,000 and one of 1,000,010
+    assert sc.avg_vol_20d == 1_000_000.5
 
 
 # --- The price breakout -----------------------------------------------------
@@ -635,12 +642,17 @@ def test_moving_average_alignment_of_a_steady_rise():
 def test_21_day_and_21_week_emas_of_a_steady_rise():
     sc = analyze(YEAR, volumes_with_last(368, 2_000_000))
 
-    assert sc.ema_21 == round(lagging_ema(467.0, 1.0, 368), 2) == 457.0
-    assert sc.ema_21_prev_5d == round(lagging_ema(462.0, 1.0, 363), 2) == 452.0
+    assert sc.ema_21 == pytest.approx(lagging_ema(467.0, 1.0, 368))
+
+    assert round(sc.ema_21, 2) == 457.0
+    assert sc.ema_21_prev_5d == pytest.approx(lagging_ema(462.0, 1.0, 363))
+    assert round(sc.ema_21_prev_5d, 2) == 452.0
     assert (sc.price_gt_21ema, sc.ema_21_rising) == (1, 1)
     # 53 weekly closes, the first week's start not yet decayed away
-    assert sc.ema_21w == round(lagging_ema(467.0, 7.0, 53), 2) == 397.49
-    assert sc.ema_21w_prev_1w == round(lagging_ema(460.0, 7.0, 52), 2) == 390.54
+    assert sc.ema_21w == pytest.approx(lagging_ema(467.0, 7.0, 53))
+    assert round(sc.ema_21w, 2) == 397.49
+    assert sc.ema_21w_prev_1w == pytest.approx(lagging_ema(460.0, 7.0, 52))
+    assert round(sc.ema_21w_prev_1w, 2) == 390.54
     assert (sc.price_gt_21wema, sc.ema_21w_rising) == (1, 1)
 
 
@@ -649,8 +661,11 @@ def test_the_21_week_ema_ends_on_the_scored_days_close_mid_week():
     sc = analyze(rising(365), volumes_with_last(365, 2_000_000))
     weekly = reference_ema([100.0 + day for day in range(3, 364, 7)] + [464.0], 21)
 
-    assert sc.ema_21w == round(weekly[-1], 2) == 397.22
-    assert sc.ema_21w_prev_1w == round(weekly[-2], 2) == 390.54  # last Sunday's, as in the steady rise
+    assert sc.ema_21w == pytest.approx(weekly[-1])
+
+    assert round(sc.ema_21w, 2) == 397.22
+    assert sc.ema_21w_prev_1w == pytest.approx(weekly[-2])  # last Sunday's, as in the steady rise
+    assert round(sc.ema_21w_prev_1w, 2) == 390.54
     assert sc.ema_21w_rising == 1
 
 
@@ -660,8 +675,10 @@ def test_averages_and_emas_of_a_steady_fall():
 
     assert (sc.dma_20, sc.dma_20_prev_15d) == (142.5, 157.5)
     assert (sc.dma_200, sc.dma_200_prev_15d) == (232.5, 247.5)
-    assert sc.ema_21 == round(lagging_ema(133.0, -1.0, 368), 2) == 143.0
-    assert sc.ema_21w == round(lagging_ema(133.0, -7.0, 53), 2) == 202.51
+    assert sc.ema_21 == pytest.approx(lagging_ema(133.0, -1.0, 368))
+    assert round(sc.ema_21, 2) == 143.0
+    assert sc.ema_21w == pytest.approx(lagging_ema(133.0, -7.0, 53))
+    assert round(sc.ema_21w, 2) == 202.51
     for flag in SECONDARY_FLAGS[4:]:
         assert getattr(sc, flag) == 0, flag
 
@@ -1317,6 +1334,7 @@ def test_a_breakout_below_the_floor_has_no_breakout_position():
 
     assert (sc.breakout_phase, sc.status) == (BREAKOUT_SESSION, None)
     assert (sc.breakout_margin_pct, sc.invalidation_distance_pct, sc.sessions_since_breakout) == (None, None, None)
+    assert (sc.breakout_level, sc.breakout_date) == (None, None)
 
 
 # --- A breakout is one session ----------------------------------------------
@@ -1470,6 +1488,54 @@ def test_a_session_neither_breakout_nor_extended_has_no_position():
     assert session_positions([*BASE, 140.5], [*BASE_VOLUMES, 2_000_000]) == [(None, None, None)]
 
 
+def test_each_session_of_a_run_carries_its_exact_level_and_its_breakout_date():
+    # the run breaks BASE's 139.5 high at 142, on BASE's 81st session, 2026-03-22, and extends it at 145 and 148
+    closes = [*BASE, 0.01 + 142.0, 145.0, 148.0]
+    highs = [*BASE[:-1], 139.4999, 0.01 + 142.0, 145.0, 148.0]
+    volumes = [*BASE_VOLUMES, 2_000_000, 3_000_000, 3_000_000]
+
+    runs = [analyze(closes[:end], volumes[:end], highs[:end]) for end in range(len(BASE) + 1, len(closes) + 1)]
+
+    # the level is the 139.4999 high exactly, not that high rounded to the cent
+    assert [(sc.breakout_phase, sc.breakout_level, sc.breakout_date) for sc in runs] == [
+        (BREAKOUT_SESSION, 139.4999, date(2026, 3, 22)),
+        (EXTENDED_SESSION, 139.4999, date(2026, 3, 22)),
+        (EXTENDED_SESSION, 139.4999, date(2026, 3, 22)),
+    ]
+
+
+def test_a_session_outside_every_run_has_no_level_or_breakout_date():
+    sc = analyze([*BASE, 140.5], [*BASE_VOLUMES, 2_000_000])
+
+    assert (sc.breakout_phase, sc.breakout_level, sc.breakout_date) == (None, None, None)
+
+
+def test_every_session_carries_the_margin_a_breakout_on_it_must_clear():
+    # wide_lows: an average range of 4.40% over the 14 sessions before, so a breakout must clear 2.20%, whether or
+    # not this session breaks out
+    for close in (142.0, 143.0):
+        closes = [*BASE, close]
+        sc = analyze(closes, [*BASE_VOLUMES, 2_000_000], lows=wide_lows(closes))
+
+        assert sc.average_daily_range_pct == pytest.approx(sum(6 / c * 100 for c in BASE[-14:]) / 14)
+        assert round(sc.average_daily_range_pct, 2) == 4.40
+        assert sc.required_margin_pct == pytest.approx(sc.average_daily_range_pct / 2)
+
+
+def test_below_half_its_average_range_the_required_margin_is_the_floor():
+    # BASE's range of 1 / close, about 0.73% over its last 14 sessions: half of it is under the 1% floor
+    sc = analyze([*BASE, 142.0], [*BASE_VOLUMES, 2_000_000])
+
+    assert round(sc.average_daily_range_pct, 2) == 0.73
+    assert sc.required_margin_pct == 1.0
+
+
+def test_with_no_daily_range_known_the_session_has_no_average_range():
+    sc = analyze([*BASE, 142.0], [*BASE_VOLUMES, 2_000_000], lows=[*[None] * len(BASE), 136.0])
+
+    assert (sc.average_daily_range_pct, sc.required_margin_pct) == (None, 1.0)
+
+
 def test_an_extended_session_is_extended_whatever_its_secondary_indicators():
     assert with_status(flags(**passing(*INDICATOR_FLAGS), breakout_phase=EXTENDED_SESSION)).status == EXTENDED
 
@@ -1554,3 +1620,62 @@ def test_analyze_with_every_ticker_current_skips_none(capsys):
     ((items, _),) = criteria_repo.saved
     assert sorted(sc.ticker for sc in items) == ['AAA', 'BBB']
     assert 'skipped 0 stale tickers' in capsys.readouterr().out
+
+
+# --- The swing low -------------------------------------------------------------------------------------------------
+
+
+def lows_of(*values: float) -> np.ndarray:
+    return np.array(values, dtype=float)
+
+
+def test_the_swing_low_is_below_the_lows_of_the_3_sessions_on_each_side():
+    # row 3's 2 is below 5, 4, 3 before it and 3, 4, 5 after it; row 9 is the scored session
+    assert swing_low(lows_of(5, 4, 3, 2, 3, 4, 5, 6, 7, 8), 9) == 3
+
+
+def test_the_latest_swing_low_is_the_one_kept():
+    # rows 3 and 10 are both swing lows: 10 is the later one
+    lows = lows_of(5, 4, 3, 2, 3, 4, 5, 6, 5, 4, 3, 4, 5, 6, 7)
+
+    assert swing_low(lows, 14) == 10
+
+
+def test_a_swing_low_needs_its_3_later_sessions_before_the_scored_one():
+    lows = lows_of(5, 4, 3, 2, 3, 4, 5, 6)
+
+    # scored on row 6, row 3 has only 2 sessions after it before the scored one; on row 7, it has 3
+    assert swing_low(lows, 6) is None
+    assert swing_low(lows, 7) == 3
+
+
+def test_a_low_equal_to_a_neighbours_is_not_a_swing_low():
+    assert swing_low(lows_of(5, 4, 3, 2, 2, 4, 5, 6, 7, 8), 9) is None
+
+
+def test_a_swing_low_more_than_60_sessions_back_is_not_found():
+    # the swing low at row 3, then a steady rise to the scored session: found from 64 sessions after it, not from 65
+    lows = np.concatenate((lows_of(5, 4, 3, 2), np.arange(3.0, 3.0 + 70)))
+
+    assert swing_low(lows, 63) == 3
+    assert swing_low(lows, 64) is None
+
+
+def test_a_missing_low_beside_it_or_its_own_leaves_no_swing_low():
+    assert swing_low(lows_of(5, 4, float('nan'), 2, 3, 4, 5, 6, 7, 8), 9) is None
+    assert swing_low(lows_of(5, 4, 3, float('nan'), 3, 4, 5, 6, 7, 8), 9) is None
+
+
+def test_analyze_stores_the_swing_low_and_its_date():
+    # BASE's lows sit 1 under its closes; session 70 (2026-03-12) dips to 120, below its neighbours' 133 to 137
+    lows = [close - 1 for close in BASE] + [141.0]
+    lows[70] = 120.0
+    sc = analyze([*BASE, 142.0], [*BASE_VOLUMES, 2_000_000], lows=lows)
+
+    assert (sc.swing_low, sc.swing_low_date) == (120.0, date(2026, 3, 12))
+
+
+def test_a_steady_rise_has_no_swing_low():
+    sc = analyze([*BASE, 142.0], [*BASE_VOLUMES, 2_000_000])
+
+    assert (sc.swing_low, sc.swing_low_date) == (None, None)

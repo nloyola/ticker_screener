@@ -1,8 +1,9 @@
 """
 price_data.date is a real YYYY-MM-DD date, guaranteed by the schema, price_data has the day's high and low,
 stock_criteria has the breakout strategy's columns, core and secondary (trend, momentum and price action), the
-status, extended among its values, the average dollar volume and the 120-day tier, price_data and benchmark_price have
-the day's open, and older databases are upgraded to all of them.
+status, extended among its values, the average dollar volume, the 120-day tier and the export's values, price_data and
+benchmark_price have the day's open, signal_price each session's prior average volume and signal_track the retest, and
+older databases are upgraded to all of them.
 """
 
 import os
@@ -662,6 +663,25 @@ POSITION_COLUMNS = (
 )
 DOLLAR_VOLUME_COLUMNS = ('avg_dollar_volume REAL,',)
 TIER_COLUMNS = ('high_120d REAL,', 'dist_high_120d_pct REAL,', 'breakout_120d INTEGER,')
+# what the twenty-first upgrade added (_add_export_values): the export's values to stock_criteria and signal, each
+# path session's prior average volume to signal_price and the retest to signal_track
+EXPORT_COLUMNS = (
+    'breakout_level REAL,',
+    'breakout_date TEXT CHECK (date(breakout_date) IS breakout_date),',
+    'required_margin_pct REAL,',
+    'average_daily_range_pct REAL,',
+    'swing_low REAL,',
+    'swing_low_date TEXT CHECK (date(swing_low_date) IS swing_low_date),',
+)
+# a row stored before the twenty-first upgrade has none of the export's values
+NO_EXPORT_VALUES = (None,) * len(EXPORT_COLUMNS)
+PATH_EXPORT_COLUMNS = ('avg_volume_20d REAL,',)
+TRACK_EXPORT_COLUMNS = (
+    'retested INTEGER CHECK (retested IN (0, 1)),',
+    'retest_date TEXT CHECK (date(retest_date) IS retest_date),',
+    """retest_decided_at TIMESTAMP CHECK ((retested IS NULL) = (retest_decided_at IS NULL)
+                                          AND (retested IS 1) = (retest_date IS NOT NULL)),""",
+)
 
 
 # what the twentieth upgrade added to signal (_add_signal_kind): the kind, the link to a continuation's breakout and
@@ -693,14 +713,23 @@ def _old_signal(sql: str) -> str:
 def _without_columns(path: str, columns: tuple[str, ...], version: int) -> str:
     """
     The database at 'path', built from today's schema, with neither stock_criteria nor signal holding 'columns',
-    and signal as it stood before the twentieth upgrade when 'version' is older, stamped 'version', with two
-    stock_criteria rows and one signal.
+    and signal as it stood before the twentieth upgrade when 'version' is older, every table without what the
+    twenty-first upgrade added when 'version' is older, stamped 'version', with two stock_criteria rows and one
+    signal.
     """
     init_db(path)
+    removed = {'stock_criteria': columns, 'signal': columns}
+    if version < 21:
+        removed = {
+            'stock_criteria': columns + EXPORT_COLUMNS,
+            'signal': columns + EXPORT_COLUMNS,
+            'signal_price': PATH_EXPORT_COLUMNS,
+            'signal_track': TRACK_EXPORT_COLUMNS,
+        }
     statements = []
-    for table in ('stock_criteria', 'signal'):
+    for table, table_columns in removed.items():
         old = _query(path, 'SELECT sql FROM sqlite_master WHERE name = ?', table)[0][0]
-        for column in columns:
+        for column in table_columns:
             assert column in old
             old = old.replace(column, '')
         if table == 'signal' and version < 20:
@@ -751,10 +780,10 @@ def test_upgrade_adds_the_breakout_position_keeping_every_row(version_16_db, cur
         assert _table_sql(version_16_db, table) == _table_sql(current_db, table)
     # the rows already stored keep every value, with no position until a run scores them again
     assert _query(version_16_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
-        (*row, *[None] * 7) for row in criteria_before
+        (*row, *[None] * 7, *NO_EXPORT_VALUES) for row in criteria_before
     ]
     assert _query(version_16_db, 'SELECT * FROM signal') == [
-        (*row, *[None] * 7, 'signal', None) for row in signals_before
+        (*row, *[None] * 7, 'signal', None, *NO_EXPORT_VALUES) for row in signals_before
     ]
 
 
@@ -769,10 +798,10 @@ def test_upgrade_adds_the_average_dollar_volume_keeping_every_row(version_17_db,
         assert _table_sql(version_17_db, table) == _table_sql(current_db, table)
     # the rows already stored keep every value, with no dollar volume until a run scores them again
     assert _query(version_17_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
-        (*row, None, None, None, None) for row in criteria_before
+        (*row, None, None, None, None, *NO_EXPORT_VALUES) for row in criteria_before
     ]
     assert _query(version_17_db, 'SELECT * FROM signal') == [
-        (*row, None, None, None, None, 'signal', None) for row in signals_before
+        (*row, None, None, None, None, 'signal', None, *NO_EXPORT_VALUES) for row in signals_before
     ]
 
 
@@ -787,10 +816,10 @@ def test_upgrade_adds_the_120_day_tier_keeping_every_row(version_18_db, current_
         assert _table_sql(version_18_db, table) == _table_sql(current_db, table)
     # the rows already stored keep every value, with no tier until a run scores them again
     assert _query(version_18_db, 'SELECT * FROM stock_criteria ORDER BY id') == [
-        (*row, None, None, None) for row in criteria_before
+        (*row, None, None, None, *NO_EXPORT_VALUES) for row in criteria_before
     ]
     assert _query(version_18_db, 'SELECT * FROM signal') == [
-        (*row, None, None, None, 'signal', None) for row in signals_before
+        (*row, None, None, None, 'signal', None, *NO_EXPORT_VALUES) for row in signals_before
     ]
 
 
@@ -827,7 +856,7 @@ def test_upgrade_archives_every_kind_keeping_every_signal_as_a_signal(version_19
     for index in ('idx_signal_session_date', 'idx_signal_breakout_id'):
         assert _table_sql(version_19_db, index) == _table_sql(current_db, index)
     assert _query(version_19_db, 'SELECT * FROM signal ORDER BY id') == [
-        (*row, 'signal', None) for row in signals_before
+        (*row, 'signal', None, *NO_EXPORT_VALUES) for row in signals_before
     ]
     assert _query(version_19_db, "SELECT seq FROM sqlite_sequence WHERE name = 'signal'") == [(3,)]
     # the path still points at its signal, and every foreign key holds
@@ -861,3 +890,71 @@ def test_upgrade_leaves_a_signal_already_archiving_every_kind_as_it_is(current_d
     assert _query(current_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
     assert _table_sql(current_db, 'signal') == table_sql
     assert _query(current_db, 'SELECT * FROM signal') == before
+
+
+@pytest.fixture
+def version_20_db(tmp_path) -> str:
+    """
+    A database at version 20: no export values, holding a signal with a one-session path whose breakout failure is
+    decided, beside the two stock_criteria rows.
+    """
+    path = _without_columns(str(tmp_path / 'v20.db'), (), 20)
+    _execute(
+        path,
+        "INSERT INTO signal_price (signal_id, session_index, session_date, close, volume) VALUES (1, 0, '2026-11-12', "
+        '108.0, 900)',
+        'INSERT INTO signal_track (signal_id, breakout_level, breakout_failed, failure_date, failure_decided_at) '
+        "VALUES (1, 105.0, 1, '2026-11-13', '2026-11-14 01:00:00')",
+    )
+    return path
+
+
+def test_upgrade_adds_the_export_values_keeping_every_row(version_20_db, current_db):
+    before = {
+        table: _query(version_20_db, f'SELECT * FROM {table} ORDER BY 1')
+        for table in ('stock_criteria', 'signal', 'signal_price', 'signal_track')
+    }
+
+    upgrade_db(version_20_db)
+
+    assert _query(version_20_db, 'PRAGMA user_version') == [(SCHEMA_VERSION,)]
+    for table in before:
+        assert _table_sql(version_20_db, table) == _table_sql(current_db, table)
+    # the rows already stored keep every value, with none of the new ones: until a run scores a stock_criteria row
+    # again or rewrites a path, and for good in a signal, whose retest stays undecided
+    assert _query(version_20_db, 'SELECT * FROM stock_criteria ORDER BY 1') == [
+        (*row, *NO_EXPORT_VALUES) for row in before['stock_criteria']
+    ]
+    assert _query(version_20_db, 'SELECT * FROM signal ORDER BY 1') == [
+        (*row, *NO_EXPORT_VALUES) for row in before['signal']
+    ]
+    assert _query(version_20_db, 'SELECT * FROM signal_price ORDER BY 1') == [
+        (*row, None) for row in before['signal_price']
+    ]
+    assert _query(version_20_db, 'SELECT * FROM signal_track ORDER BY 1') == [
+        (*row, None, None, None) for row in before['signal_track']
+    ]
+
+
+def test_a_retest_is_refused_without_its_date_or_its_decision_time(current_db):
+    _execute(
+        current_db,
+        'INSERT INTO signal (id, ticker, market, time_zone, session_date, close, status, screener_version, '
+        "rule_settings, source) VALUES (1, 'XOM', 'US', 'America/New_York', '2026-11-12', 108.0, 'confirmed', "
+        "'2.0.0', '{}', 'live')",
+        'INSERT INTO signal_track (signal_id) VALUES (1)',
+    )
+    for retest in (
+        "retested = 1, retest_decided_at = '2026-11-14 01:00:00'",  # no date
+        "retested = 0, retest_date = '2026-11-13', retest_decided_at = '2026-11-14 01:00:00'",  # a date, not retested
+        "retested = 1, retest_date = '2026-11-13'",  # not marked decided
+        "retested = 1, retest_date = '2026-11-31', retest_decided_at = '2026-11-14 01:00:00'",  # not a date
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            _execute(current_db, f'UPDATE signal_track SET {retest} WHERE signal_id = 1')
+    _execute(
+        current_db,
+        "UPDATE signal_track SET retested = 1, retest_date = '2026-11-13', retest_decided_at = '2026-11-14 01:00:00' "
+        'WHERE signal_id = 1',
+    )
+    assert _query(current_db, 'SELECT retested, retest_date FROM signal_track') == [(1, '2026-11-13')]

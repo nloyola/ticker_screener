@@ -867,6 +867,48 @@ def _add_signal_kind(con: sqlite3.Connection) -> None:
     logger.info('Rebuilt signal to archive every kind of record, keeping its %d signals', rows)
 
 
+def _add_export_values(con: sqlite3.Connection) -> None:
+    """
+    Version 21: the values the screen export reports beside the scores (the parent's issue #70). stock_criteria and
+    signal gain the exact breakout level, the breakout date, the required margin, the average daily range and the
+    swing low with its date (ExportValues in app/analyzer.py); signal_price gains each session's prior average volume;
+    and signal_track gains the retest, whether decided, on which session and when. Every column is left NULL in the
+    rows already stored: until the next analyze replaces a stock_criteria row, until the next run rewrites a path that
+    is not frozen, and for good in a signal, which is append-only. Adds only what a table lacks, so a table schema.sql
+    created this way is left as it is.
+    """
+    # spelled out here, not read from schema.sql, so that a later schema change cannot alter a shipped upgrade
+    criteria = (
+        ('breakout_level', 'REAL'),
+        ('breakout_date', 'TEXT CHECK (date(breakout_date) IS breakout_date)'),
+        ('required_margin_pct', 'REAL'),
+        ('average_daily_range_pct', 'REAL'),
+        ('swing_low', 'REAL'),
+        ('swing_low_date', 'TEXT CHECK (date(swing_low_date) IS swing_low_date)'),
+    )
+    added = {
+        'stock_criteria': criteria,
+        'signal': criteria,
+        'signal_price': (('avg_volume_20d', 'REAL'),),
+        'signal_track': (
+            ('retested', 'INTEGER CHECK (retested IN (0, 1))'),
+            ('retest_date', 'TEXT CHECK (date(retest_date) IS retest_date)'),
+            (
+                'retest_decided_at',
+                'TIMESTAMP CHECK ((retested IS NULL) = (retest_decided_at IS NULL) '
+                'AND (retested IS 1) = (retest_date IS NOT NULL))',
+            ),
+        ),
+    }
+    for table, table_columns in added.items():
+        columns = {row[1] for row in con.execute(f"PRAGMA table_info('{table}')")}
+        if not columns:
+            continue  # no table: schema.sql creates it this way
+        for column, kind in table_columns:
+            if column not in columns:
+                con.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -888,6 +930,7 @@ UPGRADES = (
     _add_avg_dollar_volume,
     _add_tier,
     _add_signal_kind,
+    _add_export_values,
 )
 SCHEMA_VERSION = len(UPGRADES)
 
