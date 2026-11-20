@@ -117,7 +117,8 @@ HIGH_CONVICTION_MIN = 4
 # MIN_DOLLAR_VOLUME, or whose close is below its market's MIN_PRICE, gets no status, since a thin stock's breakout
 # cannot be traded at its signal price. It is still scored, so its values stay visible and the floor can be tested.
 # A market's floors are in its own currency: a Canadian ticker's in Canadian dollars. The average excludes the
-# scored session, as every lookback does, so a breakout day's own volume never lifts a thin stock over the floor.
+# scored session, as every lookback does, and on a session of a breakout run it is measured before the run's breakout
+# (liquidity_row), so neither a breakout day's own volume nor its run's later sessions lift a thin stock over the floor.
 DOLLAR_VOLUME_DAYS = 20
 MIN_DOLLAR_VOLUME = {US: 5_000_000.0, CANADA: 5_000_000.0}
 MIN_PRICE = {US: 5.0, CANADA: 5.0}
@@ -580,6 +581,17 @@ def average_dollar_volume(closes: np.ndarray, volumes: np.ndarray, row: int) -> 
     return None if math.isnan(total) else total / DOLLAR_VOLUME_DAYS
 
 
+def liquidity_row(runs: BreakoutRuns, row: int) -> int:
+    """
+    The row whose average_dollar_volume the liquidity floor judges 'row' by: on a breakout or extended session its
+    run's breakout session, so the heavy volume of a breakout and of the run after it never lifts a thin stock over
+    the floor while the run lasts; on any other session 'row' itself.
+    """
+    if runs.phase[row] in (BREAKOUT_SESSION, EXTENDED_SESSION):
+        return int(runs.start[row])
+    return row
+
+
 def above_liquidity_floor(sc: StockCriteria) -> bool:
     """
     Whether 'sc' clears its market's liquidity floor: an average dollar volume of at least MIN_DOLLAR_VOLUME and a
@@ -597,13 +609,22 @@ def above_liquidity_floor(sc: StockCriteria) -> bool:
 def with_status(sc: StockCriteria) -> StockCriteria:
     """
     'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none. A ticker below its
-    market's liquidity floor (above_liquidity_floor) has none. Otherwise only a breakout session (breakout_phase) is
-    confirmed or high-conviction; a later session of its run is extended; any other session passing both trend
-    conditions and closing near its resistance is on the pre-breakout watchlist.
+    market's liquidity floor (above_liquidity_floor) has none, nor a breakout position, which only a breakout or
+    extended session with its status keeps, as when a later run clears a status (StockCriteriaRepo.clear_status).
+    Otherwise only a breakout session (breakout_phase) is confirmed or high-conviction; a later session of its run is
+    extended; any other session passing both trend conditions and closing near its resistance is on the pre-breakout
+    watchlist.
     """
     passed = sum(passes(sc) for passes in SECONDARY_INDICATORS.values())
     if not above_liquidity_floor(sc):
-        return replace(sc, secondary_passed=passed, status=None)
+        return replace(
+            sc,
+            secondary_passed=passed,
+            status=None,
+            breakout_margin_pct=None,
+            invalidation_distance_pct=None,
+            sessions_since_breakout=None,
+        )
     status = None
     if sc.breakout_phase == BREAKOUT_SESSION:
         status = HIGH_CONVICTION if passed >= HIGH_CONVICTION_MIN else CONFIRMED
@@ -914,7 +935,13 @@ class Analyzer:
         return MarketScore(newest, scored, skipped)
 
     def archive_signals(
-        self, scored: list[Scored], run_id: int | None, settings: str, commit: str | None, source: str = LIVE
+        self,
+        scored: list[Scored],
+        run_id: int | None,
+        settings: str,
+        commit: str | None,
+        source: str = LIVE,
+        non_primary: Mapping[str, str] | None = None,
     ) -> int:
         """
         Archives each of 'scored' that is a signal, status confirmed or high-conviction, as a signal of the session
@@ -922,9 +949,11 @@ class Analyzer:
         days since it. A signal already archived for the same ticker, session and version is left as it was, so a
         rerun of a session adds nothing. A listing that is not its issuer's primary (IssuerRepo) is left out, keeping
         its status in stock_criteria, so a company listed twice is archived once, under its primary listing, by
-        today's issuers. Logs and returns how many it archived.
+        today's issuers: 'non_primary' (IssuerRepo.non_primary), read here when not given, so a backfill archiving
+        session after session reads it once. Logs and returns how many it archived.
         """
-        non_primary = self.issuer_repo.non_primary()
+        if non_primary is None:
+            non_primary = self.issuer_repo.non_primary()
         signals: list[Signal] = []
         left_out: list[str] = []
         for s in scored:
@@ -1154,7 +1183,7 @@ class Analyzer:
             # unrounded, so a ratio just under the threshold never reads as on it
             volume_ratio=volume_ratio,
             # unrounded, like volume_ratio, so a value just under the floor never reads as on it
-            avg_dollar_volume=average_dollar_volume(closes, volumes, last),
+            avg_dollar_volume=average_dollar_volume(closes, volumes, liquidity_row(runs, last)),
             dma_50=round(dma_50, 2),
             dma_50_prev_15d=round(dma_50_prior, 2),
             rsi=round(rsi_val, 2),

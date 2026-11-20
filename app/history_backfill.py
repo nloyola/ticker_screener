@@ -292,12 +292,15 @@ class HistoryBackfill:
         the tickers of those archived to 'tickers'. Returns how many it archived.
         """
         archived = 0
+        non_primary = self.analyzer.issuer_repo.non_primary()
         by_session: dict[date, list[Scored]] = {}
         for s in signals:
             by_session.setdefault(s.session_date, []).append(s)
         for session_signals in by_session.values():
             with quiet('app.analyzer'):
-                stored = self.analyzer.archive_signals(session_signals, None, settings, commit, source=BACKFILL)
+                stored = self.analyzer.archive_signals(
+                    session_signals, None, settings, commit, source=BACKFILL, non_primary=non_primary
+                )
             if stored:
                 archived += stored
                 tickers.update(s.criteria.ticker for s in session_signals)

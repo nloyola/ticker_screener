@@ -79,9 +79,10 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- avg_dollar_volume after those; change both together. status is the strategy's status (with_status in
 -- app/analyzer.py), NULL for a ticker with none, and always NULL below the liquidity floor (above_liquidity_floor).
 -- avg_dollar_volume, the floor's measure, is the mean close times volume of the DOLLAR_VOLUME_DAYS sessions before
--- the scored one, in the market's own currency (average_dollar_volume), NULL when one lacks a volume. On a breakout
--- or extended session, breakout_margin_pct is the close's margin over the level its run broke, in percent of the
--- level, invalidation_distance_pct the distance from the close down to that level, in percent of the close, and
+-- the scored one, or before its run's breakout on a breakout or extended session (liquidity_row), in the market's own
+-- currency (average_dollar_volume), NULL when one lacks a volume. On a breakout or extended session above the floor,
+-- breakout_margin_pct is the close's margin over the level its run broke, in percent of the level,
+-- invalidation_distance_pct the distance from the close down to that level, in percent of the close, and
 -- sessions_since_breakout the sessions since the run's breakout, 0 on the breakout (breakout_position in
 -- app/analyzer.py); all three are NULL on any other session.
 CREATE TABLE IF NOT EXISTS stock_criteria (

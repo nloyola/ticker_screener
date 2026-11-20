@@ -1228,6 +1228,24 @@ def test_below_the_floor_no_session_has_a_status(values):
     assert with_status(thin).status is None
 
 
+def test_a_thin_breakouts_volume_does_not_lift_its_run_over_the_floor():
+    # BASE's last 20 closes, 130 to 139.5, average 134.75: on 30,000 shares a day $4,042,500, below the floor. 142
+    # breaks out on 300,000 shares and 145 extends it; scored before the breakout, 145's average is still $4,042,500,
+    # where its own 20 sessions, which hold the breakout's $42.6M, would average $5,977,500, over the floor
+    closes = [*BASE, 142.0, 145.0]
+    volumes = [*[30_000] * len(BASE), 300_000, 30_000]
+
+    assert session_statuses(closes, volumes) == [None, None]
+    assert analyze(closes, volumes).avg_dollar_volume == pytest.approx(4_042_500.0)
+
+
+def test_a_breakout_below_the_floor_has_no_breakout_position():
+    sc = with_status(analyze([*BASE, 142.0], [*[30_000] * len(BASE), 300_000]))
+
+    assert (sc.breakout_phase, sc.status) == (BREAKOUT_SESSION, None)
+    assert (sc.breakout_margin_pct, sc.invalidation_distance_pct, sc.sessions_since_breakout) == (None, None, None)
+
+
 # --- A breakout is one session ----------------------------------------------
 #
 # BASE is 80 sessions rising by 0.5 from 100 to 139.5 on 1,000,000 shares a day, each closing at its high with its low 1
