@@ -80,7 +80,7 @@ def price_rows(ticker: str, last_day: date, n: int = 100) -> list[PriceData]:
             ticker=ticker,
             date=days[i],
             close=100.0 + i,
-            volume=2000 if i == n - 1 else 1000,
+            volume=2_000_000 if i == n - 1 else 1_000_000,
         )
         for i in range(n)
     ]
@@ -663,7 +663,7 @@ def test_analyze_stores_each_tickers_status(path, container):
     # BRK breaks out on doubled volume; NEAR closes at 197, 1.5% under its 200 high; FALL closes lower every day
     container.price_data_repo.bulk_insert(with_breakout(price_rows('BRK', TODAY)))
     near = price_rows('NEAR', TODAY, n=101)
-    container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1000)])
+    container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1_000_000)])
     fall = price_rows('FALL', TODAY)
     container.price_data_repo.bulk_insert([replace(row, close=300.0 - i) for i, row in enumerate(fall)])
 
@@ -686,7 +686,7 @@ def test_analyze_stores_the_extended_status_of_a_session_after_a_breakout(path, 
     # EXT broke out yesterday, closing at 202 over its 198 high, and closes at 203 today on its usual volume: still
     # above the 198 level, in the breakout's run
     yesterday = with_breakout(price_rows('EXT', shift(TODAY, -1)))
-    today = replace(price_rows('EXT', TODAY, n=1)[0], close=203.0, volume=1000)
+    today = replace(price_rows('EXT', TODAY, n=1)[0], close=203.0, volume=1_000_000)
     container.price_data_repo.bulk_insert([*yesterday, today])
 
     container.analyzer.analyze(started_at=EVENING)
@@ -700,6 +700,32 @@ def test_analyze_stores_the_extended_status_of_a_session_after_a_breakout(path, 
         pytest.approx(5 / 203 * 100),
         1,
     )
+
+
+def test_a_breakout_below_the_liquidity_floor_is_stored_with_its_values_but_no_status(path, container):
+    # BRK, THIN and THIN.TO break out alike, closing at 202 over their 198 highs on doubled volume, but THIN and
+    # THIN.TO trade 1,000 shares a day where BRK trades 1,000,000: over the 20 sessions before, closing at 179 to 198,
+    # a mean of 188.5, that is $188,500 a day, under the $5M floor in either market, and $188.5M
+    add_energy_oil(path)
+    container.price_data_repo.bulk_insert(with_breakout(price_rows('BRK', TODAY)))
+    for ticker in ('THIN', 'THIN.TO'):
+        rows = with_breakout(price_rows(ticker, TODAY))
+        container.price_data_repo.bulk_insert([replace(row, volume=row.volume // 1000) for row in rows])
+
+    container.analyzer.analyze(started_at=EVENING)
+
+    stored = table_rows(path, 'stock_criteria')
+    assert {t: (r['core_criteria_score'], r['status']) for t, r in stored.items()} == {
+        'BRK': (4, 'confirmed'),
+        'THIN': (4, None),
+        'THIN.TO': (4, None),
+    }
+    assert {t: r['avg_dollar_volume'] for t, r in stored.items()} == pytest.approx(
+        {'BRK': 188_500_000.0, 'THIN': 188_500.0, 'THIN.TO': 188_500.0}
+    )
+    with sqlite3.connect(path) as con:
+        archived = con.execute('SELECT ticker, avg_dollar_volume FROM signal').fetchall()
+    assert archived == [('BRK', pytest.approx(188_500_000.0))]
 
 
 # Friday 2026-11-06 in the evening, once the US market has published that day's rows
@@ -911,7 +937,9 @@ def market_rows(ticker: str, last_day: date) -> list[PriceData]:
             days.append(day)
         day -= timedelta(days=1)
     return [
-        PriceData(id=0, subsector_id=1, ticker=ticker, date=d, close=100.0 + i, volume=2000 if i == 99 else 1000)
+        PriceData(
+            id=0, subsector_id=1, ticker=ticker, date=d, close=100.0 + i, volume=2_000_000 if i == 99 else 1_000_000
+        )
         for i, d in enumerate(reversed(days))
     ]
 
@@ -1076,7 +1104,7 @@ def breakout_rows(path: str, container) -> None:
     container.price_data_repo.bulk_insert([*brk[:-1], replace(brk[-1], close=202.456)])
     container.price_data_repo.bulk_insert(with_breakout(price_rows('SHOP.TO', TODAY)))
     near = price_rows('NEAR', TODAY, n=101)
-    container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1000)])
+    container.price_data_repo.bulk_insert([*near[:-1], replace(near[-1], close=197.0, volume=1_000_000)])
     fall = price_rows('FALL', TODAY)
     container.price_data_repo.bulk_insert([replace(row, close=300.0 - i) for i, row in enumerate(fall)])
 
@@ -1184,7 +1212,7 @@ def test_repeated_signal_links_to_the_previous_one(path, container):
     later = [
         replace(row, id=0, close=close, volume=volume)
         for row, close, volume in zip(
-            price_rows('BRK', TODAY, n=3), (197.0, 196.0, 205.0), (1000, 1000, 2000), strict=True
+            price_rows('BRK', TODAY, n=3), (197.0, 196.0, 205.0), (1_000_000, 1_000_000, 2_000_000), strict=True
         )
     ]
     container.price_data_repo.replace_for_ticker('BRK', [*first, *later])

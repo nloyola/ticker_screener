@@ -64,7 +64,11 @@ def test_a_new_constant_left_out_of_the_snapshot_is_caught():
 def test_snapshot_values_are_the_analyzers():
     for name, value in rule_settings().items():
         current = getattr(analyzer, name)
-        expected = list(current) if isinstance(current, tuple | dict) else current
+        if isinstance(current, tuple) or name == 'SECONDARY_INDICATORS':
+            # a tuple as a list, and the secondary indicators by name, their tests being functions
+            expected = list(current)
+        else:
+            expected = current
         assert value == expected, name
 
 

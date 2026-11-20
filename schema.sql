@@ -74,10 +74,13 @@ CREATE TABLE IF NOT EXISTS price_data (
 -- dma_50_25d_ago, price_gt_10ema) and adds volume_ratio, the fifth renames rsi_50_75 and macd_bullish and adds the
 -- trend and momentum indicators' columns after it, the sixth the price action indicators' after those, and the
 -- seventh the relative strength columns after those, and the eighth secondary_passed and status after those, where
--- ALTER TABLE places them, the sixteenth rebuilds the table to let status be extended, and the seventeenth adds
--- breakout_margin_pct, invalidation_distance_pct and sessions_since_breakout after status; change both together.
--- status is the strategy's status (with_status in app/analyzer.py), NULL for a ticker with none. On a breakout or
--- extended session, breakout_margin_pct is the close's margin over the level its run broke, in percent of the
+-- ALTER TABLE places them, the sixteenth rebuilds the table to let status be extended, the seventeenth adds
+-- breakout_margin_pct, invalidation_distance_pct and sessions_since_breakout after status, and the eighteenth
+-- avg_dollar_volume after those; change both together. status is the strategy's status (with_status in
+-- app/analyzer.py), NULL for a ticker with none, and always NULL below the liquidity floor (above_liquidity_floor).
+-- avg_dollar_volume, the floor's measure, is the mean close times volume of the DOLLAR_VOLUME_DAYS sessions before
+-- the scored one, in the market's own currency (average_dollar_volume), NULL when one lacks a volume. On a breakout
+-- or extended session, breakout_margin_pct is the close's margin over the level its run broke, in percent of the
 -- level, invalidation_distance_pct the distance from the close down to that level, in percent of the close, and
 -- sessions_since_breakout the sessions since the run's breakout, 0 on the breakout (breakout_position in
 -- app/analyzer.py); all three are NULL on any other session.
@@ -151,6 +154,7 @@ CREATE TABLE IF NOT EXISTS stock_criteria (
        breakout_margin_pct REAL,
        invalidation_distance_pct REAL,
        sessions_since_breakout INTEGER,
+       avg_dollar_volume REAL,
        UNIQUE (ticker)
 );
 
@@ -196,7 +200,8 @@ CREATE TABLE IF NOT EXISTS screened_session (
 -- a session adds nothing: one signal per ticker, session and screener version, whose unique index also serves the
 -- lookups by ticker. Not market data: db-init and the dashboard's ticker removals never touch it. The eleventh
 -- upgrade in app/db.py creates it in databases from before it, and the seventeenth adds the breakout position's
--- columns after archived_at, NULL in the signals archived before it; change both together.
+-- columns after archived_at and the eighteenth avg_dollar_volume after those, NULL in the signals archived before
+-- them; change both together.
 CREATE TABLE IF NOT EXISTS signal (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        ticker TEXT NOT NULL,
@@ -280,6 +285,7 @@ CREATE TABLE IF NOT EXISTS signal (
        breakout_margin_pct REAL,
        invalidation_distance_pct REAL,
        sessions_since_breakout INTEGER,
+       avg_dollar_volume REAL,
        CHECK ((previous_signal_id IS NULL) = (trading_days_since_previous IS NULL)),
        UNIQUE (ticker, session_date, screener_version)
 );

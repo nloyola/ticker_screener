@@ -130,6 +130,9 @@ class StockCriteria:
     breakout_margin_pct: float | None = None
     invalidation_distance_pct: float | None = None
     sessions_since_breakout: int | None = None
+    # the liquidity floor's measure (average_dollar_volume in app/analyzer.py): the mean close times volume of the
+    # DOLLAR_VOLUME_DAYS sessions before the scored one, in the market's own currency; None when one lacks a volume
+    avg_dollar_volume: float | None = None
     # the session's place in a breakout run, which decides its status (breakout_runs in app/analyzer.py): 'breakout',
     # 'extended' or None; not stored
     breakout_phase: str | None = None

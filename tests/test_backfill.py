@@ -49,7 +49,8 @@ EVENING = datetime.combine(LAST, time(20), tzinfo=NEW_YORK)
 # the 51st calendar week starts on the 251st weekday, the first session with enough history for the 21-week EMA's
 # rising check (the 200-day SMA's needs only 215)
 FIRST_REPLAYABLE = 250
-# every fifth day trades three times the usual volume, 3000 against an average of 1400 over the 20 days before it
+# every fifth day trades three times the usual volume, 3,000,000 against an average of 1,400,000 over the 20 days
+# before it
 SPIKE_EVERY = 5
 
 
@@ -85,10 +86,10 @@ CYCLE_OFFSETS = (4.0, -3.0, -4.0, -3.0, -2.0)
 
 def rows(ticker: str, days: list[date] = DAYS) -> list[PriceData]:
     """
-    Closes rising by 1 a day from 100 in cycles of SPIKE_EVERY sessions (CYCLE_OFFSETS), each day's range from 2
-    below its close to half a point above it, on 1000 shares a day and 3000 on the first of each cycle. That spike
-    day closes 4.5 above the previous spike's high, clearing it by more than the margin, and the next 2 days close
-    below that high, ending the breakout's run: a confirmed breakout on every spike day with enough history.
+    Closes rising by 1 a day from 100 in cycles of SPIKE_EVERY sessions (CYCLE_OFFSETS), each day's range from 2 below
+    its close to half a point above it, on 1,000,000 shares a day and 3,000,000 on the first of each cycle. That spike
+    day closes 4.5 above the previous spike's high, clearing it by more than the margin, and the next 2 days close below
+    that high, ending the breakout's run: a confirmed breakout on every spike day with enough history.
     """
     closes = [100.0 + i + CYCLE_OFFSETS[i % SPIKE_EVERY] for i in range(len(days))]
     return [
@@ -100,7 +101,7 @@ def rows(ticker: str, days: list[date] = DAYS) -> list[PriceData]:
             close=close,
             high=close + 0.5,
             low=close - 2,
-            volume=3000 if i % SPIKE_EVERY == 0 else 1000,
+            volume=3_000_000 if i % SPIKE_EVERY == 0 else 1_000_000,
         )
         for i, (day, close) in enumerate(zip(days, closes, strict=True))
     ]
@@ -178,9 +179,9 @@ def test_replayed_signal_matches_the_prices_on_its_session(path, container):
     assert signal['close'] == prices[i].close
     assert signal['high_20d'] == max(p.high for p in before)
     assert signal['high_60d'] == max(p.high for p in prices[i - 60 : i])
-    assert signal['volume'] == prices[i].volume == 3000
-    assert signal['avg_vol_20d'] == sum(p.volume for p in before) / 20 == 1400
-    assert signal['volume_ratio'] == pytest.approx(3000 / 1400)
+    assert signal['volume'] == prices[i].volume == 3_000_000
+    assert signal['avg_vol_20d'] == sum(p.volume for p in before) / 20 == 1_400_000
+    assert signal['volume_ratio'] == pytest.approx(3_000_000 / 1_400_000)
     assert (signal['breakout_20d'], signal['breakout_60d'], signal['breakout_confirmed']) == (1, 1, 1)
 
 

@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import statistics
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -14,9 +15,11 @@ from ta.trend import MACD
 from app.container import Container
 from app.markets import (
     BENCHMARKS,
+    CANADA,
     MARKET_CLOSES,
     MARKETS,
     PUBLISH_DELAY,
+    US,
     UnsupportedTicker,
     exchange_of,
     last_complete_session,
@@ -108,6 +111,16 @@ PRE_BREAKOUT = 'pre_breakout'
 EXTENDED = 'extended'
 HIGH_CONVICTION_MIN = 4
 
+# The liquidity floor (GLOSSARY.md, "Liquidity floor"): a ticker whose average daily dollar volume, its close times
+# its volume averaged over the DOLLAR_VOLUME_DAYS sessions before the scored one, is below its market's
+# MIN_DOLLAR_VOLUME, or whose close is below its market's MIN_PRICE, gets no status, since a thin stock's breakout
+# cannot be traded at its signal price. It is still scored, so its values stay visible and the floor can be tested.
+# A market's floors are in its own currency: a Canadian ticker's in Canadian dollars. The average excludes the
+# scored session, as every lookback does, so a breakout day's own volume never lifts a thin stock over the floor.
+DOLLAR_VOLUME_DAYS = 20
+MIN_DOLLAR_VOLUME = {US: 5_000_000.0, CANADA: 5_000_000.0}
+MIN_PRICE = {US: 5.0, CANADA: 5.0}
+
 # A breakout is one session (breakout_runs, GLOSSARY.md "Status"): the first on which a ticker meets the four core
 # conditions with its close clearing the broken level, the prior 60-day high when the 60-day breakout passed and the
 # prior 20-day high otherwise, by the minimum margin. That margin is the larger of MARGIN_FLOOR_PCT and
@@ -180,7 +193,8 @@ def rule_settings() -> dict[str, object]:
     """
     The snapshot of the rules SCREENER_VERSION names: every threshold and window the analyzer scores with, keyed by
     its constant's name, and the secondary indicators a high-conviction breakout counts, in a form json.dumps takes
-    (a tuple as a list). tests/test_rule_settings.py fails when a constant is added here without being listed.
+    (a tuple as a list, a market's floors as a dict). tests/test_rule_settings.py fails when a constant is added here
+    without being listed.
     """
     return {
         'BREAKOUT_WINDOWS': list(BREAKOUT_WINDOWS),
@@ -207,6 +221,9 @@ def rule_settings() -> dict[str, object]:
         'RS_3M_DAYS': RS_3M_DAYS,
         'SECTOR_MIN_TICKERS': SECTOR_MIN_TICKERS,
         'HIGH_CONVICTION_MIN': HIGH_CONVICTION_MIN,
+        'DOLLAR_VOLUME_DAYS': DOLLAR_VOLUME_DAYS,
+        'MIN_DOLLAR_VOLUME': dict(MIN_DOLLAR_VOLUME),
+        'MIN_PRICE': dict(MIN_PRICE),
         'MARGIN_FLOOR_PCT': MARGIN_FLOOR_PCT,
         'MARGIN_RANGE_FRACTION': MARGIN_RANGE_FRACTION,
         'RANGE_DAYS': RANGE_DAYS,
@@ -549,13 +566,43 @@ def breakout_position(runs: BreakoutRuns, closes: np.ndarray, row: int) -> Break
     )
 
 
+def average_dollar_volume(closes: np.ndarray, volumes: np.ndarray, row: int) -> float | None:
+    """
+    The mean of close times volume over the DOLLAR_VOLUME_DAYS rows before 'row' (oldest first), the liquidity
+    floor's measure, or None when there are fewer rows or one of them has no volume (NaN). The sum is exactly rounded
+    (math.fsum), so the history replay, which reads the same rows out of a longer series, gives the same value.
+    """
+    if row < DOLLAR_VOLUME_DAYS:
+        return None
+    window = slice(row - DOLLAR_VOLUME_DAYS, row)
+    total = math.fsum((closes[window] * volumes[window]).tolist())
+    return None if math.isnan(total) else total / DOLLAR_VOLUME_DAYS
+
+
+def above_liquidity_floor(sc: StockCriteria) -> bool:
+    """
+    Whether 'sc' clears its market's liquidity floor: an average dollar volume of at least MIN_DOLLAR_VOLUME and a
+    close of at least MIN_PRICE. A ticker with no average dollar volume does not clear it.
+    """
+    market = market_of(sc.ticker)
+    return (
+        sc.avg_dollar_volume is not None
+        and sc.avg_dollar_volume >= MIN_DOLLAR_VOLUME[market]
+        and sc.price is not None
+        and sc.price >= MIN_PRICE[market]
+    )
+
+
 def with_status(sc: StockCriteria) -> StockCriteria:
     """
-    'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none. Only a breakout
-    session (breakout_phase) is confirmed or high-conviction; a later session of its run is extended; any other
-    session passing both trend conditions and closing near its resistance is on the pre-breakout watchlist.
+    'sc' with the number of SECONDARY_INDICATORS it passes and its status, None when it has none. A ticker below its
+    market's liquidity floor (above_liquidity_floor) has none. Otherwise only a breakout session (breakout_phase) is
+    confirmed or high-conviction; a later session of its run is extended; any other session passing both trend
+    conditions and closing near its resistance is on the pre-breakout watchlist.
     """
     passed = sum(passes(sc) for passes in SECONDARY_INDICATORS.values())
+    if not above_liquidity_floor(sc):
+        return replace(sc, secondary_passed=passed, status=None)
     status = None
     if sc.breakout_phase == BREAKOUT_SESSION:
         status = HIGH_CONVICTION if passed >= HIGH_CONVICTION_MIN else CONFIRMED
@@ -1094,6 +1141,8 @@ class Analyzer:
             avg_vol_20d=int(avg_vol),
             # unrounded, so a ratio just under the threshold never reads as on it
             volume_ratio=volume_ratio,
+            # unrounded, like volume_ratio, so a value just under the floor never reads as on it
+            avg_dollar_volume=average_dollar_volume(closes, volumes, last),
             dma_50=round(dma_50, 2),
             dma_50_prev_15d=round(dma_50_prior, 2),
             rsi=round(rsi_val, 2),

@@ -29,16 +29,18 @@ from app.analyzer import (
     EXTENDED,
     EXTENDED_SESSION,
     HIGH_CONVICTION,
+    MIN_DOLLAR_VOLUME,
+    MIN_PRICE,
     PRE_BREAKOUT,
     SECONDARY_INDICATORS,
     Analyzer,
     with_status,
 )
-from app.markets import US, is_session
+from app.markets import US, is_session, market_of
 from app.models import PriceData, ScreenedSession, Signal, StockCriteria
 
 SUBSECTOR_ID = 7
-BASE_VOLUME = 1000
+BASE_VOLUME = 1_000_000
 
 
 class FakePriceDataRepo:
@@ -157,9 +159,10 @@ def analyze(
     highs: list[float | None] | None = None,
     lows: list[float | None] | None = None,
     benchmark: dict[date, float] | None = None,
+    ticker: str = 'TEST',
 ) -> StockCriteria | None:
     """Runs analyze_ticker on one ticker's rows, grouped as Analyzer._analyze groups them."""
-    analyzer, _ = make_analyzer(price_rows('TEST', closes, volumes, highs, lows))
+    analyzer, _ = make_analyzer(price_rows(ticker, closes, volumes, highs, lows))
     df = analyzer.load_price_data()
     ((ticker, group_df),) = list(df.groupby(level='ticker'))
     return analyzer.analyze_ticker(ticker, group_df, benchmark)
@@ -178,8 +181,8 @@ def zigzag(n: int, start: float = 100.0, up: float = 2.0, down: float = 1.0) -> 
     return closes
 
 
-def volumes_with_last(n: int, last: int, spikes: dict[int, int] | None = None) -> list[int]:
-    volumes = [BASE_VOLUME] * n
+def volumes_with_last(n: int, last: int, spikes: dict[int, int] | None = None, base: int = BASE_VOLUME) -> list[int]:
+    volumes = [base] * n
     for index, volume in (spikes or {}).items():
         volumes[index] = volume
     volumes[-1] = last
@@ -200,8 +203,8 @@ def core_flags(sc: StockCriteria) -> dict[str, int]:
 
 
 def test_clean_breakout_meets_every_core_criterion():
-    # closes 100..199, volume 1000 a day and 2000 on the last day
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    # closes 100..199, volume 1,000,000 a day and 2,000,000 on the last day
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert sc.ticker == 'TEST'
     assert sc.subsector_id == SUBSECTOR_ID
@@ -210,8 +213,8 @@ def test_clean_breakout_meets_every_core_criterion():
     assert sc.high_60d == 198.0
     assert sc.dma_50 == 174.5  # mean of 150..199
     assert sc.dma_50_prev_15d == 159.5  # 15 trading days earlier: mean of 135..184
-    assert sc.volume == 2000
-    assert sc.avg_vol_20d == 1000  # the 20 days before today, not including its 2000
+    assert sc.volume == 2_000_000
+    assert sc.avg_vol_20d == 1_000_000  # the 20 days before today, not including its 2,000,000
     assert sc.volume_ratio == 2.0
 
     assert core_flags(sc) == dict.fromkeys(core_flags(sc), 1)
@@ -220,14 +223,14 @@ def test_clean_breakout_meets_every_core_criterion():
 
 
 def test_macd_and_signal_of_a_steady_rise():
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert sc.macd == pytest.approx(7.0, abs=0.01)
     assert sc.signal == pytest.approx(7.0, abs=0.01)
 
 
 def test_values_are_rounded_to_two_places():
-    sc = analyze(rising(100, start=100.123, step=1.0), volumes_with_last(100, 2000))
+    sc = analyze(rising(100, start=100.123, step=1.0), volumes_with_last(100, 2_000_000))
 
     assert sc.price == 199.12
     assert sc.high_20d == 198.12
@@ -240,7 +243,7 @@ def test_values_are_rounded_to_two_places():
 def test_20_day_breakout_without_a_60_day_breakout():
     # closes 100..179, then a fall to 160 for 20 days: the 60-day high (179) stays out of reach of a jump to 175
     closes = rising(80) + [160.0] * 20 + [175.0]
-    sc = analyze(closes, volumes_with_last(len(closes), 2000))
+    sc = analyze(closes, volumes_with_last(len(closes), 2_000_000))
 
     assert sc.high_20d == 160.0
     assert sc.high_60d == 179.0
@@ -256,7 +259,7 @@ def test_20_day_breakout_without_a_60_day_breakout():
 def test_no_breakout_at_the_previous_high():
     # today's close equals the 20-day high: not above it
     closes = rising(99) + [198.0]
-    sc = analyze(closes, volumes_with_last(100, 2000))
+    sc = analyze(closes, volumes_with_last(100, 2_000_000))
 
     assert sc.high_20d == 198.0
     assert sc.breakout_20d == 0
@@ -270,7 +273,7 @@ def test_the_breakout_is_measured_against_the_highs_not_the_closes():
     # before it, yet below that high
     closes = rising(100)
     highs = closes[:-6] + [250.0] + closes[-5:]
-    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+    sc = analyze(closes, volumes_with_last(100, 2_000_000), highs)
 
     assert sc.high_20d == 250.0
     assert sc.high_60d == 250.0
@@ -284,7 +287,7 @@ def test_the_20_day_high_covers_the_20_days_before_today(high_at, breakout_20d):
     closes = rising(100)
     highs = list(closes)
     highs[high_at] = 250.0
-    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+    sc = analyze(closes, volumes_with_last(100, 2_000_000), highs)
 
     assert sc.breakout_20d == breakout_20d
     assert sc.breakout_60d == 0
@@ -293,7 +296,7 @@ def test_the_20_day_high_covers_the_20_days_before_today(high_at, breakout_20d):
 def test_todays_own_high_does_not_raise_the_bar():
     closes = rising(100)
     highs = closes[:-1] + [300.0]
-    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+    sc = analyze(closes, volumes_with_last(100, 2_000_000), highs)
 
     assert sc.high_20d == 198.0
     assert sc.breakout_20d == 1
@@ -301,7 +304,7 @@ def test_todays_own_high_does_not_raise_the_bar():
 
 def test_a_row_without_a_high_counts_its_close():
     # rows stored before the screener kept highs have none until the next fetch
-    sc = analyze(rising(100), volumes_with_last(100, 2000), [None] * 100)
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000), [None] * 100)
 
     assert sc.high_20d == 198.0
     assert sc.high_60d == 198.0
@@ -312,10 +315,10 @@ def test_a_row_without_a_high_counts_its_close():
 
 
 def test_breakout_on_low_volume_is_unconfirmed():
-    # 1499 < 1.5 * the 20-day average of 1000
-    sc = analyze(rising(100), volumes_with_last(100, 1499))
+    # 1,499,000 < 1.5 * the 20-day average of 1,000,000
+    sc = analyze(rising(100), volumes_with_last(100, 1_499_000))
 
-    assert sc.avg_vol_20d == 1000
+    assert sc.avg_vol_20d == 1_000_000
     assert sc.volume_ratio == pytest.approx(1.499)  # stored unrounded, so it never reads as 1.5
     assert sc.breakout_confirmed == 0
     assert sc.core_criteria_score == 3
@@ -324,34 +327,35 @@ def test_breakout_on_low_volume_is_unconfirmed():
 
 def test_the_breakout_days_own_volume_does_not_raise_the_average():
     # exactly 1.5 times the 20 days before it; counted in its own average it would fall short
-    sc = analyze(rising(100), volumes_with_last(100, 1500))
+    sc = analyze(rising(100), volumes_with_last(100, 1_500_000))
 
-    assert sc.avg_vol_20d == 1000
+    assert sc.avg_vol_20d == 1_000_000
     assert sc.volume_ratio == 1.5
     assert sc.breakout_confirmed == 1
     assert sc.core_criteria_met is True
 
 
 def test_a_recent_volume_spike_raises_the_average_but_does_not_block_the_breakout():
-    # 2000 >= 1.5 * the 20-day average of 1200, though below the 5000 of five days ago
-    sc = analyze(rising(100), volumes_with_last(100, 2000, spikes={-6: 5000}))
+    # 2,000,000 >= 1.5 * the 20-day average of 1,200,000, though below the 5,000,000 of five days ago
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000, spikes={-6: 5_000_000}))
 
-    assert sc.avg_vol_20d == 1200  # (19 * 1000 + 5000) / 20
-    assert sc.volume_ratio == pytest.approx(2000 / 1200)
+    assert sc.avg_vol_20d == 1_200_000  # (19 * 1,000,000 + 5,000,000) / 20
+    assert sc.volume_ratio == pytest.approx(2_000_000 / 1_200_000)
     assert sc.breakout_confirmed == 1
 
 
 @pytest.mark.parametrize(('spike_at', 'confirmed'), [(-21, 0), (-22, 1)])
 def test_the_average_volume_covers_the_20_days_before_today(spike_at, confirmed):
-    # an 11000 spike 20 days before today raises the average to 1500, above 2000 / 1.5; 21 days before it is out
-    sc = analyze(rising(100), volumes_with_last(100, 2000, spikes={spike_at: 11000}))
+    # an 11,000,000 spike 20 days before today raises the average to 1,500,000, above 2,000,000 / 1.5; 21 days
+    # before it is out
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000, spikes={spike_at: 11_000_000}))
 
-    assert sc.avg_vol_20d == (1500 if confirmed == 0 else 1000)
+    assert sc.avg_vol_20d == (1_500_000 if confirmed == 0 else 1_000_000)
     assert sc.breakout_confirmed == confirmed
 
 
 def test_no_volume_before_today_has_no_ratio():
-    volumes = [0] * 99 + [2000]
+    volumes = [0] * 99 + [2_000_000]
     sc = analyze(rising(100), volumes)
 
     assert sc.avg_vol_20d == 0
@@ -365,7 +369,7 @@ def test_no_volume_before_today_has_no_ratio():
 def test_close_under_the_50_day_average():
     # closes 100..198, then a drop to 150
     closes = rising(99) + [150.0]
-    sc = analyze(closes, volumes_with_last(100, 2000))
+    sc = analyze(closes, volumes_with_last(100, 2_000_000))
 
     assert sc.dma_50 == 173.52  # (sum of 150..198 + 150) / 50 = (49 * 174 + 150) / 50
     assert sc.price_gt_50dma == 0
@@ -380,7 +384,7 @@ def test_close_under_the_50_day_average():
 def test_falling_50_day_average():
     # closes 200 down to 102, then a jump to 170: a breakout over a falling 50-day average
     closes = rising(99, start=200.0, step=-1.0) + [170.0]
-    sc = analyze(closes, volumes_with_last(100, 2000))
+    sc = analyze(closes, volumes_with_last(100, 2_000_000))
 
     assert sc.high_20d == 121.0  # 200 - 79
     assert sc.high_60d == 161.0  # 200 - 39
@@ -392,7 +396,7 @@ def test_falling_50_day_average():
 def test_50_day_average_rising_before_but_not_lately():
     # rising for 86 days then falling for 14: today's average is below the one 15 trading days earlier
     closes = rising(86) + rising(14, start=180.0, step=-10.0)
-    sc = analyze(closes, volumes_with_last(100, 2000))
+    sc = analyze(closes, volumes_with_last(100, 2_000_000))
 
     assert sc.dma_50 == 152.8  # (150..185 + 180, 170, .., 50) / 50
     assert sc.dma_50_prev_15d == 159.5
@@ -405,13 +409,13 @@ def test_50_day_average_rising_before_but_not_lately():
 # conditions alone, so it scores 3 and is not core criteria met.
 SINGLE_FAILURES = {
     # today's close equals the 20-day high
-    'breakout': (rising(99) + [198.0], volumes_with_last(100, 2000)),
-    'breakout_confirmed': (rising(100), volumes_with_last(100, 1499)),
+    'breakout': (rising(99) + [198.0], volumes_with_last(100, 2_000_000)),
+    'breakout_confirmed': (rising(100), volumes_with_last(100, 1_499_000)),
     # 100 for 50 days, 300 for 29, 200 for 20, then 210: above the 20-day high of 200, below the 50-day average of
     # (29 * 300 + 20 * 200 + 210) / 50 = 258.2, which is above the 228 of 15 days earlier
-    'price_gt_50dma': ([100.0] * 50 + [300.0] * 29 + [200.0] * 20 + [210.0], volumes_with_last(100, 2000)),
+    'price_gt_50dma': ([100.0] * 50 + [300.0] * 29 + [200.0] * 20 + [210.0], volumes_with_last(100, 2_000_000)),
     # closes 200 down to 102, then a jump to 170
-    'dma_50_rising': (rising(99, start=200.0, step=-1.0) + [170.0], volumes_with_last(100, 2000)),
+    'dma_50_rising': (rising(99, start=200.0, step=-1.0) + [170.0], volumes_with_last(100, 2_000_000)),
 }
 
 
@@ -466,7 +470,7 @@ def lagging_ema(last: float, step: float, values: int) -> float:
 
 
 def test_rsi_inside_50_to_70():
-    sc = analyze(zigzag(200), volumes_with_last(200, 2000))
+    sc = analyze(zigzag(200), volumes_with_last(200, 2_000_000))
 
     assert sc.rsi == pytest.approx(68.29, abs=0.01)
     assert sc.rsi_50_70 == 1
@@ -474,14 +478,14 @@ def test_rsi_inside_50_to_70():
 
 def test_rsi_between_70_and_75_is_outside_the_band():
     # alternating +2.5 and -1: RSI = 100 * 2.5 / (2.5 + 13/14) = 72.92
-    sc = analyze(zigzag(200, up=2.5), volumes_with_last(200, 2000))
+    sc = analyze(zigzag(200, up=2.5), volumes_with_last(200, 2_000_000))
 
     assert sc.rsi == pytest.approx(72.92, abs=0.01)
     assert sc.rsi_50_70 == 0
 
 
 def test_rsi_above_70():
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert sc.rsi == 100.0
     assert sc.rsi_50_70 == 0
@@ -491,7 +495,7 @@ def test_rsi_above_70():
 
 def test_rsi_below_50():
     # alternating +1 and -2: gain 14/27, loss 26/27, RSI = 100 * 14 / 40
-    sc = analyze(zigzag(200, start=500.0, up=1.0, down=2.0), volumes_with_last(200, 2000))
+    sc = analyze(zigzag(200, start=500.0, up=1.0, down=2.0), volumes_with_last(200, 2_000_000))
 
     assert sc.rsi == pytest.approx(35.0, abs=0.01)
     assert sc.rsi_50_70 == 0
@@ -508,7 +512,7 @@ def recovery(days_up: int, step: float) -> list[float]:
     ids=['3 days ago', '5 days ago', '6 days ago'],
 )
 def test_macd_crossover_counts_the_last_5_sessions(closes, days_above, crossover):
-    sc = analyze(closes, volumes_with_last(len(closes), 2000))
+    sc = analyze(closes, volumes_with_last(len(closes), 2_000_000))
     macd, signal = reference_macd(closes)
 
     assert sc.macd == pytest.approx(macd[-1], abs=0.005)
@@ -529,7 +533,7 @@ def test_macd_crossover_counts_the_last_5_sessions(closes, days_above, crossover
 def test_macd_long_above_its_signal_line_with_a_narrowing_histogram():
     # a rise that sped up 20 days ago: MACD has been above its signal line since well before, and the gap is closing
     closes = rising(80) + rising(20, start=181.0, step=3.0)
-    sc = analyze(closes, volumes_with_last(100, 2000))
+    sc = analyze(closes, volumes_with_last(100, 2_000_000))
     macd, signal = reference_macd(closes)
 
     assert sc.macd > sc.signal
@@ -542,7 +546,7 @@ def test_macd_long_above_its_signal_line_with_a_narrowing_histogram():
 
 def test_macd_below_its_signal_line_when_the_rise_turns():
     closes = rising(95) + [190.0, 186.0, 182.0, 178.0, 174.0]
-    sc = analyze(closes, volumes_with_last(100, 2000))
+    sc = analyze(closes, volumes_with_last(100, 2_000_000))
 
     assert sc.macd < sc.signal
     assert sc.macd_above_signal == 0
@@ -558,7 +562,7 @@ YEAR = rising(368)
 
 
 def test_moving_average_alignment_of_a_steady_rise():
-    sc = analyze(YEAR, volumes_with_last(368, 2000))
+    sc = analyze(YEAR, volumes_with_last(368, 2_000_000))
 
     assert sc.price == 467.0
     assert (sc.dma_20, sc.dma_20_prev_15d) == (457.5, 442.5)  # mean of 448..467, and of 433..452
@@ -569,7 +573,7 @@ def test_moving_average_alignment_of_a_steady_rise():
 
 
 def test_21_day_and_21_week_emas_of_a_steady_rise():
-    sc = analyze(YEAR, volumes_with_last(368, 2000))
+    sc = analyze(YEAR, volumes_with_last(368, 2_000_000))
 
     assert sc.ema_21 == round(lagging_ema(467.0, 1.0, 368), 2) == 457.0
     assert sc.ema_21_prev_5d == round(lagging_ema(462.0, 1.0, 363), 2) == 452.0
@@ -582,7 +586,7 @@ def test_21_day_and_21_week_emas_of_a_steady_rise():
 
 def test_the_21_week_ema_ends_on_the_scored_days_close_mid_week():
     # 365 rows end on Thursday 31 December 2026: 52 Sundays' closes (103, 110, .., 460), then the Thursday's 464
-    sc = analyze(rising(365), volumes_with_last(365, 2000))
+    sc = analyze(rising(365), volumes_with_last(365, 2_000_000))
     weekly = reference_ema([100.0 + day for day in range(3, 364, 7)] + [464.0], 21)
 
     assert sc.ema_21w == round(weekly[-1], 2) == 397.22
@@ -592,7 +596,7 @@ def test_the_21_week_ema_ends_on_the_scored_days_close_mid_week():
 
 def test_averages_and_emas_of_a_steady_fall():
     # closes 500 down to 133: below every average, and every one falling
-    sc = analyze(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2000))
+    sc = analyze(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2_000_000))
 
     assert (sc.dma_20, sc.dma_20_prev_15d) == (142.5, 157.5)
     assert (sc.dma_200, sc.dma_200_prev_15d) == (232.5, 247.5)
@@ -603,7 +607,7 @@ def test_averages_and_emas_of_a_steady_fall():
 
 
 def test_a_ticker_without_the_history_for_the_long_averages_leaves_them_empty():
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert (sc.dma_200, sc.dma_200_prev_15d, sc.price_gt_200dma, sc.dma_200_rising) == (None, None, None, None)
     # 100 days are 15 weekly closes, short of the 50 a 21-week EMA needs
@@ -619,7 +623,7 @@ def test_a_ticker_without_the_history_for_the_long_averages_leaves_them_empty():
     [(199, None, None), (200, 199.5, None), (214, 213.5, None), (215, 214.5, 1)],
 )
 def test_the_200_day_average_needs_200_rows_and_15_more_to_rise(rows, dma_200, dma_200_rising):
-    sc = analyze(rising(rows), volumes_with_last(rows, 2000))
+    sc = analyze(rising(rows), volumes_with_last(rows, 2_000_000))
 
     assert sc.dma_200 == dma_200
     assert sc.dma_200_rising == dma_200_rising
@@ -634,7 +638,7 @@ def test_the_21_week_ema_needs_50_weekly_closes(rows, weekly_closes, has_ema, ha
     # 340 rows end on the 49th Sunday; 346 on the following Saturday, mid-week 50; 347 on its Sunday; 348 on a Monday
     days = [date(2026, 1, 1) + timedelta(days=i) for i in range(rows)]
     assert len({day.isocalendar()[:2] for day in days}) == weekly_closes
-    sc = analyze(rising(rows), volumes_with_last(rows, 2000))
+    sc = analyze(rising(rows), volumes_with_last(rows, 2_000_000))
 
     assert (sc.ema_21w is not None, sc.ema_21w_prev_1w is not None) == (has_ema, has_prior)
     assert sc.ema_21w_rising == (1 if has_prior else None)
@@ -659,9 +663,9 @@ SECONDARY_FLAGS = (
 @pytest.mark.parametrize(
     ('closes', 'volumes'),
     [
-        (YEAR, volumes_with_last(368, 2000)),
-        (rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2000)),
-        (recovery(5, 3.0), volumes_with_last(75, 2000)),
+        (YEAR, volumes_with_last(368, 2_000_000)),
+        (rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2_000_000)),
+        (recovery(5, 3.0), volumes_with_last(75, 2_000_000)),
         *SINGLE_FAILURES.values(),
     ],
     ids=['steady rise', 'steady fall', 'recovery', *SINGLE_FAILURES],
@@ -677,8 +681,8 @@ def test_the_core_score_counts_only_the_core_conditions(closes, volumes):
 def test_the_secondary_indicators_never_change_the_core_score():
     # both pass the four core conditions; the zigzag also passes every secondary indicator, the steady rise fails
     # the RSI band (100), the MACD crossover and the widening histogram
-    rise = analyze(YEAR, volumes_with_last(368, 2000))
-    zig = analyze(zigzag(368), volumes_with_last(368, 2000))
+    rise = analyze(YEAR, volumes_with_last(368, 2_000_000))
+    zig = analyze(zigzag(368), volumes_with_last(368, 2_000_000))
 
     assert {flag: getattr(zig, flag) for flag in SECONDARY_FLAGS} == dict.fromkeys(SECONDARY_FLAGS, 1)
     assert (rise.rsi_50_70, rise.macd_crossover, rise.macd_hist_rising) == (0, 0, 0)
@@ -695,7 +699,7 @@ def with_last(values: list[float | None], last: float | None) -> list[float | No
 
 def test_a_close_at_the_days_high_is_a_strong_close():
     # each day's low is 1 under its close and high: the close sits at the top of the range
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert sc.close_position == 1.0
     assert sc.close_upper_quarter == 1
@@ -708,7 +712,9 @@ def test_a_close_at_the_days_high_is_a_strong_close():
 )
 def test_closing_strength_is_the_closes_place_in_the_days_range(high, low, position, strong):
     closes = rising(100)  # today's close is 199
-    sc = analyze(closes, volumes_with_last(100, 2000), with_last(closes, high), with_last([c - 1 for c in closes], low))
+    sc = analyze(
+        closes, volumes_with_last(100, 2_000_000), with_last(closes, high), with_last([c - 1 for c in closes], low)
+    )
 
     assert sc.close_position == position
     assert sc.close_upper_quarter == strong
@@ -719,24 +725,27 @@ def test_closing_strength_is_the_closes_place_in_the_days_range(high, low, posit
 )
 def test_closing_strength_without_a_range_is_empty(high, low):
     closes = rising(100)
-    sc = analyze(closes, volumes_with_last(100, 2000), with_last(closes, high), with_last([c - 1 for c in closes], low))
+    sc = analyze(
+        closes, volumes_with_last(100, 2_000_000), with_last(closes, high), with_last([c - 1 for c in closes], low)
+    )
 
     assert (sc.close_position, sc.close_upper_quarter) == (None, None)
     assert sc.core_criteria_score == 4
 
 
-def base_then_breakout(base_volumes: tuple[int, int] = (1000, 1000)) -> tuple[list[float], list[int]]:
+def base_then_breakout(base_volumes: tuple[int, int] = (1_000_000, 1_000_000)) -> tuple[list[float], list[int]]:
     """
-    Closes rising from 100 to 178 over 79 days, a 20-day base at 180 (highs 180, lows 179), then 190 on 2000 volume.
+    Closes rising from 100 to 178 over 79 days, a 20-day base at 180 (highs 180, lows 179), then 190 on 2,000,000
+    shares.
     The base's earlier 10 days trade base_volumes[0] a day, its later 10 base_volumes[1].
     """
     closes = [*rising(79), *[180.0] * 20, 190.0]
-    volumes = [BASE_VOLUME] * 79 + [base_volumes[0]] * 10 + [base_volumes[1]] * 10 + [2000]
+    volumes = [BASE_VOLUME] * 79 + [base_volumes[0]] * 10 + [base_volumes[1]] * 10 + [2_000_000]
     return closes, volumes
 
 
 def test_a_tight_base_on_declining_volume():
-    closes, volumes = base_then_breakout((1000, 500))
+    closes, volumes = base_then_breakout((1_000_000, 500_000))
     sc = analyze(closes, volumes)
 
     assert sc.consolidation_range_pct == pytest.approx(100 / 180)  # highs 180, lows 179
@@ -754,7 +763,7 @@ def test_a_base_on_steady_volume_is_not_declining():
 
 def test_a_steady_rise_is_no_tight_base():
     # the 20 days before today close 179..198, lows 178..197: (198 - 178) / 198
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert sc.consolidation_range_pct == pytest.approx(2000 / 198)
     assert sc.consolidation_tight == 0
@@ -784,7 +793,7 @@ def test_the_base_covers_the_20_days_before_today(low_at, tight):
 
 
 def test_a_base_with_a_day_missing_its_low_has_no_range():
-    closes, volumes = base_then_breakout((1000, 500))
+    closes, volumes = base_then_breakout((1_000_000, 500_000))
     lows: list[float | None] = [c - 1 for c in closes]
     lows[-5] = None
     sc = analyze(closes, volumes, lows=lows)
@@ -794,13 +803,13 @@ def test_a_base_with_a_day_missing_its_low_has_no_range():
 
 
 def test_a_base_whose_earlier_half_traded_nothing_has_no_volume_ratio():
-    sc = analyze(*base_then_breakout((0, 500)))
+    sc = analyze(*base_then_breakout((0, 500_000)))
 
     assert (sc.consolidation_vol_ratio, sc.consolidation_vol_declining) == (None, None)
 
 
 def test_a_breakout_is_above_its_resistance_not_near_it():
-    sc = analyze(rising(100), volumes_with_last(100, 2000))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert sc.dist_high_20d_pct == pytest.approx(-100 / 198)  # 199 is 1 above the 198 high
     assert sc.dist_high_60d_pct == pytest.approx(-100 / 198)
@@ -837,7 +846,7 @@ def test_a_20_day_breakout_near_the_60_day_resistance():
     closes = [*rising(99), 199.0]
     highs = list(closes)
     highs[-40] = 205.0
-    sc = analyze(closes, volumes_with_last(100, 2000), highs)
+    sc = analyze(closes, volumes_with_last(100, 2_000_000), highs)
 
     assert sc.breakout_20d == 1
     assert sc.dist_high_60d_pct == pytest.approx(600 / 205)
@@ -846,7 +855,7 @@ def test_a_20_day_breakout_near_the_60_day_resistance():
 
 def test_the_price_action_indicators_never_change_the_core_score():
     # the same breakout scores 4 whether its close is weak or strong, its base loose or tight
-    closes, volumes = base_then_breakout((1000, 500))
+    closes, volumes = base_then_breakout((1_000_000, 500_000))
     tight_strong = analyze(closes, volumes)
     # lows 30 under the closes, and today's range 180-200 around its 190 close
     loose_weak = analyze(closes, volumes, with_last(closes, 200.0), with_last([c - 30 for c in closes], 180.0))
@@ -873,7 +882,7 @@ def benchmark_closes(closes: list[float]) -> dict[date, float]:
 
 def test_returns_are_compared_with_the_benchmark_over_the_same_dates():
     # the benchmark closes at 299 on day 99, 278 on day 78 and 236 on day 36
-    sc = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark_closes(rising(100, start=200.0)))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000), benchmark=benchmark_closes(rising(100, start=200.0)))
 
     assert sc.return_1m_pct == pytest.approx((199 / 178 - 1) * 100)  # 11.80
     assert sc.return_3m_pct == pytest.approx((199 / 136 - 1) * 100)  # 46.32
@@ -884,7 +893,7 @@ def test_returns_are_compared_with_the_benchmark_over_the_same_dates():
 
 def test_a_ticker_rising_slower_than_its_benchmark_does_not_outperform():
     # the benchmark closes at 298 on day 99, 256 on day 78 and 172 on day 36
-    sc = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark_closes(rising(100, step=2.0)))
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000), benchmark=benchmark_closes(rising(100, step=2.0)))
 
     assert sc.rs_market_1m == pytest.approx((199 / 178 - 298 / 256) * 100)  # 11.80 - 16.41
     assert sc.rs_market_3m == pytest.approx((199 / 136 - 298 / 172) * 100)  # 46.32 - 73.26
@@ -892,8 +901,8 @@ def test_a_ticker_rising_slower_than_its_benchmark_does_not_outperform():
 
 
 def test_market_strength_is_empty_without_the_benchmark_and_never_changes_the_core_score():
-    with_benchmark = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark_closes(rising(100)))
-    without = analyze(rising(100), volumes_with_last(100, 2000))
+    with_benchmark = analyze(rising(100), volumes_with_last(100, 2_000_000), benchmark=benchmark_closes(rising(100)))
+    without = analyze(rising(100), volumes_with_last(100, 2_000_000))
 
     assert without.return_1m_pct == with_benchmark.return_1m_pct
     assert (without.rs_market_1m, without.rs_market_3m) == (None, None)
@@ -908,7 +917,7 @@ def test_market_strength_is_empty_where_the_benchmark_lacks_a_date():
     benchmark = benchmark_closes(rising(100))
     del benchmark[day(36)]
 
-    sc = analyze(rising(100), volumes_with_last(100, 2000), benchmark=benchmark)
+    sc = analyze(rising(100), volumes_with_last(100, 2_000_000), benchmark=benchmark)
 
     assert sc.rs_market_1m == pytest.approx(0.0)
     assert (sc.rs_market_3m, sc.outperforms_market_3m) == (None, None)
@@ -970,7 +979,7 @@ def test_a_breakout_passing_most_secondary_indicators_is_high_conviction():
     # secondary indicator but relative strength, which has no benchmark or subsector median, and the RSI, which the
     # jump lifts just above 70; each day closes at its high, and its last 20 days span (284 - 273) / 284, below the
     # 10% of a tight base
-    sc = run_one(with_last(zigzag(368), 287.0), volumes_with_last(368, 2000))
+    sc = run_one(with_last(zigzag(368), 287.0), volumes_with_last(368, 2_000_000))
 
     assert sc.core_criteria_met is True
     assert passed_indicators(sc) == [
@@ -987,7 +996,7 @@ def test_a_breakout_passing_few_secondary_indicators_is_confirmed():
     # 100 rows of a steady rise, the last 3 above the day before to 201, 1.5% above the 198 high: RSI 100 is outside
     # the band, there are too few rows for the 200-day average and the 21-week EMA, and the base spans 10.1%; only
     # the MACD above its signal line and the close at the day's high pass
-    sc = run_one(with_last(rising(100), 201.0), volumes_with_last(100, 2000))
+    sc = run_one(with_last(rising(100), 201.0), volumes_with_last(100, 2_000_000))
 
     assert sc.core_criteria_met is True
     assert passed_indicators(sc) == ['macd', 'closing_strength']
@@ -997,7 +1006,7 @@ def test_a_breakout_passing_few_secondary_indicators_is_confirmed():
 def test_a_rising_ticker_just_below_its_resistance_is_on_the_watchlist():
     # a year's steady rise whose last close, 463, is 3 under the 466 high: above its rising 50-day average, 0.64%
     # below its resistance, and no breakout
-    sc = run_one(with_last(YEAR, YEAR[-2] - 3), volumes_with_last(368, 2000))
+    sc = run_one(with_last(YEAR, YEAR[-2] - 3), volumes_with_last(368, 2_000_000))
 
     assert (sc.core_criteria_score, sc.price_gt_50dma, sc.dma_50_rising, sc.near_resistance) == (3, 1, 1, 1)
     assert sc.status == PRE_BREAKOUT
@@ -1005,15 +1014,20 @@ def test_a_rising_ticker_just_below_its_resistance_is_on_the_watchlist():
 
 
 def test_a_falling_ticker_has_no_status():
-    sc = run_one(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2000))
+    sc = run_one(rising(368, start=500.0, step=-1.0), volumes_with_last(368, 2_000_000))
 
     assert sc.core_criteria_score == 1  # only its volume
     assert (sc.secondary_passed, sc.status) == (1, None)  # it closes at the day's high
 
 
-def flags(**values: int | str | None) -> StockCriteria:
-    """A ticker on its breakout session passing none of the secondary indicators, but for 'values'."""
+def flags(**values: int | float | str | None) -> StockCriteria:
+    """
+    A US ticker on its breakout session, clearing the liquidity floor with $100M a day at 150, passing none of the
+    secondary indicators, but for 'values'.
+    """
     core = dict(
+        price=150.0,
+        avg_dollar_volume=100_000_000.0,
         core_criteria_met=True,
         core_criteria_score=4,
         breakout_20d=1,
@@ -1021,7 +1035,8 @@ def flags(**values: int | str | None) -> StockCriteria:
         dma_50_rising=1,
         breakout_phase=BREAKOUT_SESSION,
     )
-    return StockCriteria(id=0, subsector_id=SUBSECTOR_ID, ticker='TEST', **(core | {'price_gt_50dma': 1} | values))
+    values = {'ticker': 'TEST'} | values
+    return StockCriteria(id=0, subsector_id=SUBSECTOR_ID, **(core | {'price_gt_50dma': 1} | values))
 
 
 # flags passing each secondary indicator on their own
@@ -1130,9 +1145,86 @@ def test_a_status_counts_the_subsector_comparison():
     assert {t: sc.secondary_passed for t, sc in by_ticker.items()} == {'AAA': 2, 'BBB': 3, 'CCC': 3}
 
 
+# --- The liquidity floor ------------------------------------------------------
+#
+# rising(100) closes at 179 to 198 over the 20 sessions before its last, a mean close of 188.5, then breaks out at
+# 201, 1.5% over its 198 high, on doubled volume. On V shares a day its average dollar volume is 188.5 * V: $5M,
+# the floor in either market, needs V of 26,525.2, so 26,526 shares a day clear it, at $5,000,151, and 26,525 fall
+# short, at $4,999,962.50.
+
+
+@pytest.mark.parametrize('ticker', ['TEST', 'TEST.TO'], ids=['US', 'Canada'])
+@pytest.mark.parametrize(
+    ('shares', 'dollar_volume', 'status'),
+    [(26_526, 5_000_151.0, CONFIRMED), (26_525, 4_999_962.5, None)],
+    ids=['above', 'below'],
+)
+def test_a_breakout_below_the_dollar_volume_floor_keeps_its_values_but_has_no_status(
+    ticker, shares, dollar_volume, status
+):
+    sc = with_status(
+        analyze(with_last(rising(100), 201.0), volumes_with_last(100, 2 * shares, base=shares), ticker=ticker)
+    )
+
+    assert sc.avg_dollar_volume == pytest.approx(dollar_volume)
+    assert (sc.core_criteria_met, sc.breakout_phase) == (True, BREAKOUT_SESSION)
+    assert (sc.secondary_passed, sc.status) == (2, status)  # the MACD and the close at the day's high
+
+
+def test_the_breakout_days_own_volume_does_not_lift_a_ticker_over_the_floor():
+    # 26,525 shares a day fall short; the breakout's 10 times that adds nothing to the average
+    sc = with_status(analyze(with_last(rising(100), 201.0), volumes_with_last(100, 265_250, base=26_525)))
+
+    assert sc.avg_dollar_volume == pytest.approx(4_999_962.5)
+    assert sc.status is None
+
+
+def test_a_ticker_with_a_session_missing_its_volume_has_no_dollar_volume_and_no_status():
+    volumes: list[int | None] = volumes_with_last(100, 2_000_000)
+    volumes[-5] = None
+
+    sc = with_status(analyze(with_last(rising(100), 201.0), volumes))
+
+    assert (sc.avg_dollar_volume, sc.status) == (None, None)
+
+
+@pytest.mark.parametrize('ticker', ['TEST', 'TEST.TO'], ids=['US', 'Canada'])
+@pytest.mark.parametrize(('cents_below', 'status'), [(0, CONFIRMED), (1, None)], ids=['on the floor', 'a cent below'])
+def test_a_breakout_on_its_markets_dollar_volume_floor_clears_it(ticker, cents_below, status):
+    dollar_volume = MIN_DOLLAR_VOLUME[market_of(ticker)] - cents_below / 100
+
+    assert with_status(flags(ticker=ticker, avg_dollar_volume=dollar_volume)).status == status
+
+
+@pytest.mark.parametrize('ticker', ['TEST', 'TEST.TO'], ids=['US', 'Canada'])
+@pytest.mark.parametrize(('cents_below', 'status'), [(0, CONFIRMED), (1, None)], ids=['on the floor', 'a cent below'])
+def test_a_breakout_below_the_price_floor_has_no_status(ticker, cents_below, status):
+    price = MIN_PRICE[market_of(ticker)] - cents_below / 100
+
+    assert with_status(flags(ticker=ticker, price=price)).status == status
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        pytest.param({'breakout_phase': EXTENDED_SESSION}, id='extended'),
+        pytest.param(
+            {'breakout_phase': None, 'core_criteria_met': False, 'breakout_20d': 0, 'near_resistance': 1},
+            id='watchlist',
+        ),
+    ],
+)
+def test_below_the_floor_no_session_has_a_status(values):
+    liquid = flags(**values)
+    thin = flags(**values, avg_dollar_volume=1_000_000.0)
+
+    assert with_status(liquid).status is not None
+    assert with_status(thin).status is None
+
+
 # --- A breakout is one session ----------------------------------------------
 #
-# BASE is 80 sessions rising by 0.5 from 100 to 139.5 on 1000 shares a day, each closing at its high with its low 1
+# BASE is 80 sessions rising by 0.5 from 100 to 139.5 on 1,000,000 shares a day, each closing at its high with its low 1
 # under it: a daily range of 1 / close, about 0.7%, half of which is below the 1% floor, so the margin is 1%. A close
 # on the 81st session above 139.5, the prior 20- and 60-day high, on doubled volume meets the four core conditions.
 
@@ -1152,20 +1244,20 @@ def session_statuses(
 
 
 def test_a_breakout_is_confirmed_on_its_first_session_and_extended_until_a_higher_break_after_a_pause():
-    # 142 clears 139.5 by 1.79%. 145, 148 and 151 each clear the day before's high by 2% or more on 3000 shares,
-    # meeting every condition again, but the high each clears was set 1 session before: a run of new highs, so
-    # Extended. 12 sessions at 150 hold above the 139.5 level, Extended. 154 clears the 151 high, set 13 sessions
-    # before, by 1.99% on 3000 shares, over an average of (12 * 1000 + 3 * 3000 + 2000 + 4 * 1000) / 20 = 1350: a
-    # break of a higher level after a pause, a breakout again
+    # 142 clears 139.5 by 1.79%. 145, 148 and 151 each clear the day before's high by 2% or more on 3,000,000
+    # shares, meeting every condition again, but the high each clears was set 1 session before: a run of new highs,
+    # so Extended. 12 sessions at 150 hold above the 139.5 level, Extended. 154 clears the 151 high, set 13 sessions
+    # before, by 1.99% on 3,000,000 shares, over an average of (12 + 3 * 3 + 2 + 4) / 20 = 1.35 million: a break of a
+    # higher level after a pause, a breakout again
     closes = [*BASE, 142.0, 145.0, 148.0, 151.0, *[150.0] * 12, 154.0]
-    volumes = [*BASE_VOLUMES, 2000, 3000, 3000, 3000, *[BASE_VOLUME] * 12, 3000]
+    volumes = [*BASE_VOLUMES, 2_000_000, 3_000_000, 3_000_000, 3_000_000, *[BASE_VOLUME] * 12, 3_000_000]
 
     assert session_statuses(closes, volumes) == [CONFIRMED, *[EXTENDED] * 15, CONFIRMED]
 
 
 def test_a_close_clearing_resistance_by_less_than_the_margin_is_not_a_breakout():
     # 140.5 clears 139.5 by 0.72%, under the 1% floor: every core condition is met, but no breakout
-    sc = with_status(analyze([*BASE, 140.5], [*BASE_VOLUMES, 2000]))
+    sc = with_status(analyze([*BASE, 140.5], [*BASE_VOLUMES, 2_000_000]))
 
     assert sc.core_criteria_met is True
     assert (sc.breakout_phase, sc.status) == (None, None)
@@ -1181,7 +1273,7 @@ def test_the_margin_is_half_the_average_daily_range_when_that_is_above_the_floor
     # half of the 4.40% average range is 2.20%: 142 clears 139.5 by 1.79%, short of it, and 143 by 2.51%
     closes = [*BASE, close]
 
-    assert session_statuses(closes, [*BASE_VOLUMES, 2000], wide_lows(closes)) == [status]
+    assert session_statuses(closes, [*BASE_VOLUMES, 2_000_000], wide_lows(closes)) == [status]
 
 
 def test_a_session_missing_its_low_is_left_out_of_the_average_range():
@@ -1192,14 +1284,14 @@ def test_a_session_missing_its_low_is_left_out_of_the_average_range():
     for row in range(len(BASE) - 14, len(BASE), 2):
         lows[row] = None
 
-    assert session_statuses(closes, [*BASE_VOLUMES, 2000], lows) == [None]
+    assert session_statuses(closes, [*BASE_VOLUMES, 2_000_000], lows) == [None]
 
 
 def test_with_no_daily_range_known_the_margin_is_the_floor():
     closes = [*BASE, 142.0]
     lows = [*[None] * len(BASE), 136.0]
 
-    assert session_statuses(closes, [*BASE_VOLUMES, 2000], lows) == [CONFIRMED]
+    assert session_statuses(closes, [*BASE_VOLUMES, 2_000_000], lows) == [CONFIRMED]
 
 
 @pytest.mark.parametrize(
@@ -1212,19 +1304,19 @@ def test_with_no_daily_range_known_the_margin_is_the_floor():
     ],
 )
 def test_a_run_ends_on_the_second_close_in_a_row_below_its_level(second_close, statuses):
-    # 144 clears the 142 high by 1.41% on 3000 shares; 139 and 138 close within 5% under 142, on the watchlist
+    # 144 clears the 142 high by 1.41% on 3,000,000 shares; 139 and 138 close within 5% under 142, on the watchlist
     closes = [*BASE, 142.0, 139.0, second_close, 144.0]
-    volumes = [*BASE_VOLUMES, 2000, BASE_VOLUME, BASE_VOLUME, 3000]
+    volumes = [*BASE_VOLUMES, 2_000_000, BASE_VOLUME, BASE_VOLUME, 3_000_000]
 
     assert session_statuses(closes, volumes) == statuses
 
 
 def test_under_a_higher_60_day_peak_the_run_breaks_the_20_day_high_and_its_pause_is_measured_over_20_days():
     # a 160 high 40 sessions back is BASE's 60-day high, so 142 breaks only the 20-day high, 139.5, by 1.79%; 145
-    # clears the 142 high on 3000 shares by 2.1%, but that high was set 1 session before within the 20 days, so it is
-    # extended, though the 60 days' highest high, 160, was set 40 sessions before
+    # clears the 142 high on 3,000,000 shares by 2.1%, but that high was set 1 session before within the 20 days, so
+    # it is extended, though the 60 days' highest high, 160, was set 40 sessions before
     closes = [*BASE, 142.0, 145.0]
-    volumes = [*BASE_VOLUMES, 2000, 3000]
+    volumes = [*BASE_VOLUMES, 2_000_000, 3_000_000]
     highs = list(closes)
     highs[40] = 160.0
 
@@ -1260,7 +1352,7 @@ def test_breakout_and_extended_sessions_are_measured_against_their_runs_level():
     # the fixture of the first test above: the run breaks 139.5 at 142 and holds for 15 sessions, each measured
     # against 139.5 and counted from 142's session; 154 breaks 151 and starts again at 0
     closes = [*BASE, 142.0, 145.0, 148.0, 151.0, *[150.0] * 12, 154.0]
-    volumes = [*BASE_VOLUMES, 2000, 3000, 3000, 3000, *[BASE_VOLUME] * 12, 3000]
+    volumes = [*BASE_VOLUMES, 2_000_000, 3_000_000, 3_000_000, 3_000_000, *[BASE_VOLUME] * 12, 3_000_000]
 
     assert session_positions(closes, volumes) == [
         position(142.0, 139.5, 0),  # margin 2.5 / 139.5 = 1.79%, distance 2.5 / 142 = 1.76%
@@ -1275,10 +1367,10 @@ def test_breakout_and_extended_sessions_are_measured_against_their_runs_level():
 def test_a_session_neither_breakout_nor_extended_has_no_position():
     # 139 is the run's first close below 139.5: still in the run, but not extended; and 140.5 misses the margin
     closes = [*BASE, 142.0, 139.0]
-    volumes = [*BASE_VOLUMES, 2000, BASE_VOLUME]
+    volumes = [*BASE_VOLUMES, 2_000_000, BASE_VOLUME]
 
     assert session_positions(closes, volumes)[1] == (None, None, None)
-    assert session_positions([*BASE, 140.5], [*BASE_VOLUMES, 2000]) == [(None, None, None)]
+    assert session_positions([*BASE, 140.5], [*BASE_VOLUMES, 2_000_000]) == [(None, None, None)]
 
 
 def test_an_extended_session_is_extended_whatever_its_secondary_indicators():
@@ -1291,7 +1383,7 @@ def test_an_extended_session_is_extended_whatever_its_secondary_indicators():
 @pytest.mark.parametrize('rows', [59, 61, 64])
 def test_fewer_than_65_rows_is_not_scored(rows):
     # dma_50_rising compares today's 50-day average with the one 15 trading days earlier, which needs 65 rows
-    assert analyze(rising(rows), volumes_with_last(rows, 2000)) is None
+    assert analyze(rising(rows), volumes_with_last(rows, 2_000_000)) is None
 
 
 def test_no_rows_is_not_scored():
@@ -1300,7 +1392,7 @@ def test_no_rows_is_not_scored():
 
 
 def test_65_rows_is_enough_to_score_fully():
-    sc = analyze(rising(65), volumes_with_last(65, 2000))
+    sc = analyze(rising(65), volumes_with_last(65, 2_000_000))
 
     assert sc.high_60d == 163.0  # the highest high of rows 4..63
     assert sc.dma_50_prev_15d == 124.5  # mean of 100..149, the first 50 rows
@@ -1314,8 +1406,8 @@ def test_65_rows_is_enough_to_score_fully():
 
 def test_analyze_saves_one_row_per_ticker_with_enough_history():
     rows = (
-        price_rows('AAA', rising(100), volumes_with_last(100, 2000), sessions=True)
-        + price_rows('BBB', rising(100), volumes_with_last(100, 1499), sessions=True)
+        price_rows('AAA', rising(100), volumes_with_last(100, 2_000_000), sessions=True)
+        + price_rows('BBB', rising(100), volumes_with_last(100, 1_499_000), sessions=True)
         + price_rows('CCC', rising(64), sessions=True)
     )
     analyzer, criteria_repo = make_analyzer(rows)
@@ -1335,9 +1427,9 @@ def test_analyze_saves_one_row_per_ticker_with_enough_history():
 def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(caplog, capsys):
     # STALE's download failed in the last fetch, so its rows end a day before everyone else's
     rows = (
-        price_rows('AAA', rising(100), volumes_with_last(100, 2000), sessions=True)
-        + price_rows('BBB', rising(100), volumes_with_last(100, 1500), sessions=True)
-        + price_rows('STALE', rising(99), volumes_with_last(99, 2000), sessions=True)
+        price_rows('AAA', rising(100), volumes_with_last(100, 2_000_000), sessions=True)
+        + price_rows('BBB', rising(100), volumes_with_last(100, 1_500_000), sessions=True)
+        + price_rows('STALE', rising(99), volumes_with_last(99, 2_000_000), sessions=True)
     )
     analyzer, criteria_repo = make_analyzer(rows)
 
@@ -1355,8 +1447,8 @@ def test_analyze_skips_a_ticker_whose_prices_end_before_the_newest_market_date(c
 
 
 def test_analyze_with_every_ticker_current_skips_none(capsys):
-    rows = price_rows('AAA', rising(100), volumes_with_last(100, 2000), sessions=True) + price_rows(
-        'BBB', rising(100), volumes_with_last(100, 2000), sessions=True
+    rows = price_rows('AAA', rising(100), volumes_with_last(100, 2_000_000), sessions=True) + price_rows(
+        'BBB', rising(100), volumes_with_last(100, 2_000_000), sessions=True
     )
     analyzer, criteria_repo = make_analyzer(rows)
 

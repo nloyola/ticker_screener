@@ -62,6 +62,7 @@ from app.analyzer import (
     _near,
     _positive,
     _round,
+    average_dollar_volume,
     breakout_position,
     breakout_runs,
     core_conditions,
@@ -265,6 +266,8 @@ class TickerReplay:
             rs_market_3m=rs_market_3m,
             outperforms_market_1m=_positive(rs_market_1m),
             outperforms_market_3m=_positive(rs_market_3m),
+            # whole share counts, which numpy turns into the same floats the analyzer multiplies
+            avg_dollar_volume=average_dollar_volume(self.closes, s['volume'], row),
             breakout_margin_pct=position.margin_pct,
             invalidation_distance_pct=position.invalidation_pct,
             sessions_since_breakout=position.sessions,

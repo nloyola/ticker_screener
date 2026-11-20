@@ -687,6 +687,19 @@ def _add_breakout_position(con: sqlite3.Connection) -> None:
                 con.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
 
+def _add_avg_dollar_volume(con: sqlite3.Connection) -> None:
+    """
+    Version 18: stock_criteria and signal gain avg_dollar_volume, the liquidity floor's measure (average_dollar_volume
+    in app/analyzer.py), left NULL in the rows already stored: until the next analyze replaces a stock_criteria row,
+    and for good in a signal, which is append-only. Adds it only where a table lacks it, so a table schema.sql created
+    this way is left as it is.
+    """
+    for table in ('stock_criteria', 'signal'):
+        columns = {row[1] for row in con.execute(f"PRAGMA table_info('{table}')")}
+        if columns and 'avg_dollar_volume' not in columns:
+            con.execute(f'ALTER TABLE {table} ADD COLUMN avg_dollar_volume REAL')
+
+
 UPGRADES = (
     _guard_price_data_date,
     _add_company_name,
@@ -705,6 +718,7 @@ UPGRADES = (
     _add_analysis_no_horizon_index,
     _allow_extended_status,
     _add_breakout_position,
+    _add_avg_dollar_volume,
 )
 SCHEMA_VERSION = len(UPGRADES)
 

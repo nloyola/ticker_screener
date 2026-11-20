@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.analyzer import SCREENER_VERSION, SIGNAL_STATUSES, Analyzer
+from app.analyzer import BREAKOUT_SESSION, SCREENER_VERSION, SIGNAL_STATUSES, Analyzer
 from app.backfill import Backfill, market_dates, replayable_sessions
 from app.commands.backfill_history_cmd import BackfillHistoryCmd
 from app.db import init_db
@@ -79,17 +79,20 @@ SPIKE_SHARE = 0.12
 SPIKE_JUMP = 0.03
 
 
-def walk(rng: np.random.Generator, days: list[date], start: float = 50.0) -> list[DailyPrice]:
+def walk(
+    rng: np.random.Generator, days: list[date], start: float = 50.0, shares: float = 1_000_000.0
+) -> list[DailyPrice]:
     """
     A rising random walk with a volume spike on about one day in eight, each spike day's return 3% higher and every
-    other day's lower by as much in all, so breakouts clear the minimum margin and their runs end.
+    other day's lower by as much in all, so breakouts clear the minimum margin and their runs end. It trades about
+    'shares' a day, well over the liquidity floor at the default.
     """
     returns = rng.normal(0.002, 0.02, len(days))
     spikes = rng.random(len(days)) < SPIKE_SHARE
     closes = start * np.exp(
         np.cumsum(returns + np.where(spikes, SPIKE_JUMP, -SPIKE_JUMP * SPIKE_SHARE / (1 - SPIKE_SHARE)))
     )
-    volumes = (rng.lognormal(7, 0.3, len(days)) * np.where(spikes, 3.5, 1.0)).astype(int) + 1
+    volumes = (shares * rng.lognormal(0, 0.3, len(days)) * np.where(spikes, 3.5, 1.0)).astype(int) + 1
     return [
         DailyPrice(
             date=day,
@@ -105,7 +108,10 @@ def walk(rng: np.random.Generator, days: list[date], start: float = 50.0) -> lis
 
 def history_prices() -> dict[str, list[DailyPrice]]:
     rng = np.random.default_rng(50)
-    prices = {ticker: walk(rng, US_DAYS) for ticker in ('AAA', 'BBB', 'CCC', 'EEE', 'FFF')}
+    prices = {ticker: walk(rng, US_DAYS) for ticker in ('AAA', 'BBB', 'CCC')}
+    # EEE trades about 10,000 shares a day, under the $5M liquidity floor
+    prices['EEE'] = walk(rng, US_DAYS, shares=10_000.0)
+    prices['FFF'] = walk(rng, US_DAYS)
     prices['RY.TO'] = walk(rng, CANADA_DAYS)
     prices['SHOP.TO'] = walk(rng, CANADA_DAYS)
     prices['TD.TO'] = walk(rng, CANADA_DAYS)
@@ -219,8 +225,11 @@ def test_backfill_archives_the_signals_score_as_of_gives_on_every_session(path, 
     closes = {ticker: {p.date: p.close for p in rows} for ticker, rows in benchmarks.items()}
     sessions = replayable_sessions(market_dates(frame), EVENING)
     expected = {}
+    floored = 0
     for session, markets in sessions.items():
         for s in container.analyzer.score_as_of(session, frame, markets, closes):
+            sc = s.criteria
+            floored += sc.ticker == 'EEE' and sc.breakout_phase == BREAKOUT_SESSION and sc.status is None
             if s.criteria.status in SIGNAL_STATUSES:
                 values = row_values(s.criteria, session)
                 expected[s.criteria.ticker, session.isoformat()] = (s.close, *(values[i] for i in _ARCHIVED_AT))
@@ -235,6 +244,9 @@ def test_backfill_archives_the_signals_score_as_of_gives_on_every_session(path, 
     assert any(s['rs_sector_1m'] is not None for s in archived)
     assert any(s['ema_21w'] is not None for s in archived)
     assert 'ZZZ' not in {s['ticker'] for s in archived}
+    # EEE breaks out, but below the liquidity floor: never archived
+    assert floored > 0
+    assert 'EEE' not in {s['ticker'] for s in archived}
 
     assert (result.sessions, result.first, result.last) == (len(sessions), min(sessions), max(sessions))
     assert result.tickers == 11
