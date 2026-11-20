@@ -45,6 +45,7 @@ from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
+from app.repositories.security_state_repo import SecurityStateRepo
 from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import _ARCHIVED, _ARCHIVED_AT, SignalRepo
@@ -188,6 +189,7 @@ def container(path, tmp_path, prices, benchmarks) -> SimpleNamespace:
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
     container.issuer_repo = IssuerRepo(container)
+    container.security_state_repo = SecurityStateRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     container.backfill = Backfill(container, now=lambda: EVENING)
     container.signal_path_repo = SignalPathRepo(container)

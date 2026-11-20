@@ -22,6 +22,7 @@ from app.repositories.metadata_repo import MetadataRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
+from app.repositories.security_state_repo import SecurityStateRepo
 from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
@@ -59,6 +60,7 @@ def build_container(config: Config) -> Container:
     c.register('screened_session_repo', Singleton(lambda: ScreenedSessionRepo(c)))
     c.register('signal_repo', Singleton(lambda: SignalRepo(c)))
     c.register('issuer_repo', Singleton(lambda: IssuerRepo(c)))
+    c.register('security_state_repo', Singleton(lambda: SecurityStateRepo(c)))
     c.register('signal_path_repo', Singleton(lambda: SignalPathRepo(c)))
     c.register('signal_outcome_repo', Singleton(lambda: SignalOutcomeRepo(c)))
     c.register('history_repo', Singleton(lambda: HistoryRepo(c)))

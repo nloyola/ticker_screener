@@ -31,8 +31,10 @@ from app.price_apis.tiingo import TiingoPrices
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.price_data_repo import PriceDataRepo
+from app.repositories.security_state_repo import SecurityStateRepo
 from app.services.sector_service import SectorAggregate, SubsectorWithTickers
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
+from tests.test_security_state_repo import set_state
 
 TODAY = date.today()
 OLD_DAY = window_start(TODAY) - timedelta(days=1)
@@ -187,6 +189,7 @@ def make_fetcher(repo: PriceDataRepo, api, subsectors: dict[int, list[str]]) -> 
         price_data_repo=repo,
         benchmark_price_repo=BenchmarkPriceRepo(SimpleNamespace(db_path=repo.db_path)),
         company_name_repo=CompanyNameRepo(SimpleNamespace(db_path=repo.db_path)),
+        security_state_repo=SecurityStateRepo(SimpleNamespace(db_path=repo.db_path)),
     )
     fetcher = TickerFetcher(container)
     fetcher.sleep = lambda seconds: None
@@ -808,3 +811,17 @@ def test_the_quota_check_counts_the_benchmarks(repo):
     make_fetcher(repo, eodhd, {1: ['AAPL', 'MSFT', 'SHOP.TO']}).fetch()
 
     assert needed == [5]  # three tickers and two benchmarks
+
+
+def test_a_ticker_the_security_master_holds_back_is_not_requested_and_keeps_its_rows(repo):
+    store(repo, 'KEY', [(days_ago(2), 9.0)])
+    set_state(repo.db_path, 'KEY', 'flagged')
+    set_state(repo.db_path, 'PARA', 'inactive')
+    set_state(repo.db_path, 'XOM', 'active')
+    tiingo = FakeTiingo({'XOM': [(days_ago(1), 2.0)]})
+
+    stats = make_fetcher(repo, tiingo, {1: ['KEY', 'XOM', 'PARA']}).fetch()
+
+    assert [ticker for ticker, _, _ in tiingo.requests] == ['XOM', 'SPY']
+    assert (stats.attempted, stats.failed, stats.held) == (1, 0, 2)
+    assert stored(repo, 'KEY') == [(1, days_ago(2), 9.0)]

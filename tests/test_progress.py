@@ -93,6 +93,7 @@ def make_fetcher(sectors: list[SectorAggregate]) -> TickerFetcher:
         price_data_repo=SimpleNamespace(replace_for_ticker=lambda ticker, rows: None, latest_for_ticker=lambda t: None),
         company_name_repo=SimpleNamespace(missing=lambda tickers: []),
         benchmark_price_repo=SimpleNamespace(replace=lambda ticker, prices: None),
+        security_state_repo=SimpleNamespace(held=dict),
     )
     fetcher = TickerFetcher(container)
     fetcher._fetch_ticker_data = lambda subsector_id, ticker: []
@@ -155,6 +156,7 @@ def test_analyze_reports_start_and_done(capsys):
         screened_session_repo=None,
         signal_repo=None,
         issuer_repo=None,
+        security_state_repo=SimpleNamespace(held=dict),
     )
     Analyzer(container).analyze()
 

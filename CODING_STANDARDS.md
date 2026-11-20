@@ -28,7 +28,7 @@ The rules code in this repository is held to. The screener is its own repository
 - Values are always bound as `?` parameters. An f-string in SQL may only insert a table or column name from a constant in the code.
 - `schema.sql` only creates missing tables. A change to an existing table, or a new table, also appends an upgrade to `UPGRADES` in `app/db.py` that leaves an old database exactly as `schema.sql` now creates it. Never edit an upgrade that has shipped.
 - A `schema.sql` change needs the matching change in the parent (its snapshot `internal/repo/testdata/screener_schema.sql` and its repositories), committed with the new submodule commit.
-- Never read, write, drop or empty the dashboard's own tables, and never add them to `schema.sql`. The one exception is reading `issuer` and `issuer_listing`, through `IssuerRepo` alone, which treats them missing as no issuers. Only `clear_market_data` empties tables, and only those in `MARKET_DATA_TABLES`. `signal` is append-only.
+- Never read, write, drop or empty the dashboard's own tables, and never add them to `schema.sql`. The exceptions are reading `issuer` and `issuer_listing`, through `IssuerRepo` alone, which treats them missing as no issuers, and reading `security_master`'s states, through `SecurityStateRepo` alone, which treats it missing as no ticker held. Only `clear_market_data` empties tables, and only those in `MARKET_DATA_TABLES`. `signal` is append-only.
 
 
 ## Rules and versions

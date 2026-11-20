@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
     from app.repositories.company_name_repo import CompanyNameRepo
     from app.repositories.price_data_repo import PriceDataRepo
+    from app.repositories.security_state_repo import SecurityStateRepo
     from app.services.sector_service import SectorService
 
 
@@ -39,6 +40,9 @@ class FetchStats:
     failed: int = 0
     # tickers of a market the price API does not cover: neither attempted nor failed, their stored rows kept
     skipped: int = 0
+    # tickers the dashboard's security master holds back, flagged for review or inactive: never requested, neither
+    # attempted nor failed, their stored rows kept
+    held: int = 0
     # the name of the price API the fetch used
     api: str = ''
 
@@ -75,6 +79,10 @@ class TickerFetcher:
     A ticker of a market the API does not cover (a Canadian ticker under Tiingo, see app/markets.py) is skipped: it
     keeps its stored rows, and counts as neither attempted nor failed, so it cannot push a run over its failure limit.
     A ticker with an exchange suffix no market has fails without a request.
+
+    A ticker the dashboard's security master holds back (SecurityStateRepo: its identity changed and waits for an
+    admin's review, or it no longer trades) is held: never requested, it keeps its stored rows and counts as neither
+    attempted nor failed, until an admin clears it.
 
     A ticker whose download fails keeps its stored rows, and so does one whose download holds no trading day. A
     ticker listed in more than one subsector is downloaded once per run, for the first subsector that lists it.
@@ -129,12 +137,14 @@ class TickerFetcher:
         self.price_data_repo: PriceDataRepo = container.price_data_repo
         self.benchmark_price_repo: BenchmarkPriceRepo = container.benchmark_price_repo
         self.company_name_repo: CompanyNameRepo = container.company_name_repo
+        self.security_state_repo: SecurityStateRepo = container.security_state_repo
 
         self.sleep: Callable[[float], None] = time.sleep
         self.strict = False
         self.stats = FetchStats()
         self._fetched: set[str] = set()
         self._stored: list[str] = []
+        self._held: dict[str, str] = {}
         self.flagged: dict[str, str] = {}
 
     def fetch(
@@ -146,6 +156,7 @@ class TickerFetcher:
         self._fetched = set()
         self._stored = []
         self.flagged = {}
+        self._held = self.security_state_repo.held()
         logger.info(f'price API: {self.api.name}')
 
         batches = self._batches(sector_filter, ticker_filter)
@@ -168,6 +179,11 @@ class TickerFetcher:
 
         if self.stats.skipped:
             logger.info(f'skipped {self.stats.skipped} tickers not covered by {self.api.name}, stored rows kept')
+        if self.stats.held:
+            logger.info(
+                f'held back {self.stats.held} tickers flagged for review or inactive in the security master, '
+                'stored rows kept'
+            )
         for market in markets:
             self._fetch_benchmark(BENCHMARKS[market])
         self._look_up_names(self._stored)
@@ -215,8 +231,9 @@ class TickerFetcher:
 
     def _to_fetch(self, tickers: list[str]) -> list[str]:
         """
-        The tickers to request, leaving out those already in this run and counting those the API does not cover as
-        skipped. A ticker with an unsupported suffix counts as attempted and failed, without a request.
+        The tickers to request, leaving out those already in this run, counting those the security master holds back
+        (flagged for review or inactive) as held and those the API does not cover as skipped. A ticker with an
+        unsupported suffix counts as attempted and failed, without a request.
         """
         wanted = []
         for ticker in tickers:
@@ -224,6 +241,10 @@ class TickerFetcher:
                 logger.debug(f'already fetched in this run: {ticker}')
                 continue
             self._fetched.add(ticker)
+            if ticker in self._held:
+                self.stats.held += 1
+                logger.info(f'not fetched, {self._held[ticker]} in the security master, stored rows kept: {ticker}')
+                continue
             try:
                 market = market_of(ticker)
             except UnsupportedTicker as e:

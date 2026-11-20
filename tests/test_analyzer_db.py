@@ -30,6 +30,7 @@ from app.repositories.company_name_repo import CompanyNameRepo
 from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
+from app.repositories.security_state_repo import SecurityStateRepo
 from app.repositories.signal_outcome_repo import SignalOutcomeRepo
 from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
@@ -39,6 +40,7 @@ from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import HORIZONS, REMOVED, SignalPaths
 from app.ticker_fetcher import HISTORY_DAYS, TickerFetcher, window_start
 from tests.test_issuer_repo import add_issuer
+from tests.test_security_state_repo import set_state
 
 
 def trades(day: date) -> bool:
@@ -119,6 +121,7 @@ def container(path) -> SimpleNamespace:
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
     container.issuer_repo = IssuerRepo(container)
+    container.security_state_repo = SecurityStateRepo(container)
     container.signal_path_repo = SignalPathRepo(container)
     container.signal_paths = SignalPaths(container)
     container.signal_outcome_repo = SignalOutcomeRepo(container)
@@ -1522,3 +1525,16 @@ def test_score_as_of_leaves_out_a_market_closed_that_session(container):
     scored = container.analyzer.score_as_of(AS_OF)
 
     assert [(s.criteria.ticker, s.session_date) for s in scored] == [('SHOP.TO', AS_OF)]
+
+
+def test_run_leaves_a_ticker_the_security_master_holds_back_unscored_and_clears_its_status(path, container):
+    breakout_rows(path, container)
+    container.analyzer.analyze(run_id=1)
+    set_state(path, 'BRK', 'flagged')
+
+    container.analyzer.analyze(run_id=2)
+
+    # off the screen: its row keeps its values but loses its status, and its session is not archived again
+    assert table_rows(path, 'stock_criteria')['BRK']['status'] is None
+    assert table_rows(path, 'stock_criteria')['SHOP.TO']['status'] == 'confirmed'
+    assert container.price_data_repo.latest_for_ticker('BRK') is not None

@@ -159,6 +159,7 @@ def make_analyzer(
         screened_session_repo=FakeScreenedSessionRepo(),
         signal_repo=FakeSignalRepo(),
         issuer_repo=FakeIssuerRepo(),
+        security_state_repo=SimpleNamespace(held=dict),
     )
     return Analyzer(container), criteria_repo
 

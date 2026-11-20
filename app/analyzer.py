@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from app.repositories.issuer_repo import IssuerRepo
     from app.repositories.price_data_repo import PriceDataRepo
     from app.repositories.screened_session_repo import ScreenedSessionRepo
+    from app.repositories.security_state_repo import SecurityStateRepo
     from app.repositories.signal_repo import SignalRepo
     from app.repositories.stock_criteria_repo import StockCriteriaRepo
 
@@ -797,6 +798,7 @@ class Analyzer:
         self.screened_session_repo: ScreenedSessionRepo = container.screened_session_repo
         self.signal_repo: SignalRepo = container.signal_repo
         self.issuer_repo: IssuerRepo = container.issuer_repo
+        self.security_state_repo: SecurityStateRepo = container.security_state_repo
         # the clock a run's start is read from, timezone aware
         self.now = now
         # each ticker the last analyze left unscored as stale or frozen, with that reason, flagged or not
@@ -849,9 +851,13 @@ class Analyzer:
         reason, after a fetch only the markets the fetch's API covers are scored: a Tiingo run leaves every Canadian
         ticker's row and date_created as they were. A standalone 'analyze' ('fetched_by' None) scores every market.
 
+        A ticker the dashboard's security master holds back (SecurityStateRepo: flagged for an admin's review, or
+        inactive) is not scored, with one line counting them, so it is off the screen until an admin clears it; its
+        price rows are kept.
+
         In the markets it scores, the run clears the status of every stock_criteria row it did not write, keeping its
-        date and values: a stale or frozen ticker, one with fewer than MIN_ROWS rows, or one with no rows left. No row
-        keeps a status its stored prices no longer support.
+        date and values: a stale or frozen ticker, a held one, one with fewer than MIN_ROWS rows, or one with no rows
+        left. No row keeps a status its stored prices no longer support.
 
         Each stale ticker is reported with a 'FLAGGED ticker=<ticker> reason=stale last=<date>' line after its warning
         (see app/progress.py), dated by its last traded day when its rows end in a padded stop, even one that is
@@ -879,6 +885,7 @@ class Analyzer:
         if df is None:
             logger.info('No price data found.')
             return
+        df = self._without_held(df)
 
         by_market = self._by_market(df)
         scored: list[Scored] = []
@@ -1098,6 +1105,19 @@ class Analyzer:
         stored = self.signal_repo.archive(records)
         logger.info(f'archived {describe_records(stored)}, of {len(records)} tickers the archive keeps')
         return stored
+
+    def _without_held(self, df: pd.DataFrame) -> pd.DataFrame:
+        """'df' without the rows of the tickers the security master holds back, printing how many it left out."""
+        held = self.security_state_repo.held()
+        tickers = df.index.get_level_values('ticker')
+        left_out = sorted(set(tickers) & held.keys())
+        if not left_out:
+            return df
+        print(
+            f'not scored, flagged for review or inactive in the security master: {len(left_out)} '
+            f'ticker{"" if len(left_out) == 1 else "s"} ({", ".join(left_out)})'
+        )
+        return df[~tickers.isin(left_out)]
 
     def _record_sessions(
         self, sessions: Mapping[str, tuple[date, int]], run_id: int | None, settings: str, commit: str | None

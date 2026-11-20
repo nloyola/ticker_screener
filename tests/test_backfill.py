@@ -24,6 +24,7 @@ from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
+from app.repositories.security_state_repo import SecurityStateRepo
 from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.screener_lock import screener_lock
@@ -128,6 +129,7 @@ def container(path) -> SimpleNamespace:
     container.screened_session_repo = ScreenedSessionRepo(container)
     container.signal_repo = SignalRepo(container)
     container.issuer_repo = IssuerRepo(container)
+    container.security_state_repo = SecurityStateRepo(container)
     container.analyzer = Analyzer(container, now=lambda: EVENING)
     container.backfill = Backfill(container, now=lambda: EVENING)
     return container

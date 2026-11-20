@@ -25,6 +25,7 @@ from app.repositories.analysis_repo import AnalysisRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.history_repo import HistoryRepo, init_history_db
 from app.repositories.issuer_repo import IssuerRepo
+from app.repositories.security_state_repo import SecurityStateRepo
 
 MAIN = Path(__file__).resolve().parent.parent / 'main.py'
 
@@ -42,6 +43,7 @@ def db(tmp_path) -> SimpleNamespace:
     c = SimpleNamespace(db_path=path, history_db_path=history)
     c.analysis_data_repo = AnalysisDataRepo(c)
     c.issuer_repo = IssuerRepo(c)
+    c.security_state_repo = SecurityStateRepo(c)
     c.analysis_repo = AnalysisRepo(c)
     c.benchmark_price_repo = BenchmarkPriceRepo(c)
     c.history_repo = HistoryRepo(c)
