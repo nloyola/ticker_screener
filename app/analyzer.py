@@ -1036,7 +1036,7 @@ class Analyzer:
             non_primary = self.issuer_repo.non_primary()
         records: list[Signal] = []
         left_out: list[str] = []
-        unlinked = 0
+        kept: list[tuple[Scored, str, date | None]] = []
         for s in scored:
             sc = s.criteria
             kind = archive_kind(sc)
@@ -1045,13 +1045,22 @@ class Analyzer:
             if sc.ticker.upper() in non_primary:
                 left_out.append(f'{sc.ticker} (under {non_primary[sc.ticker.upper()]})')
                 continue
+            breakout_session = (
+                s.dates[len(s.dates) - 1 - sc.sessions_since_breakout] if kind == CONTINUATION_KIND else None
+            )
+            kept.append((s, kind, breakout_session))
+        breakouts = self.signal_repo.breakouts(
+            ((s.criteria.ticker, day) for s, _, day in kept if day is not None), SCREENER_VERSION
+        )
+        unlinked = 0
+        for s, kind, breakout_session in kept:
+            sc = s.criteria
             market, session_date, close, dates = s.market, s.session_date, s.close, s.dates
             previous, breakout_id = None, None
             if kind == SIGNAL_KIND:
                 previous = self.signal_repo.previous(sc.ticker, session_date)
-            elif kind == CONTINUATION_KIND:
-                breakout_session = dates[len(dates) - 1 - sc.sessions_since_breakout]
-                breakout_id = self.signal_repo.breakout(sc.ticker, breakout_session, SCREENER_VERSION)
+            elif breakout_session is not None:
+                breakout_id = breakouts.get((sc.ticker, breakout_session))
                 if breakout_id is None:
                     unlinked += 1
                     continue

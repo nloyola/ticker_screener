@@ -156,7 +156,7 @@ class HistoryBackfill:
         archived_tickers: set[str] = set()
         scored: set[str] = set()
         for done, (subsector_id, tickers) in enumerate(by_subsector.items(), start=1):
-            records = self._subsectordescribe_records(subsector_id, tickers, replayable, benchmarks, scored)
+            records = self._subsector_records(subsector_id, tickers, replayable, benchmarks, scored)
             result.tickers += len(tickers)
             stored = self._archive(records, settings, commit, archived_tickers)
             result.records.update(stored)
@@ -236,7 +236,7 @@ class HistoryBackfill:
     def _dates(self, ticker: str) -> pd.Index:
         return pd.Index([p.date for p in self.history_repo.prices(TICKER, ticker)])
 
-    def _subsectordescribe_records(
+    def _subsector_records(
         self,
         subsector_id: int,
         tickers: list[str],

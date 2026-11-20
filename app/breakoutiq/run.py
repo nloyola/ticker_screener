@@ -166,8 +166,7 @@ class Analysis:
         by 'thresholds' and stores the run with its results.
         """
         started_at = datetime.now(UTC)
-        rows = data.load_dataset(self.container, with_history=True)
-        near_misses = data.load_near_misses(self.container, with_history=True)
+        rows, near_misses = data.load_datasets(self.container, with_history=True)
         seconds: dict[str, float] = {}
         results = analyse(rows, thresholds, seconds, near_misses)
         signals = rows.drop_duplicates('signal_id')

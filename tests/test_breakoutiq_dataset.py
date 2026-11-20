@@ -3,7 +3,8 @@ BreakoutIQ's analysis dataset: one row per signal and resolved horizon, with the
 regime, and the signals split by date into development, validation and test with a GAP_SESSIONS gap between them,
 a signal whose own window reaches the next period in the gap too; one screener version's signals, read only when the
 price history is there. The near-miss dataset: one row per near-miss event (a ticker's near-misses on consecutive
-sessions) and resolved horizon, with the mandatory condition it failed.
+sessions) and resolved horizon, with the mandatory condition it failed. Both keep, of listings grouped under an issuer
+after they were archived, only the primary's record of a session both have.
 """
 
 import sqlite3
@@ -34,6 +35,7 @@ from app.breakoutiq.dataset import (
     build_dataset,
     join_closes,
     load_dataset,
+    load_datasets,
     load_near_misses,
     regimes,
     window_ends,
@@ -42,7 +44,9 @@ from app.db import init_db
 from app.repositories.analysis_data_repo import AnalysisDataRepo
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.history_repo import HistoryRepo, init_history_db
+from app.repositories.issuer_repo import IssuerRepo
 from app.signal_paths import HORIZONS
+from tests.test_issuer_repo import add_issuer
 
 SESSIONS = pd.bdate_range('2016-01-04', periods=2600)
 
@@ -151,6 +155,7 @@ def db(tmp_path) -> SimpleNamespace:
     init_history_db(history)
     c = SimpleNamespace(db_path=path, history_db_path=history)
     c.analysis_data_repo = AnalysisDataRepo(c)
+    c.issuer_repo = IssuerRepo(c)
     c.benchmark_price_repo = BenchmarkPriceRepo(c)
     c.history_repo = HistoryRepo(c)
     return c
@@ -463,3 +468,47 @@ def test_the_near_miss_dataset_reads_one_screener_version_and_no_other_kind(db):
 
     assert list(load_near_misses(db, with_history=False)['signal_id']) == [1]
     assert list(load_near_misses(db, with_history=False, screener_version='1.1.0')['signal_id']) == [2]
+
+
+def test_a_near_miss_event_whose_first_session_is_unresolved_is_its_first_resolved_one(db):
+    days = SESSIONS[:6]
+    _add_benchmark(db.db_path, 'benchmark_price', pd.Series(100.0, index=days))
+    # T1 fails the volume on four sessions in a row; its first has no resolved horizon, its third none either
+    for signal_id, i in ((1, 0), (2, 1), (3, 2), (4, 3)):
+        _add_near_miss(db.db_path, signal_id, days[i].date(), VOLUME, ticker='T1')
+    for signal_id in (2, 4):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+    _add_outcome(db.db_path, 3, 5, 'pending')
+
+    # one event, the unresolved sessions still joining it, which its second session stands for
+    assert list(load_near_misses(db, with_history=False)['signal_id']) == [2]
+
+
+# listings grouped under an issuer after they were archived
+
+
+def test_a_listing_grouped_later_is_left_out_on_the_sessions_its_primary_has_a_signal(db):
+    first, second = date(2020, 1, 2), date(2020, 1, 3)
+    # STN and STN.TO were both archived before an admin grouped them, STN the primary; STN.TO alone on the second day
+    _add_signal(db.db_path, 1, first, ticker='STN')
+    _add_signal(db.db_path, 2, first, ticker='STN.TO', market='Canada')
+    _add_signal(db.db_path, 3, second, ticker='stn.to', market='Canada')
+    for signal_id in (1, 2, 3):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+    add_issuer(db.db_path, 'Stantec', 'STN', 'STN', 'STN.TO')
+
+    assert list(load_dataset(db, with_history=False)['signal_id']) == [1, 3]
+
+
+def test_a_near_miss_of_a_listing_grouped_later_is_left_out_on_the_sessions_its_primary_has_one(db):
+    day = date(2020, 1, 2)
+    _add_near_miss(db.db_path, 1, day, VOLUME, ticker='STN')
+    _add_near_miss(db.db_path, 2, day, VOLUME, ticker='STN.TO', market='Canada')
+    for signal_id in (1, 2):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+    add_issuer(db.db_path, 'Stantec', 'STN', 'STN', 'STN.TO')
+
+    rows, near_misses = load_datasets(db, with_history=False)
+
+    assert list(near_misses['signal_id']) == [1]
+    assert rows.empty

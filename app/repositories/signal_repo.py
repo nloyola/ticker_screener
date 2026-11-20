@@ -96,14 +96,24 @@ class SignalRepo:
             ).fetchone()
         return (row['id'], date.fromisoformat(row['session_date'])) if row else None
 
-    def breakout(self, ticker: str, session_date: date, screener_version: str) -> int | None:
-        """The id of the ticker's signal on 'session_date' under 'screener_version', None when none is archived."""
+    def breakouts(self, wanted: Iterable[tuple[str, date]], screener_version: str) -> dict[tuple[str, date], int]:
+        """
+        The id of each (ticker, session date) of 'wanted' that has a signal archived under 'screener_version', read
+        over one connection; one with none is left out.
+        """
+        found: dict[tuple[str, date], int] = {}
+        wanted = set(wanted)
+        if not wanted:
+            return found
         with connect(self.db_path) as con:
-            row = con.execute(
-                'SELECT id FROM signal WHERE ticker = ? AND session_date = ? AND screener_version = ? AND kind = ?',
-                (ticker, session_date.isoformat(), screener_version, SIGNAL_KIND),
-            ).fetchone()
-        return row['id'] if row else None
+            for ticker, session_date in wanted:
+                row = con.execute(
+                    'SELECT id FROM signal WHERE ticker = ? AND session_date = ? AND screener_version = ? AND kind = ?',
+                    (ticker, session_date.isoformat(), screener_version, SIGNAL_KIND),
+                ).fetchone()
+                if row:
+                    found[(ticker, session_date)] = row['id']
+        return found
 
     def archive(self, records: Iterable[Signal]) -> Counter[str]:
         """

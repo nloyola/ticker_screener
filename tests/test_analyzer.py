@@ -77,8 +77,8 @@ class FakeSignalRepo:
     def previous(self, ticker: str, before: date) -> None:
         return None
 
-    def breakout(self, ticker: str, session_date: date, screener_version: str) -> None:
-        return None
+    def breakouts(self, wanted, screener_version: str) -> dict[tuple[str, date], int]:
+        return {}
 
     def archive(self, records) -> Counter[str]:
         self.archived.extend(records)
