@@ -268,17 +268,21 @@ def comparison(
     labels: tuple[str, ...] | None,
     outcome: str,
     thresholds: Thresholds = DEFAULTS,
+    every_group: bool = False,
 ) -> dict:
     """
     One indicator's comparison on 'outcome' at a horizon: every group's counts and mean, and the effect of the
     highest group over the lowest, with its clustered interval and raw p-value when both meet the minimum sample of
     'thresholds'.
     'groups' numbers each row's group from 1 (NaN in none), and 'labels' names group N at N - 1, or None to name
-    each by its number.
+    each by its number. The groups are those the rows hold, or, with 'every_group', every group 'labels' names, an
+    empty one counted as holding nothing.
     """
     y = context.outcomes[outcome]
     observed = ~np.isnan(y) & ~np.isnan(groups)
     numbers = [int(g) for g in np.unique(groups[~np.isnan(groups)])]
+    if every_group and labels:
+        numbers = list(range(1, len(labels) + 1))
 
     group_payloads = []
     for number in numbers:

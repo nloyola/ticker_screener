@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.breakoutiq.dataset import load_dataset
+from app.breakoutiq.dataset import load_dataset, load_near_misses
 from app.breakoutiq.indicators import FLAGS
 from app.breakoutiq.run import SECTIONS, Analysis, analyse, settings
 from app.breakoutiq.thresholds import DEFAULTS, Thresholds
@@ -148,7 +148,7 @@ def test_the_command_stores_one_complete_run_that_reloads_with_its_payloads(db):
     assert {r.section for r in stored} == set(versions)
     assert all(r.payload_version == versions[r.section] for r in stored)
     # the stored results are the sections' own, in order, their payloads reloading as written
-    expected = analyse(load_dataset(db, with_history=True))
+    expected = analyse(load_dataset(db, with_history=True), near_misses=load_near_misses(db, with_history=True))
     assert [(r.section, r.finding, r.horizon) for r in stored] == [(r.section, r.finding, r.horizon) for r in expected]
     assert [r.payload for r in stored] == [json.loads(json.dumps(r.payload)) for r in expected]
     # the baseline's counts are the archive's, censored horizons included
@@ -161,7 +161,7 @@ def test_the_command_stores_one_complete_run_that_reloads_with_its_payloads(db):
     assert summary[0] == (
         f'breakoutiq-analysis: read {count} signals with a resolved horizon ({SESSIONS[0].date()} to '
         f'{SESSIONS[-1].date()}), {count * len(HORIZONS)} resolved horizons, {count // 10} of them censored, '
-        f'{count} signals with no regime'
+        f'{count} signals with no regime, 0 near-miss events with a resolved horizon'
     )
     assert summary[-1] == f'breakoutiq-analysis: stored run {run.id}'
     for section in SECTIONS:

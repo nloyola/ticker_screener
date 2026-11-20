@@ -8,7 +8,12 @@ the dataset reads, so every section, counting distinct signals, counts each even
 "Event"). The archive keeps each event once by construction: a breakout run has one breakout session, its Extended
 sessions are continuations, which are left out, and a listing that is not its issuer's primary is never archived.
 
-build_dataset and its helpers are pure functions of data frames; load_dataset reads them from the database.
+The near-misses the strength test compares with the signals have a dataset of their own (near_miss_dataset): one row
+per near-miss event and resolved horizon, an event being a run of one ticker's near-misses on consecutive sessions of
+its market, which its first session stands for.
+
+build_dataset, near_miss_dataset and their helpers are pure functions of data frames; load_dataset and
+load_near_misses read them from the database.
 
 A resolved horizon is complete, with its returns, or ended: censored, with no returns, because the ticker's prices
 stopped before the horizon's exit. Ended rows stay in the dataset (censored is True), never dropped, so every section
@@ -49,6 +54,15 @@ BELOW = 'below'
 COMPLETE = 'complete'
 ENDED = 'ended'
 
+# the mandatory condition a near-miss failed (failed_condition), in the order the screener counts them, then the
+# minimum margin, which a near-miss meeting all four missed
+BREAKOUT = 'breakout'
+VOLUME = 'volume'
+ABOVE_SMA50 = 'above_sma50'
+SMA50_RISING = 'sma50_rising'
+MARGIN = 'margin'
+CONDITIONS = (BREAKOUT, VOLUME, ABOVE_SMA50, SMA50_RISING, MARGIN)
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,9 +77,30 @@ def load_dataset(container: Container, with_history: bool, screener_version: str
     too, which holds the years the regime of a backfilled signal needs; MissingHistory when that file is not there,
     rather than an empty history that would leave those regimes unknown.
     """
+    archive = container.analysis_data_repo.archive(screener_version)
+    benchmarks = load_benchmarks(container, with_history)
+    return build_dataset(archive.signals, archive.outcomes, benchmarks, archive.path_sessions)
+
+
+def load_near_misses(
+    container: Container, with_history: bool, screener_version: str = SCREENER_VERSION
+) -> pd.DataFrame:
+    """
+    The near-miss dataset (near_miss_dataset) from the database, of the near-misses 'screener_version' archived, each
+    market's calendar its benchmark's closes, read as load_dataset reads them (MissingHistory likewise).
+    """
+    near_misses = container.analysis_data_repo.near_misses(screener_version)
+    benchmarks = load_benchmarks(container, with_history)
+    return near_miss_dataset(near_misses.records, near_misses.outcomes, benchmarks)
+
+
+def load_benchmarks(container: Container, with_history: bool) -> dict[str, pd.Series]:
+    """
+    Each market's benchmark closes, indexed by date: benchmark_price's and, when 'with_history' is True, the price
+    history database's before them (join_closes); MissingHistory when that file is not there.
+    """
     if with_history and not os.path.isfile(container.history_db_path):
         raise MissingHistory(f'no price history database at {container.history_db_path}')
-    archive = container.analysis_data_repo.archive(screener_version)
     benchmarks = {}
     for market, ticker in BENCHMARKS.items():
         live = _series(container.benchmark_price_repo.closes(ticker))
@@ -75,7 +110,7 @@ def load_dataset(container: Container, with_history: bool, screener_version: str
             else _series({})
         )
         benchmarks[market] = join_closes(history, live)
-    return build_dataset(archive.signals, archive.outcomes, benchmarks, archive.path_sessions)
+    return benchmarks
 
 
 def build_dataset(
@@ -133,6 +168,65 @@ def build_dataset(
     rows = signals.merge(outcomes, on='signal_id', how='inner', validate='one_to_many')
     rows['censored'] = rows['outcome_status'] == ENDED
     return rows.sort_values(['session_date', 'signal_id', 'horizon'], kind='stable').reset_index(drop=True)
+
+
+def near_miss_dataset(records: pd.DataFrame, outcomes: pd.DataFrame, benchmarks: dict[str, pd.Series]) -> pd.DataFrame:
+    """
+    One row per near-miss event and resolved horizon, oldest session first: the event's first near-miss, with
+    'condition', the mandatory condition it failed (failed_condition), and its outcome's columns. 'records' and
+    'outcomes' are shaped as AnalysisDataRepo.near_misses gives them, and 'benchmarks' as build_dataset takes them.
+
+    A ticker failing a cut-off one day often fails it the next too, so its near-misses on consecutive sessions of its
+    market are one event, as a breakout run is one signal; a session the ticker was not a near-miss ends the event.
+    Each market's session calendar is its benchmark's dates and its near-miss sessions together. Like the signals, a
+    near-miss stands for the event only with a resolved horizon; one with none is left out and ends no event.
+    """
+    records = records.copy()
+    records['session_date'] = pd.to_datetime(records['session_date'])
+    outcomes = outcomes.copy()
+    for column in ('entry_date', 'exit_date', 'last_session_date'):
+        outcomes[column] = pd.to_datetime(outcomes[column])
+
+    records = records[event_starts(records, benchmarks)]
+    records = records[records['signal_id'].isin(outcomes['signal_id'])].reset_index(drop=True)
+    records['condition'] = [failed_condition(r) for r in records.itertuples(index=False)]
+    rows = records.merge(outcomes, on='signal_id', how='inner', validate='one_to_many')
+    rows['censored'] = rows['outcome_status'] == ENDED
+    return rows.sort_values(['session_date', 'signal_id', 'horizon'], kind='stable').reset_index(drop=True)
+
+
+def event_starts(records: pd.DataFrame, benchmarks: dict[str, pd.Series]) -> pd.Series:
+    """
+    Whether each record (columns ticker, market, session_date as Timestamps) begins an event, aligned with 'records':
+    True unless the same ticker has a record on the session before its own in its market's calendar (its benchmark's
+    dates and the records' sessions).
+    """
+    starts = pd.Series(True, index=records.index)
+    for market, group in records.groupby('market'):
+        calendar = pd.DatetimeIndex(benchmarks.get(market, _series({})).index)
+        calendar = calendar.union(pd.DatetimeIndex(group['session_date'].unique())).unique().sort_values()
+        position = pd.Series(calendar.searchsorted(group['session_date'].to_numpy()), index=group.index)
+        for _, sessions in position.groupby(group['ticker']):
+            ordered = sessions.sort_values()
+            starts.loc[ordered.index] = ordered.diff().ne(1).to_numpy()
+    return starts
+
+
+def failed_condition(record) -> str:
+    """
+    The mandatory condition a near-miss failed (CONDITIONS), read from its flags: MARGIN when it met all four
+    (core_criteria_met), or passes all four flags, else the first of the four it does not pass, an empty flag counting
+    as not passed.
+    """
+    if record.core_criteria_met == 1:
+        return MARGIN
+    passes = {
+        BREAKOUT: record.breakout_20d == 1 or record.breakout_60d == 1,
+        VOLUME: record.breakout_confirmed == 1,
+        ABOVE_SMA50: record.price_gt_50dma == 1,
+        SMA50_RISING: record.dma_50_rising == 1,
+    }
+    return next((name for name, passed in passes.items() if not passed), MARGIN)
 
 
 def assign_periods(signals: pd.DataFrame, calendars: dict[str, pd.DatetimeIndex]) -> pd.Series:

@@ -1,14 +1,22 @@
 """
 BreakoutIQ's test of the mandatory signals' strength: each strength has a result per horizon and outcome with its
 bands, effect and sample sizes, a planted effect is found and nothing else, and every result says it measures
-strength, not whether the rule is needed.
+strength, not whether the rule is needed. Beside them, the near-misses that failed each mandatory condition are
+compared with the signals at each horizon their paths reach, each group with its sample size, a planted shortfall
+found and nothing else.
 """
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from app.breakoutiq.dataset import CONDITIONS as CONDITION_NAMES
+from app.breakoutiq.dataset import MARGIN, VOLUME
 from app.breakoutiq.indicators import BANDS, FAILURE, HORIZON_OUTCOMES, MAIN_OUTCOME
 from app.breakoutiq.mandatory import (
+    CONDITIONS,
+    NEAR_MISS,
+    NEAR_MISS_HORIZONS,
     NECESSITY_NOTE,
     PAYLOAD_VERSION,
     SECTION,
@@ -117,3 +125,91 @@ def test_ended_horizons_are_counted_in_their_band_but_never_measured():
     payload = _payload(mandatory(rows), f'{STRENGTH}:sma50_slope_pct:{MAIN_OUTCOME}')
     assert sum(g['censored'] for g in payload['groups']) == ended.sum()
     assert sum(g['n'] for g in payload['groups']) == (~ended).sum()
+
+
+# the near-misses beside the signals
+
+
+def _near_misses(seed: int, per_date: int = 2, dates: int = 300, horizons=(20,), shortfall=None) -> pd.DataFrame:
+    """
+    A near-miss dataset of complete outcomes beside _dataset's signals, its ids after theirs, failing every condition
+    but MARGIN in turn, with the same shocks' spread; 'shortfall' (condition, size) takes size from the excess return
+    of the near-misses failing that condition.
+    """
+    rng = np.random.default_rng(seed)
+    count = per_date * dates
+    conditions = [c for c in CONDITION_NAMES if c != MARGIN]
+    frame = pd.DataFrame(
+        {
+            'signal_id': 100_000 + np.arange(count),
+            'session_date': np.repeat(SESSIONS[:dates], per_date),
+            'ticker': [f'N{t}' for t in rng.integers(0, 150, size=count)],
+            'condition': [conditions[i % len(conditions)] for i in range(count)],
+            'excess_return_pct': rng.normal(0, 7, count),
+            'mae_pct': -np.abs(rng.normal(4, 2, count)),
+        }
+    )
+    if shortfall:
+        condition, size = shortfall
+        frame.loc[frame['condition'] == condition, 'excess_return_pct'] -= size
+    rows = pd.concat([frame.assign(horizon=h) for h in horizons], ignore_index=True)
+    rows['outcome_status'] = 'complete'
+    return rows
+
+
+def _near_miss_results(seed: int, horizons=(20,), shortfall=None):
+    signals = _dataset(seed, horizons=horizons)
+    return mandatory(signals, near_misses=_near_misses(seed + 100, horizons=horizons, shortfall=shortfall))
+
+
+def test_each_condition_compares_its_near_misses_with_the_signals_at_each_horizon_their_paths_reach():
+    results = [r for r in _near_miss_results(5, horizons=(5, 60, 120)) if r.payload['kind'] == NEAR_MISS]
+
+    assert NEAR_MISS_HORIZONS == (5, 10, 20, 40, 60)
+    expected = {(f'{NEAR_MISS}:{c}:{o}', h) for c in CONDITIONS for o in HORIZON_OUTCOMES for h in (5, 60)}
+    assert {(r.finding, r.horizon) for r in results} == expected
+    assert len(results) == len(expected)
+    signals = 4 * 300
+    for r in results:
+        p = r.payload
+        assert r.section == SECTION and r.payload_version == PAYLOAD_VERSION
+        assert p['rule'] == CONDITIONS[p['indicator']]
+        assert p['measures'] == NEAR_MISS and p['tests_necessity'] is False and p['note'] == NECESSITY_NOTE
+        assert p['compared'] == ['signal', 'near_miss']
+        signal_group, near_miss_group = p['groups']
+        assert signal_group['group'] == 'signal' and near_miss_group['group'] == 'near_miss'
+        assert signal_group['signals'] == signal_group['n'] == signals
+        # a quarter of the near-misses fail each condition but the margin, which none of them misses
+        expected_near_misses = 0 if p['indicator'] == MARGIN else 2 * 300 // 4
+        assert near_miss_group['signals'] == near_miss_group['n'] == expected_near_misses
+        if p['indicator'] == MARGIN:
+            assert near_miss_group['signal_dates'] == 0 and near_miss_group['mean'] is None
+            assert not p['shown'] and p['effect'] is None and p['p_value'] is None
+        else:
+            assert p['shown'] and p['effect']['n'] == signals + expected_near_misses
+
+
+def test_a_planted_near_miss_shortfall_is_found_and_nothing_else():
+    results = [r for r in _near_miss_results(6, shortfall=(VOLUME, 6.0)) if r.payload['kind'] == NEAR_MISS]
+
+    found = {r.finding for r in results if r.payload['significant']}
+    assert found == {f'{NEAR_MISS}:{VOLUME}:{MAIN_OUTCOME}'}
+    payload = _payload(results, f'{NEAR_MISS}:{VOLUME}:{MAIN_OUTCOME}')
+    # the near-misses' mean less the signals'
+    signal_group, near_miss_group = payload['groups']
+    assert payload['effect']['estimate'] == pytest.approx(near_miss_group['mean'] - signal_group['mean'])
+    assert payload['effect']['estimate'] < 0
+    assert payload['p_adjusted'] <= FDR and payload['rank'] == 1
+
+
+def test_with_no_near_miss_dataset_the_section_has_only_its_strengths():
+    assert {r.payload['kind'] for r in mandatory(_dataset(7))} == {STRENGTH}
+
+
+def test_with_no_shortfall_the_near_misses_are_found_to_differ_in_few_simulations():
+    simulations = 20
+    with_findings = sum(
+        any(r.payload['significant'] for r in _near_miss_results(seed) if r.payload['kind'] == NEAR_MISS)
+        for seed in range(10, 10 + simulations)
+    )
+    assert with_findings <= 3

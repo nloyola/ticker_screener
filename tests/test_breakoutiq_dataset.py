@@ -2,7 +2,8 @@
 BreakoutIQ's analysis dataset: one row per signal and resolved horizon, with the derived mandatory strengths and the
 regime, and the signals split by date into development, validation and test with a GAP_SESSIONS gap between them,
 a signal whose own window reaches the next period in the gap too; one screener version's signals, read only when the
-price history is there.
+price history is there. The near-miss dataset: one row per near-miss event (a ticker's near-misses on consecutive
+sessions) and resolved horizon, with the mandatory condition it failed.
 """
 
 import sqlite3
@@ -15,19 +16,25 @@ import pytest
 
 from app.breakoutiq.dataset import (
     ABOVE,
+    ABOVE_SMA50,
     BELOW,
+    BREAKOUT,
     DEVELOPMENT,
     GAP,
     GAP_SESSIONS,
+    MARGIN,
     PERIODS,
     REGIME_SMA_DAYS,
+    SMA50_RISING,
     TEST,
     VALIDATION,
+    VOLUME,
     MissingHistory,
     assign_periods,
     build_dataset,
     join_closes,
     load_dataset,
+    load_near_misses,
     regimes,
     window_ends,
 )
@@ -376,3 +383,83 @@ def test_window_ends_are_the_latest_exit_or_last_session():
     )
 
     assert window_ends(outcomes).to_dict() == {1: pd.Timestamp('2020-03-02'), 2: pd.Timestamp('2020-01-10')}
+
+
+# the near-miss dataset
+
+# the flags of a near-miss meeting three of the four mandatory conditions, failing the one named
+_FAILS = {
+    BREAKOUT: {'breakout_20d': 0, 'breakout_60d': 0},
+    VOLUME: {'breakout_confirmed': 0},
+    ABOVE_SMA50: {'price_gt_50dma': 0},
+    SMA50_RISING: {'dma_50_rising': 0},
+}
+
+
+def _add_near_miss(path, signal_id, day, fails=None, **values):
+    """A near-miss failing the condition 'fails', or, with None, meeting all four short of the minimum margin."""
+    flags = {
+        'core_criteria_met': int(fails is None),
+        'core_criteria_score': 4 if fails is None else 3,
+        'breakout_20d': 1,
+        'breakout_60d': 0,
+        'breakout_confirmed': 1,
+        'price_gt_50dma': 1,
+        'dma_50_rising': 1,
+        **_FAILS.get(fails, {}),
+    }
+    _add_signal(path, signal_id, day, status=None, kind='near_miss', **{**flags, **values})
+
+
+def test_each_near_miss_event_is_its_first_session_with_the_condition_it_failed(db):
+    days = SESSIONS[:10]
+    _add_benchmark(db.db_path, 'benchmark_price', pd.Series(100.0, index=days))
+    # T1 fails the volume on three sessions in a row, one event, then again after a session it was not a near-miss
+    for signal_id, i in ((1, 0), (2, 1), (3, 2), (4, 4)):
+        _add_near_miss(db.db_path, signal_id, days[i].date(), VOLUME, ticker='T1')
+    # T5 fails the breakout, T6 the 50DMA, T7 its slope, T8 only the margin, on the session of T1's first
+    _add_near_miss(db.db_path, 5, days[0].date(), BREAKOUT)
+    _add_near_miss(db.db_path, 6, days[0].date(), ABOVE_SMA50)
+    _add_near_miss(db.db_path, 7, days[0].date(), SMA50_RISING)
+    _add_near_miss(db.db_path, 8, days[0].date())
+    # a signal, the same session as T1's last, is not a near-miss
+    _add_signal(db.db_path, 9, days[4].date())
+    for signal_id in range(1, 10):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+    _add_outcome(db.db_path, 4, 10, 'ended')
+
+    rows = load_near_misses(db, with_history=False)
+
+    assert list(zip(rows['signal_id'], rows['horizon'], strict=True)) == [
+        (1, 5), (5, 5), (6, 5), (7, 5), (8, 5), (4, 5), (4, 10)
+    ]  # fmt: skip
+    conditions = dict(zip(rows['signal_id'], rows['condition'], strict=True))
+    assert conditions == {1: VOLUME, 5: BREAKOUT, 6: ABOVE_SMA50, 7: SMA50_RISING, 8: MARGIN, 4: VOLUME}
+    assert list(rows['censored']) == [False] * 6 + [True]
+
+
+def test_a_session_the_market_did_not_trade_ends_no_near_miss_event(db):
+    # Friday and the next Monday are consecutive sessions, the weekend between them no session
+    friday, monday = date(2020, 1, 3), date(2020, 1, 6)
+    _add_benchmark(db.db_path, 'benchmark_price', pd.Series(100.0, index=pd.to_datetime([friday, monday])))
+    _add_near_miss(db.db_path, 1, friday, VOLUME)
+    _add_near_miss(db.db_path, 2, monday, VOLUME, ticker='T1')
+    for signal_id in (1, 2):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+
+    assert list(load_near_misses(db, with_history=False)['signal_id']) == [1]
+
+
+def test_the_near_miss_dataset_reads_one_screener_version_and_no_other_kind(db):
+    day = date(2020, 1, 2)
+    _add_near_miss(db.db_path, 1, day, VOLUME)
+    _add_near_miss(db.db_path, 2, day, VOLUME, ticker='T1', screener_version='1.1.0')
+    _add_signal(db.db_path, 3, day)
+    _add_signal(db.db_path, 4, day, status='pre_breakout', kind='watchlist')
+    _add_near_miss(db.db_path, 5, day, VOLUME)  # no resolved horizon
+    for signal_id in (1, 2, 3, 4):
+        _add_outcome(db.db_path, signal_id, 5, 'complete')
+    _add_outcome(db.db_path, 5, 5, 'pending')
+
+    assert list(load_near_misses(db, with_history=False)['signal_id']) == [1]
+    assert list(load_near_misses(db, with_history=False, screener_version='1.1.0')['signal_id']) == [2]

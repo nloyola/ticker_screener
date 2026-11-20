@@ -1,7 +1,7 @@
 """
 The whole BreakoutIQ analysis as one run: the dataset built once from the archive, every section run on it in order
-(SECTIONS), and the run stored in analysis_run with every section's results in analysis_result, in one transaction,
-so a reader never sees a run with only some of its results.
+(SECTIONS), the strength test with the near-miss dataset beside it, and the run stored in analysis_run with every
+section's results in analysis_result, in one transaction, so a reader never sees a run with only some of its results.
 
 The run records the settings it ran with (settings()): its thresholds (thresholds.py, the named defaults unless the
 command was told otherwise), every other named constant a section reads, the indicators, outcomes, splits and
@@ -35,20 +35,22 @@ logger = logging.getLogger(__name__)
 class Section:
     """
     A section: its name, payload version and analysis, which takes the dataset and the thresholds, and, when
-    'reads_earlier', the results of the sections before it in the run.
+    'reads_earlier', the results of the sections before it in the run, or, when 'reads_near_misses', the near-miss
+    dataset.
     """
 
     name: str
     payload_version: int
     analyse: Callable[..., list[AnalysisResult]]
     reads_earlier: bool = False
+    reads_near_misses: bool = False
 
 
 # every section, in the order it runs and its results are stored; the models read the rules candidates validated
 SECTIONS = (
     Section(baseline.SECTION, baseline.PAYLOAD_VERSION, baseline.baseline),
     Section(indicators.SECTION, indicators.PAYLOAD_VERSION, indicators.indicators),
-    Section(mandatory.SECTION, mandatory.PAYLOAD_VERSION, mandatory.mandatory),
+    Section(mandatory.SECTION, mandatory.PAYLOAD_VERSION, mandatory.mandatory, reads_near_misses=True),
     Section(confounders.SECTION, confounders.PAYLOAD_VERSION, confounders.confounders),
     Section(candidates.SECTION, candidates.PAYLOAD_VERSION, candidates.candidates),
     Section(predictive.SECTION, predictive.PAYLOAD_VERSION, predictive.predictive, reads_earlier=True),
@@ -59,11 +61,12 @@ SECTIONS = (
 class AnalysisSummary:
     """
     What a run read and stored: the run's id, its data's extent (the signals with a resolved horizon), how many of
-    them have no regime, and each section's result count and seconds.
+    them have no regime, the near-miss events with a resolved horizon, and each section's result count and seconds.
     """
 
     run_id: int
     signals: int
+    near_misses: int
     rows: int
     censored: int
     no_regime: int
@@ -96,6 +99,8 @@ def settings(thresholds: Thresholds = DEFAULTS) -> dict:
         'flags': list(indicators.FLAGS),
         'composites': list(indicators.COMPOSITES),
         'strengths': list(mandatory.STRENGTHS),
+        'near_miss_conditions': list(mandatory.CONDITIONS),
+        'near_miss_horizons': list(mandatory.NEAR_MISS_HORIZONS),
         'confounder_indicators': list(confounders.INDICATORS),
         'confounder_controls': list(confounders.CONTROLS),
         'initial_train_share': walkforward.INITIAL_TRAIN_SHARE,
@@ -118,22 +123,28 @@ def settings(thresholds: Thresholds = DEFAULTS) -> dict:
 
 
 def analyse(
-    rows: pd.DataFrame, thresholds: Thresholds = DEFAULTS, seconds: dict[str, float] | None = None
+    rows: pd.DataFrame,
+    thresholds: Thresholds = DEFAULTS,
+    seconds: dict[str, float] | None = None,
+    near_misses: pd.DataFrame | None = None,
 ) -> list[AnalysisResult]:
     """
     Every section's results from the analysis dataset (dataset.build_dataset), judged by 'thresholds', SECTIONS in
-    order; none when the dataset is empty. Each section's run time goes into 'seconds' when given.
+    order, the strength test comparing the near-miss dataset 'near_misses' (dataset.near_miss_dataset) with the
+    signals when given; none when the analysis dataset is empty. Each section's run time goes into 'seconds' when
+    given.
     """
     if rows.empty:
         return []
     results = []
     for section in SECTIONS:
         start = time.monotonic()
-        found = (
-            section.analyse(rows, thresholds, list(results))
-            if section.reads_earlier
-            else section.analyse(rows, thresholds)
-        )
+        if section.reads_earlier:
+            found = section.analyse(rows, thresholds, list(results))
+        elif section.reads_near_misses:
+            found = section.analyse(rows, thresholds, near_misses)
+        else:
+            found = section.analyse(rows, thresholds)
         elapsed = time.monotonic() - start
         if seconds is not None:
             seconds[section.name] = elapsed
@@ -150,13 +161,15 @@ class Analysis:
 
     def run(self, thresholds: Thresholds = DEFAULTS) -> AnalysisSummary:
         """
-        Builds the dataset from the archive, the regime of a backfilled signal read from the price history
-        (MissingHistory without it), runs every section by 'thresholds' and stores the run with its results.
+        Builds the dataset and the near-miss dataset from the archive, the regime of a backfilled signal and the
+        sessions of a backfilled near-miss read from the price history (MissingHistory without it), runs every section
+        by 'thresholds' and stores the run with its results.
         """
         started_at = datetime.now(UTC)
         rows = data.load_dataset(self.container, with_history=True)
+        near_misses = data.load_near_misses(self.container, with_history=True)
         seconds: dict[str, float] = {}
-        results = analyse(rows, thresholds, seconds)
+        results = analyse(rows, thresholds, seconds, near_misses)
         signals = rows.drop_duplicates('signal_id')
         first = signals['session_date'].min().date() if len(signals) else None
         last = signals['session_date'].max().date() if len(signals) else None
@@ -175,6 +188,7 @@ class Analysis:
         return AnalysisSummary(
             run_id=run_id,
             signals=len(signals),
+            near_misses=near_misses['signal_id'].nunique(),
             rows=len(rows),
             censored=int(rows['censored'].sum()) if len(rows) else 0,
             no_regime=int(signals['regime'].isna().sum()) if len(signals) else 0,
@@ -191,7 +205,8 @@ def summarize(summary: AnalysisSummary) -> None:
     print(
         f'breakoutiq-analysis: read {summary.signals} signal{"" if summary.signals == 1 else "s"} with a resolved '
         f'horizon{extent}, {summary.rows} resolved horizon{"" if summary.rows == 1 else "s"}, {summary.censored} of '
-        f'them censored, {summary.no_regime} signal{"" if summary.no_regime == 1 else "s"} with no regime'
+        f'them censored, {summary.no_regime} signal{"" if summary.no_regime == 1 else "s"} with no regime, '
+        f'{summary.near_misses} near-miss event{"" if summary.near_misses == 1 else "s"} with a resolved horizon'
     )
     for name, count in summary.results.items():
         took = f' in {summary.seconds[name]:.0f}s' if name in summary.seconds else ''
