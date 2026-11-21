@@ -8,6 +8,7 @@ read; ScreenExport reads them and writes the file, replacing one of the same as-
 
 import json
 import logging
+import math
 import os
 import tempfile
 from collections import Counter
@@ -28,8 +29,8 @@ from app.analyzer import (
     rule_settings,
 )
 from app.container import Container
-from app.export_settings import EXPORT_VERSION, WIDE_RISK_PCT, export_settings
-from app.markets import CANADA, MARKETS, US, UnsupportedTicker, exchange_of, market_of
+from app.export_settings import EXPORT_VERSION, FOLLOW_UP_SESSIONS, WIDE_RISK_PCT, export_settings
+from app.markets import CANADA, MARKETS, US, UnsupportedTicker, exchange_of, first_of_sessions, market_of
 from app.models import StockCriteria
 from app.provenance import git_commit
 from app.repositories.screen_export_repo import DayRange, ExportRow, FollowUpEvent
@@ -173,7 +174,8 @@ def _flag(value: int | None) -> bool | None:
 
 
 def _float(value: float | None) -> float | None:
-    return None if value is None else float(value)
+    """'value' as a JSON number, None when it is missing or not finite (as a range over a close of 0), never 0."""
+    return None if value is None or not math.isfinite(value) else float(value)
 
 
 def _int(value: int | None) -> int | None:
@@ -200,7 +202,11 @@ def _lookback(sc: StockCriteria) -> int | None:
 
 
 def _margin_met(sc: StockCriteria) -> bool | None:
-    if sc.breakout_level is None or sc.breakout_margin_pct is None or sc.required_margin_pct is None:
+    """
+    Whether the breakout's margin cleared the margin it needed, on its breakout session alone: None on any other
+    session, since an extended session's margin is over its run's level while its required margin is its own.
+    """
+    if sc.sessions_since_breakout != 0 or sc.breakout_margin_pct is None or sc.required_margin_pct is None:
         return None
     return sc.breakout_margin_pct >= sc.required_margin_pct
 
@@ -212,6 +218,7 @@ def _breakout_pass(sc: StockCriteria) -> bool | None:
 
 
 def _secondary_value(sc: StockCriteria, day: DayRange, column: str) -> object:
+    """The export's value of the stock_criteria 'column', or of the day's high or low, for a secondary check."""
     if column == 'high':
         return _float(day.high)
     if column == 'low':
@@ -243,9 +250,8 @@ def export_row(
     issuer: str | None,
     primary: bool,
     exchange: str | None,
-    day: DayRange,
 ) -> dict:
-    """One row of the export ('rows'), from its stored criteria, its rank, issuer, exchange and the day's range."""
+    """One row of the export ('rows'), from its stored criteria and day's range, its rank, issuer and exchange."""
     sc = row.criteria
     market = market_of(sc.ticker)
     level = _float(sc.breakout_level)
@@ -294,7 +300,7 @@ def export_row(
             },
             'core_score': _int(sc.core_criteria_score),
         },
-        'secondary': _secondary(sc, day),
+        'secondary': _secondary(sc, row.day),
         'context': {
             'dist_high_20d_pct': _float(sc.dist_high_20d_pct),
             'dist_high_60d_pct': _float(sc.dist_high_60d_pct),
@@ -347,13 +353,12 @@ def build_export(
     follow_ups: Sequence[FollowUpEvent],
     issuers: Mapping[str, str],
     exchanges: Mapping[str, str],
-    day_ranges: Mapping[str, DayRange],
 ) -> dict:
     """
     The export of one run as a JSON-ready object: its header ('header', with the status counts and the universe
     derived here), its 'rows', ranked, and its 'follow_up'. 'issuers' maps each issuer's listings, upper case, to its
-    primary (IssuerRepo.listings), 'exchanges' a bare US ticker, upper case, to the exchange the security master
-    records, and 'day_ranges' each row's ticker to its session's high and low.
+    primary (IssuerRepo.listings), and 'exchanges' a bare US ticker, upper case, to the exchange the security master
+    records.
     """
 
     def is_primary(row: ExportRow) -> bool:
@@ -362,8 +367,8 @@ def build_export(
 
     primaries = sorted((r for r in rows if is_primary(r)), key=_rank_key)
     others = sorted((r for r in rows if not is_primary(r)), key=_rank_key)
-    out_rows = [_row(row, rank, issuers, exchanges, day_ranges) for rank, row in enumerate(primaries, start=1)]
-    out_rows.extend(_row(row, None, issuers, exchanges, day_ranges) for row in others)
+    out_rows = [_row(row, rank, issuers, exchanges) for rank, row in enumerate(primaries, start=1)]
+    out_rows.extend(_row(row, None, issuers, exchanges) for row in others)
     counts = Counter(r.criteria.status for r in rows)
     sessions = {market: _iso(header.sessions[market][0]) if market in header.sessions else None for market in MARKETS}
     return {
@@ -397,7 +402,6 @@ def _row(
     rank: int | None,
     issuers: Mapping[str, str],
     exchanges: Mapping[str, str],
-    day_ranges: Mapping[str, DayRange],
 ) -> dict:
     ticker = row.criteria.ticker
     issuer = issuers.get(ticker.upper())
@@ -407,7 +411,6 @@ def _row(
         issuer=issuer,
         primary=rank is not None,
         exchange=exchange_of(ticker) or exchanges.get(ticker.upper()),
-        day=day_ranges.get(ticker, DayRange(None, None)),
     )
 
 
@@ -472,10 +475,11 @@ class ScreenExport:
         export = build_export(
             header,
             rows,
-            self.repo.follow_ups(dates, SCREENER_VERSION),
+            self.repo.follow_ups(
+                {m: (first_of_sessions(m, d, FOLLOW_UP_SESSIONS), d) for m, d in dates.items()}, SCREENER_VERSION
+            ),
             self.issuer_repo.listings(),
             self.security_state_repo.exchanges(),
-            self.repo.day_ranges((r.criteria.ticker, r.session_date) for r in rows),
         )
         content = json.dumps(export, ensure_ascii=False, allow_nan=False, indent=1) + '\n'
         path = write_atomically(self.directory, export_file_name(date.fromisoformat(export['run']['as_of'])), content)

@@ -1291,7 +1291,7 @@ def test_a_breakout_a_watchlist_ticker_and_the_next_days_failure_store_every_exp
     assert signals['BRK']['exchange'] == 'NYSE'
 
     # the next session BRK closes at 197.9, below the exact 198 level: the breakout failed, and a session that fails
-    # it is no retest, which stays undecided until its 10 sessions are in the path
+    # the failure decides it was not retested, at once
     next_day = shift(TODAY, 1)
     container.price_data_repo.bulk_insert([replace(price_rows('BRK', next_day, n=1)[0], close=197.9)])
     started = datetime.combine(next_day, time(20), tzinfo=NEW_YORK)
@@ -1308,7 +1308,7 @@ def test_a_breakout_a_watchlist_ticker_and_the_next_days_failure_store_every_exp
             'SELECT avg_volume_20d FROM signal_price WHERE signal_id = ? ORDER BY session_index',
             (signals['BRK']['id'],),
         ).fetchall()
-    assert track == (198.0, 1, next_day.isoformat(), None, None)
+    assert track == (198.0, 1, next_day.isoformat(), 0, None)
     # the breakout's 20 sessions before it on 1,000,000 shares, then 19 of those and its own 2,000,000
     assert averages == [(1_000_000.0,), (1_050_000.0,)]
 

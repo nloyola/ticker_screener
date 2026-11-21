@@ -262,6 +262,24 @@ def test_a_session_closing_below_the_level_fails_the_breakout_and_is_never_a_ret
     assert outcomes.retest == Retest(False, None)
 
 
+def test_a_quiet_touch_after_the_breakout_failed_is_not_a_retest():
+    path = held(RETEST_SESSIONS + 1)
+    path[1] = session(1, 99.5, 103.0, 103.5, 99.0)  # fails the breakout
+    path[4] = session(4, 101.0, 104.0, 104.5, 100.3)  # a quiet touch of the level that closes above it
+
+    outcomes = compute_outcomes(path, signal_close=104.0, level=100.0)
+
+    assert outcomes.failure == BreakoutFailure(level=100.0, failed=True, failure_date=day(1))
+    assert outcomes.retest == Retest(False, None)
+
+
+def test_a_failed_breakout_decides_the_retest_before_the_window_is_complete():
+    path = held(3)
+    path[2] = session(2, 99.5, 103.0, 103.5, 99.0)
+
+    assert compute_outcomes(path, signal_close=104.0, level=100.0).retest == Retest(False, None)
+
+
 def test_a_session_after_the_window_is_not_a_retest():
     path = held(RETEST_SESSIONS + 2)
     path[RETEST_SESSIONS + 1] = session(RETEST_SESSIONS + 1, 102.0, 104.0, 104.5, 100.9)

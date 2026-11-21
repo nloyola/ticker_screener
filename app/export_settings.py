@@ -1,8 +1,9 @@
 """
 The settings of the values the screen export reports beside the scores (the parent's issue #70, "Export design"): the
-swing low each scored session carries, the wide-risk cut-off, and the Retest the signal tracking decides beside the
-breakout failure. None of them decides a status or a score, so they are not rule settings (rule_settings() in
-app/analyzer.py) and changing one leaves SCREENER_VERSION as it is: the export's own version names them instead.
+swing low each scored session carries, the wide-risk cut-off, the Retest the signal tracking decides beside the
+breakout failure, and how far back the follow-up events reach. None of them decides a status or a score, so they are
+not rule settings (rule_settings() in app/analyzer.py) and changing one leaves SCREENER_VERSION as it is: the export's
+own version names them instead.
 """
 
 # The screen export's schema version (app/screen_export.py), the run header's export_version: bumped when a field is
@@ -20,6 +21,10 @@ WIDE_RISK_PCT = 8.0
 # on volume below its prior 20-day average.
 RETEST_SESSIONS = 10
 RETEST_TOUCH_PCT = 1.0
+# The follow-up events (app/screen_export.py): every breakout failure and retest dated in the FOLLOW_UP_SESSIONS
+# sessions of its market up to the file's session, so one a later run decided, or dated on a session whose file was
+# never written, is still exported; an event appears in each file whose window holds its date.
+FOLLOW_UP_SESSIONS = 10
 
 
 def export_settings() -> dict[str, object]:
@@ -30,4 +35,5 @@ def export_settings() -> dict[str, object]:
         'WIDE_RISK_PCT': WIDE_RISK_PCT,
         'RETEST_SESSIONS': RETEST_SESSIONS,
         'RETEST_TOUCH_PCT': RETEST_TOUCH_PCT,
+        'FOLLOW_UP_SESSIONS': FOLLOW_UP_SESSIONS,
     }

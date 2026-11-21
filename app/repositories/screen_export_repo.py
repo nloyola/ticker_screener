@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -35,8 +35,9 @@ class DayRange:
 class ExportRow:
     """
     One ticker with a status on its market's session, as stock_criteria holds it: its criteria, that session, the
-    names of its subsector and sector (None when it is in none) and the id of its record in the signal archive under
-    the screener version asked for (None when it has none, as a listing that is not its issuer's primary).
+    names of its subsector and sector (None when it is in none), the id of its record in the signal archive under
+    the screener version asked for (None when it has none, as a listing that is not its issuer's primary) and its
+    high and low on that session (price_data).
     """
 
     criteria: StockCriteria
@@ -44,6 +45,7 @@ class ExportRow:
     sector: str | None
     subsector: str | None
     archive_id: int | None
+    day: DayRange
 
 
 @dataclass(frozen=True)
@@ -85,11 +87,13 @@ class ScreenExportRepo:
         """
         columns = ', '.join(f'sc.{c}' for c in ('id', *_CRITERIA_FIELDS, 'date_created'))
         sql = f"""
-        SELECT {columns}, se.sector AS sector_name, su.subsector AS subsector_name, s.id AS archive_id
+        SELECT {columns}, se.sector AS sector_name, su.subsector AS subsector_name, s.id AS archive_id,
+               p.high AS day_high, p.low AS day_low
           FROM stock_criteria sc
           LEFT JOIN subsector su ON su.id = sc.subsector_id
           LEFT JOIN sector se ON se.id = su.sector_id
           LEFT JOIN signal s ON s.ticker = sc.ticker AND s.session_date = sc.date_created AND s.screener_version = ?
+          LEFT JOIN price_data p ON p.ticker = sc.ticker AND p.date = sc.date_created
          WHERE sc.status IS NOT NULL AND {market_sql('sc.ticker')} = ? AND sc.date_created = ?
          ORDER BY sc.ticker
         """
@@ -106,41 +110,31 @@ class ScreenExportRepo:
                             sector=row['sector_name'],
                             subsector=row['subsector_name'],
                             archive_id=row['archive_id'],
+                            day=DayRange(row['day_high'], row['day_low']),
                         )
                     )
         return found
 
-    def day_ranges(self, wanted: Iterable[tuple[str, date]]) -> dict[str, DayRange]:
-        """Each (ticker, session) of 'wanted' with a price_data row, mapped by ticker to that session's range."""
-        found: dict[str, DayRange] = {}
-        with connect(self.db_path) as con:
-            for ticker, session_date in wanted:
-                row = con.execute(
-                    'SELECT high, low FROM price_data WHERE ticker = ? AND date = ?', (ticker, session_date.isoformat())
-                ).fetchone()
-                if row is not None:
-                    found[ticker] = DayRange(row['high'], row['low'])
-        return found
-
-    def follow_ups(self, sessions: Mapping[str, date], screener_version: str) -> list[FollowUpEvent]:
+    def follow_ups(self, windows: Mapping[str, tuple[date, date]], screener_version: str) -> list[FollowUpEvent]:
         """
         Each breakout failure and retest of a signal (kind signal) of 'screener_version', live or backfill, of each
-        market in 'sessions' that happened on that market's session, by session, ticker and event.
+        market in 'windows' that happened from the first to the last session of that market's window, by session,
+        ticker and event.
         """
         found: list[FollowUpEvent] = []
         with connect(self.db_path) as con:
-            for market, session_date in sessions.items():
+            for market, (first, last) in windows.items():
                 for event, column in _EVENT_DATES.items():
                     rows = con.execute(
                         f"""
-                        SELECT s.id, s.ticker, s.market, s.session_date, t.breakout_level,
+                        SELECT s.id, s.ticker, s.market, s.session_date, t.breakout_level, t.{column} AS event_date,
                                p.session_index, p.close, p.low, p.volume, p.avg_volume_20d
                           FROM signal_track t
                           JOIN signal s ON s.id = t.signal_id
                           LEFT JOIN signal_price p ON p.signal_id = s.id AND p.session_date = t.{column}
-                         WHERE s.kind = ? AND s.screener_version = ? AND s.market = ? AND t.{column} = ?
+                         WHERE s.kind = ? AND s.screener_version = ? AND s.market = ? AND t.{column} BETWEEN ? AND ?
                         """,
-                        (SIGNAL_KIND, screener_version, market, session_date.isoformat()),
+                        (SIGNAL_KIND, screener_version, market, first.isoformat(), last.isoformat()),
                     )
                     found.extend(
                         FollowUpEvent(
@@ -150,7 +144,7 @@ class ScreenExportRepo:
                             breakout_date=date.fromisoformat(row['session_date']),
                             breakout_level=row['breakout_level'],
                             event=event,
-                            event_date=session_date,
+                            event_date=date.fromisoformat(row['event_date']),
                             sessions_after_breakout=row['session_index'],
                             close=row['close'],
                             low=row['low'],

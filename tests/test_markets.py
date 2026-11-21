@@ -8,7 +8,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.markets import CANADA, US, UnsupportedTicker, exchange_of, is_holiday, is_session, last_complete_session
+from app.markets import (
+    CANADA,
+    US,
+    UnsupportedTicker,
+    exchange_of,
+    first_of_sessions,
+    is_holiday,
+    is_session,
+    last_complete_session,
+)
 
 NEW_YORK = ZoneInfo('America/New_York')
 TORONTO = ZoneInfo('America/Toronto')
@@ -113,3 +122,18 @@ def test_is_holiday_matches_the_published_calendar(market, year):
 )
 def test_is_session(market, day, expected):
     assert is_session(market, day) is expected
+
+
+@pytest.mark.parametrize(
+    ('market', 'last', 'sessions', 'expected'),
+    [
+        (US, date(2026, 11, 20), 1, date(2026, 11, 20)),
+        # Friday back over a weekend: Friday and the four weekdays before it
+        (US, date(2026, 11, 20), 6, date(2026, 11, 13)),
+        # back over Thanksgiving, Thursday 26 November 2026, which the TSX trades
+        (US, date(2026, 11, 27), 3, date(2026, 11, 24)),
+        (CANADA, date(2026, 11, 27), 3, date(2026, 11, 25)),
+    ],
+)
+def test_first_of_sessions_counts_back_over_the_markets_closed_days(market, last, sessions, expected):
+    assert first_of_sessions(market, last, sessions) == expected

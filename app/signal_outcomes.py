@@ -66,10 +66,10 @@ class Retest:
     Whether the breakout was retested (RETEST_SESSIONS, RETEST_TOUCH_PCT in app/export_settings.py): retested is True,
     with the first such session, as soon as one of the RETEST_SESSIONS sessions after the signal session has a low at
     most RETEST_TOUCH_PCT percent above the level (or below it) while its close holds at or above the level, on volume
-    below its prior average volume (PathSession.avg_volume_20d); False once all of them are in the path and none was;
-    None while undecided, and for good when a session before the first retest lacks its volume or its prior average,
-    as in a path written before the average was kept. A session closing below the level fails the breakout
-    (BreakoutFailure) and is never a retest.
+    below its prior average volume (PathSession.avg_volume_20d); False once all of them are in the path and none was,
+    or at once on a session closing below the level, which fails the breakout (BreakoutFailure), so no later session
+    is a retest; None while undecided, and for good when a session before the first retest lacks its volume or its
+    prior average, as in a path written before the average was kept.
     """
 
     retested: bool | None
@@ -188,6 +188,9 @@ def _retest(path: Sequence[PathSession], level: float) -> Retest:
     window = path[1 : RETEST_SESSIONS + 1]
     touch = level * (1 + RETEST_TOUCH_PCT / 100)
     for s in window:
+        if s.close < level:
+            # the breakout failed (_failure), so it never holds on a later retest
+            return Retest(retested=False, retest_date=None)
         if s.volume is None or s.avg_volume_20d is None:
             return Retest(retested=None, retest_date=None)
         low = s.low if s.low is not None else s.close

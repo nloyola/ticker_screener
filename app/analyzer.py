@@ -697,14 +697,16 @@ def liquidity_row(runs: BreakoutRuns, row: int) -> int:
 def above_liquidity_floor(sc: StockCriteria) -> bool:
     """
     Whether 'sc' clears its market's liquidity floor: an average dollar volume of at least MIN_DOLLAR_VOLUME and a
-    close of at least MIN_PRICE. A ticker with no average dollar volume does not clear it.
+    close of at least MIN_PRICE. A ticker with no average dollar volume does not clear it. The close is rounded to
+    the cent first, as the stored price was before the export kept it unrounded (stock_analyzer#70), so a close of
+    4.996 clears a 5.00 floor and the floor stays the rule SCREENER_VERSION 2.0.0 scored by.
     """
     market = market_of(sc.ticker)
     return (
         sc.avg_dollar_volume is not None
         and sc.avg_dollar_volume >= MIN_DOLLAR_VOLUME[market]
         and sc.price is not None
-        and sc.price >= MIN_PRICE[market]
+        and round(sc.price, 2) >= MIN_PRICE[market]
     )
 
 

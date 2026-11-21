@@ -2,14 +2,15 @@
 The screen export (app/screen_export.py), against a real database: a session with a breakout, a Canadian breakout,
 a watchlist ticker and a breakout that fails the next session, scored and tracked as run-refresh does, writes one file
 per session in the schema the parent's issue #70 settles, every number equal to the stored value, unrounded, and every
-price in its listing's currency; a rerun of the session replaces the file; an issuer's non-primary listing is unranked
+price in its listing's currency; a failure is reported in each file whose FOLLOW_UP_SESSIONS window holds its session;
+a rerun of the session replaces the file; an issuer's non-primary listing is unranked
 and listed last; and a run that scored no session writes none.
 """
 
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,12 +18,12 @@ import pytest
 
 from app.analyzer import SCREENER_VERSION, SECONDARY_INDICATORS, Analyzer, rule_settings
 from app.db import init_db
-from app.export_settings import EXPORT_VERSION, export_settings
-from app.markets import CANADA, US
+from app.export_settings import EXPORT_VERSION, FOLLOW_UP_SESSIONS, export_settings
+from app.markets import CANADA, US, is_session
 from app.repositories.benchmark_price_repo import BenchmarkPriceRepo
 from app.repositories.issuer_repo import IssuerRepo
 from app.repositories.price_data_repo import PriceDataRepo
-from app.repositories.screen_export_repo import ScreenExportRepo
+from app.repositories.screen_export_repo import DayRange, ExportRow, ScreenExportRepo
 from app.repositories.screened_session_repo import ScreenedSessionRepo
 from app.repositories.sector_repo import SectorRepo
 from app.repositories.security_state_repo import SecurityStateRepo
@@ -31,10 +32,11 @@ from app.repositories.signal_path_repo import SignalPathRepo
 from app.repositories.signal_repo import SignalRepo
 from app.repositories.stock_criteria_repo import StockCriteriaRepo
 from app.repositories.subsector_repo import SubsectorRepo
-from app.screen_export import ScreenExport, export_file_name
+from app.screen_export import ScreenExport, export_file_name, export_row
 from app.services.sector_service import SectorService
 from app.signal_outcome_updates import SignalOutcomeUpdates
 from app.signal_paths import SignalPaths
+from tests.test_analyzer import flags
 from tests.test_analyzer_db import EVENING, NEW_YORK, TODAY, breakout_rows, price_rows, shift, table_rows
 from tests.test_issuer_repo import add_issuer
 from tests.test_security_state_repo import set_exchange
@@ -412,7 +414,16 @@ def test_a_session_run_twice_writes_one_file_in_the_schema_with_the_stored_value
     assert export['follow_up'] == []
 
 
-def test_the_next_sessions_failed_breakout_is_reported_once_on_its_session(path, container, export_dir):
+def us_sessions_after(day: date, sessions: int) -> date:
+    """The US session 'sessions' US sessions after 'day'."""
+    for _ in range(sessions):
+        day += timedelta(days=1)
+        while not is_session(US, day):
+            day += timedelta(days=1)
+    return day
+
+
+def test_the_next_sessions_failed_breakout_is_reported_in_each_file_whose_window_holds_it(path, container, export_dir):
     breakout_rows(path, container)
     run(container)
     brk_id = table_rows(path, 'signal')['BRK']['id']
@@ -450,6 +461,15 @@ def test_the_next_sessions_failed_breakout_is_reported_once_on_its_session(path,
     assert (close, volume) == (entry['close'], entry['volume'])
     # the breakout's own session's file reports nothing: the failure happened on the next one
     assert read(export_dir / export_file_name(TODAY))['follow_up'] == []
+
+    # a later file reports it while its window holds the failure's session, as when a later run decided it late
+    last_in_window = us_sessions_after(next_day, FOLLOW_UP_SESSIONS - 1)
+    file = container.screen_export.write({US: (last_in_window, 1)}, run_id=9, data_source='eodhd')
+    assert read(file)['follow_up'] == [entry]
+    file = container.screen_export.write(
+        {US: (us_sessions_after(last_in_window, 1), 1)}, run_id=10, data_source='eodhd'
+    )
+    assert read(file)['follow_up'] == []
 
 
 def test_an_issuers_other_listing_is_unranked_and_listed_last(path, container):
@@ -493,3 +513,30 @@ def test_a_market_the_run_did_not_score_has_no_session(path, container):
     assert header['sessions'] == {US: TODAY.isoformat(), CANADA: None}
     assert header['universe'][CANADA] == {'listed': 0, 'scored': 0}
     assert isinstance(date.fromisoformat(header['as_of']), date)
+
+
+def stored_row(**values: float | int | str | None) -> dict:
+    """The export row of a US breakout session's stored criteria, but for 'values', with no day's range."""
+    sc = flags(**({'breakout_level': 100.0, 'breakout_margin_pct': 2.0, 'required_margin_pct': 1.5} | values))
+    row = ExportRow(sc, TODAY, sector=None, subsector=None, archive_id=None, day=DayRange(None, None))
+    return export_row(row, rank=1, issuer=None, primary=True, exchange=None)
+
+
+@pytest.mark.parametrize(
+    ('sessions', 'required', 'met'),
+    [(0, 1.5, True), (0, 2.5, False), (3, 2.5, None)],
+    ids=['breakout cleared its margin', 'breakout short of it', 'extended session'],
+)
+def test_the_margin_is_judged_met_on_the_breakout_session_alone(sessions, required, met):
+    row = stored_row(sessions_since_breakout=sessions, required_margin_pct=required)
+
+    assert row['mandatory']['breakout']['margin_met'] is met
+
+
+def test_a_value_that_is_not_finite_is_exported_as_null():
+    # a session whose range window holds a close of 0 has an infinite average daily range
+    row = stored_row(sessions_since_breakout=0, average_daily_range_pct=float('inf'), volume_ratio=float('nan'))
+
+    assert row['mandatory']['breakout']['average_daily_range_pct'] is None
+    assert row['mandatory']['volume']['volume_ratio'] is None
+    json.dumps(row, allow_nan=False)

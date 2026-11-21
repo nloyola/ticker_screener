@@ -1294,6 +1294,11 @@ def test_a_breakout_below_the_price_floor_has_no_status(ticker, cents_below, sta
     assert with_status(flags(ticker=ticker, price=price)).status == status
 
 
+@pytest.mark.parametrize(('price', 'status'), [(4.996, CONFIRMED), (4.994, None)], ids=['rounds up', 'rounds down'])
+def test_the_price_floor_judges_the_close_rounded_to_the_cent(price, status):
+    assert with_status(flags(price=price)).status == status
+
+
 @pytest.mark.parametrize(
     'values',
     [

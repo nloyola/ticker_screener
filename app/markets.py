@@ -214,3 +214,13 @@ def _closed_days(market: str, year: int) -> frozenset[date]:
 def is_session(market: str, day: date) -> bool:
     """Whether 'market' trades on 'day': a weekday that is not one of its exchange's holidays."""
     return day.weekday() not in (SATURDAY, SUNDAY) and not is_holiday(market, day)
+
+
+def first_of_sessions(market: str, last: date, sessions: int) -> date:
+    """The first of the 'sessions' sessions of 'market' ending on 'last', which counts as one of them."""
+    day, counted = last, 1
+    while counted < sessions:
+        day -= timedelta(days=1)
+        if is_session(market, day):
+            counted += 1
+    return day
